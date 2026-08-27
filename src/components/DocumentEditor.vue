@@ -5,6 +5,7 @@ import { useWorkspaceStore } from '@/stores/workspace'
 import type { Page } from '@/types'
 import TiptapEditor from '@/components/TiptapEditor.vue'
 import DocumentMeta from '@/components/DocumentMeta.vue'
+import { suggestTags } from '@/services/tagging'
 
 const store = useWorkspaceStore()
 const title = ref('')
@@ -14,9 +15,12 @@ const tagDraft = ref('')
 const sourceMode = ref(false)
 const spellcheckEnabled = ref(true)
 const manualSaveNotice = ref(false)
+const tagSuggestions = ref<string[]>([])
 let manualSaveTimer: number | undefined
 
 const status = computed(() => store.saving ? '保存中…' : manualSaveNotice.value ? '已手动保存' : '已保存到本地')
+const isFavorite = computed(() => Boolean(store.activePage && store.favoritePageIds.includes(store.activePage.id)))
+const activeSource = computed(() => store.workspace?.sources.find((source) => source.id === store.activePage?.storageSourceId) ?? null)
 const wordCount = computed(() => bodyMarkdown.value
   .replace(/```[\s\S]*?```/g, '')
   .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
@@ -30,6 +34,7 @@ function loadActivePage() {
   bodyMarkdown.value = page?.markdown.replace(/^# .*\n?/, '') ?? ''
   tags.value = page?.tags ?? []
   tagDraft.value = ''
+  tagSuggestions.value = []
 }
 
 watch(() => store.activePageId, loadActivePage, { immediate: true })
@@ -71,9 +76,19 @@ function addTags(value: string) {
   if (!additions.length) return
   tags.value = [...new Set([...tags.value, ...additions])]
   tagDraft.value = ''
+  tagSuggestions.value = tagSuggestions.value.filter((tag) => !additions.includes(tag))
   onInput()
 }
 function removeTag(tag: string) { tags.value = tags.value.filter((item) => item !== tag); onInput() }
+function selectTag(tag: string) { store.openTags(tag) }
+function generateTagSuggestions() {
+  tagSuggestions.value = suggestTags({
+    title: title.value,
+    markdown: bodyMarkdown.value,
+    existingTags: tags.value,
+    workspaceTags: store.tagIndex.map((tag) => tag.name),
+  })
+}
 
 function navigateToPage(pageId: string) { store.openPage(pageId) }
 
@@ -111,16 +126,16 @@ async function createChild() {
   <main v-if="store.activePage" class="editor-pane">
     <header class="editor-header">
       <div class="breadcrumbs"><span>我的知识库</span><span>›</span><span>{{ store.activePage.title }}</span></div>
-      <div class="save-state"><span class="save-dot" :class="{ saving: store.saving }"></span>{{ status }} <button title="更多操作">···</button></div>
+      <div class="save-state"><span v-if="activeSource" class="document-source-badge" :class="activeSource.kind" :title="activeSource.path">{{ activeSource.kind === 'smb' ? 'SMB 工作区' : '本地工作区' }} · {{ activeSource.name }}</span><span class="save-dot" :class="{ saving: store.saving }"></span>{{ status }} <button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
     </header>
     <div class="editor-scroll">
       <article class="document">
         <div v-if="sourceMode" class="source-editor-panel">
-          <DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" />
+          <DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" />
           <textarea v-model="bodyMarkdown" class="source-editor" aria-label="Markdown 源码" :spellcheck="spellcheckEnabled" @input="onInput"></textarea>
         </div>
         <TiptapEditor v-else :model-value="bodyMarkdown" :pages="store.pages" :page-id="store.activePage.id" :spellcheck="spellcheckEnabled" @update:model-value="onBodyChange" @navigate="navigateToPage" @create-child="createChild">
-          <template #meta><DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" /></template>
+          <template #meta><DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" /></template>
         </TiptapEditor>
       </article>
     </div>

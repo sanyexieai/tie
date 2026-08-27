@@ -1,20 +1,30 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { workspaceService } from '@/services/workspace'
-import type { Page, PageId, PageLink, PageTreeNode, SearchResult, Workspace } from '@/types'
+import type { Page, PageId, PageLink, PageTreeNode, SearchResult, StorageKind, TagSummary, Workspace } from '@/types'
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   const workspace = ref<Workspace | null>(null)
   const pages = ref<Page[]>([])
   const activePageId = ref<PageId | null>(null)
+  const activeStorageSourceId = ref<string | null>(null)
   const showingTrash = ref(false)
   const showingSearch = ref(false)
+  const showingTags = ref(false)
+  const showingGraph = ref(false)
+  const showingRecent = ref(false)
+  const showingFavorites = ref(false)
+  const selectedTag = ref<string | null>(null)
   const searchQuery = ref('')
   const saving = ref(false)
   const initialized = ref(false)
+  const favoritePageIds = ref<PageId[]>([])
+  const recentPageIds = ref<PageId[]>([])
 
   const activePage = computed(() => pages.value.find((page) => page.id === activePageId.value && !page.deletedAt) ?? null)
   const trashedPages = computed(() => pages.value.filter((page) => page.deletedAt).sort((a, b) => b.deletedAt!.localeCompare(a.deletedAt!)))
+  const favoritePages = computed(() => favoritePageIds.value.map((id) => pages.value.find((page) => page.id === id && !page.deletedAt)).filter((page): page is Page => Boolean(page)))
+  const recentPages = computed(() => recentPageIds.value.map((id) => pages.value.find((page) => page.id === id && !page.deletedAt)).filter((page): page is Page => Boolean(page)))
   const links = computed<PageLink[]>(() => {
     const linkPattern = /\]\(tie:\/\/page\/([A-Za-z0-9_-]+)\)/g
     return pages.value.filter((page) => !page.deletedAt).flatMap((page) => {
@@ -43,6 +53,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .filter((result) => result.score > 0)
       .sort((a, b) => b.score - a.score || b.page.updatedAt.localeCompare(a.page.updatedAt))
   })
+  const tagIndex = computed<TagSummary[]>(() => {
+    const counts = new Map<string, number>()
+    pages.value.filter((page) => !page.deletedAt).forEach((page) => page.tags.forEach((tag) => counts.set(tag, (counts.get(tag) ?? 0) + 1)))
+    return [...counts.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-CN'))
+  })
+  const taggedPages = computed(() => selectedTag.value ? pages.value.filter((page) => !page.deletedAt && page.tags.includes(selectedTag.value!)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) : [])
   const tree = computed<PageTreeNode[]>(() => {
     const children = new Map<PageId | null, Page[]>()
     pages.value.filter((page) => !page.deletedAt).forEach((page) => {
@@ -61,15 +77,63 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     workspace.value = snapshot.workspace
     pages.value = snapshot.pages
     activePageId.value = snapshot.pages.find((page) => !page.deletedAt)?.id ?? null
+    activeStorageSourceId.value = snapshot.pages.find((page) => page.id === activePageId.value)?.storageSourceId ?? snapshot.workspace.sources[0]?.id ?? null
+    const preferences = workspaceService.loadPreferences(snapshot.workspace.id)
+    favoritePageIds.value = preferences.favoritePageIds
+    recentPageIds.value = preferences.recentPageIds
     initialized.value = true
   }
 
-  async function createPage(parentId: PageId | null) {
-    const page = await workspaceService.createPage(parentId)
-    pages.value.push(page)
-    activePageId.value = page.id
+  async function addStorageSource(kind: StorageKind = 'local') {
+    const knownSourceIds = new Set(workspace.value?.sources.map((source) => source.id) ?? [])
+    const snapshot = await workspaceService.addStorageSource(kind)
+    if (!snapshot) return false
+    workspace.value = snapshot.workspace
+    pages.value = snapshot.pages
+    activeStorageSourceId.value = snapshot.workspace.sources.find((source) => !knownSourceIds.has(source.id))?.id ?? activeStorageSourceId.value ?? snapshot.workspace.sources[0]?.id ?? null
+    const preferences = workspaceService.loadPreferences(snapshot.workspace.id)
+    favoritePageIds.value = preferences.favoritePageIds
+    recentPageIds.value = preferences.recentPageIds
     showingTrash.value = false
     showingSearch.value = false
+    showingTags.value = false
+    showingGraph.value = false
+    showingRecent.value = false
+    showingFavorites.value = false
+    return true
+  }
+
+  function persistPreferences() {
+    if (!workspace.value) return
+    workspaceService.savePreferences(workspace.value.id, {
+      favoritePageIds: favoritePageIds.value,
+      recentPageIds: recentPageIds.value,
+    })
+  }
+
+  function markRecentlyOpened(pageId: PageId) {
+    recentPageIds.value = [pageId, ...recentPageIds.value.filter((id) => id !== pageId)].slice(0, 15)
+    persistPreferences()
+  }
+
+  function toggleFavorite(pageId: PageId) {
+    favoritePageIds.value = favoritePageIds.value.includes(pageId)
+      ? favoritePageIds.value.filter((id) => id !== pageId)
+      : [pageId, ...favoritePageIds.value]
+    persistPreferences()
+  }
+
+  async function createPage(parentId: PageId | null) {
+    const parent = parentId ? pages.value.find((item) => item.id === parentId) : null
+    const storageSourceId = parent?.storageSourceId ?? activeStorageSourceId.value ?? workspace.value?.sources[0]?.id
+    if (!storageSourceId) throw new Error('请先连接一个存储源')
+    const page = await workspaceService.createPage(parentId, storageSourceId)
+    pages.value.push(page)
+    activePageId.value = page.id
+    markRecentlyOpened(page.id)
+    showingTrash.value = false
+    showingSearch.value = false
+    showingTags.value = false
     return page
   }
 
@@ -107,10 +171,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function createChildPage(parentId: PageId) {
     const parent = pages.value.find((page) => page.id === parentId)
-    const child = await workspaceService.createPage(parentId)
+    if (!parent) throw new Error('父页面不存在')
+    const child = await workspaceService.createPage(parentId, parent.storageSourceId)
     pages.value.push(child)
     if (parent) await syncChildPageLinks(parent.id)
     activePageId.value = child.id
+    markRecentlyOpened(child.id)
     showingTrash.value = false
     return child
   }
@@ -258,12 +324,17 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return true
   }
 
-  function openPage(pageId: PageId) { activePageId.value = pageId; showingTrash.value = false; showingSearch.value = false }
-  function openTrash() { showingTrash.value = true; showingSearch.value = false }
-  function openSearch() { showingSearch.value = true; showingTrash.value = false }
+  function openPage(pageId: PageId) { activePageId.value = pageId; activeStorageSourceId.value = pages.value.find((page) => page.id === pageId)?.storageSourceId ?? activeStorageSourceId.value; markRecentlyOpened(pageId); showingTrash.value = false; showingSearch.value = false; showingTags.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
+  function selectStorageSource(sourceId: string) { activeStorageSourceId.value = sourceId }
+  function openTrash() { showingTrash.value = true; showingSearch.value = false; showingTags.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
+  function openSearch() { showingSearch.value = true; showingTrash.value = false; showingTags.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
+  function openTags(tag: string | null = null) { selectedTag.value = tag; showingTags.value = true; showingTrash.value = false; showingSearch.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
+  function openGraph() { showingGraph.value = true; showingTrash.value = false; showingSearch.value = false; showingTags.value = false; showingRecent.value = false; showingFavorites.value = false }
+  function openRecent() { showingRecent.value = true; showingFavorites.value = false; showingTrash.value = false; showingSearch.value = false; showingTags.value = false; showingGraph.value = false }
+  function openFavorites() { showingFavorites.value = true; showingRecent.value = false; showingTrash.value = false; showingSearch.value = false; showingTags.value = false; showingGraph.value = false }
   function pageById(pageId: PageId) { return pages.value.find((page) => page.id === pageId) ?? null }
   function outgoingLinks(pageId: PageId) { return links.value.filter((link) => link.fromPageId === pageId).map((link) => pageById(link.toPageId)).filter((page): page is Page => Boolean(page && !page.deletedAt)) }
   function backlinks(pageId: PageId) { return links.value.filter((link) => link.toPageId === pageId).map((link) => pageById(link.fromPageId)).filter((page): page is Page => Boolean(page && !page.deletedAt)) }
 
-  return { workspace, pages, activePageId, activePage, saving, initialized, tree, trashedPages, showingTrash, showingSearch, searchQuery, searchResults, links, initialize, createPage, createChildPage, persist, trashPage, restorePage, movePage, reorderPage, openPage, openTrash, openSearch, outgoingLinks, backlinks }
+  return { workspace, pages, activePageId, activePage, activeStorageSourceId, saving, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, selectedTag, tagIndex, taggedPages, searchQuery, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, initialize, addStorageSource, selectStorageSource, createPage, createChildPage, persist, trashPage, restorePage, movePage, reorderPage, toggleFavorite, openPage, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, outgoingLinks, backlinks }
 })

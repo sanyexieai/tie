@@ -1,4 +1,12 @@
 export type PageId = string
+export type StorageKind = 'local' | 'smb'
+
+export interface StorageSource {
+  id: string
+  name: string
+  kind: StorageKind
+  path: string
+}
 
 export interface Page {
   id: PageId
@@ -10,12 +18,13 @@ export interface Page {
   createdAt: string
   updatedAt: string
   deletedAt: string | null
+  storageSourceId: string
 }
 
 export interface Workspace {
   id: string
   name: string
-  path: string
+  sources: StorageSource[]
 }
 
 export interface PageTreeNode extends Page {
@@ -33,7 +42,17 @@ export interface SearchResult {
   snippet: string
 }
 
+export interface TagSummary {
+  name: string
+  count: number
+}
+
 export interface WorkspaceSnapshot {
   workspace: Workspace
   pages: Page[]
+}
+
+export interface WorkspacePreferences {
+  favoritePageIds: PageId[]
+  recentPageIds: PageId[]
 }

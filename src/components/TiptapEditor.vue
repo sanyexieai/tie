@@ -16,12 +16,16 @@ import type { Page } from '@/types'
 const props = defineProps<{ modelValue: string; pages: Page[]; pageId: string; spellcheck: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
 const showPagePicker = ref(false)
+const pagePickerMode = ref<'slash' | 'wiki'>('slash')
 const pageQuery = ref('')
+const wikiQuery = ref('')
+const wikiStart = ref<number | null>(null)
+const selectedPageIndex = ref(0)
 const slashQuery = ref<string | null>(null)
 const slashStart = ref<number | null>(null)
 const selectedCommandIndex = ref(0)
 const matchingPages = computed(() => {
-  const query = pageQuery.value.trim().toLocaleLowerCase()
+  const query = (pagePickerMode.value === 'wiki' ? wikiQuery.value : pageQuery.value).trim().toLocaleLowerCase()
   return props.pages.filter((page) => !page.deletedAt && (!query || page.title.toLocaleLowerCase().includes(query))).slice(0, 8)
 })
 const childPageIds = computed(() => new Set(props.pages.filter((page) => page.parentId === props.pageId && !page.deletedAt).map((page) => page.id)))
@@ -44,7 +48,7 @@ const slashCommands: SlashCommand[] = [
   { id: 'code', label: '代码块', hint: '带语法标记的代码', keywords: ['code', '代码'], run: (editor) => editor.chain().focus().toggleCodeBlock().run() },
   { id: 'table', label: '表格', hint: '插入 3 × 3 表格', keywords: ['table', '表格'], run: (editor) => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run() },
   { id: 'divider', label: '分割线', hint: '分隔内容区域', keywords: ['divider', '分割', 'horizontal'], run: (editor) => editor.chain().focus().setHorizontalRule().run() },
-  { id: 'page-link', label: '链接页面', hint: '关联知识库中的页面', keywords: ['link', 'page', '链接', '关联', '页面'], run: () => { showPagePicker.value = true } },
+  { id: 'page-link', label: '链接页面', hint: '关联知识库中的页面', keywords: ['link', 'page', '链接', '关联', '页面'], run: () => openSlashPagePicker() },
   { id: 'child-page', label: '子页面', hint: '在当前页面下创建页面', keywords: ['page', 'child', '页面', '子页面'], run: () => emit('create-child') },
 ]
 
@@ -110,6 +114,32 @@ const editor = useEditor({
     attributes: { class: 'tiptap-content', spellcheck: String(props.spellcheck) },
     handleDOMEvents: { click: (_view, event) => handleEditorClick(event) },
     handleKeyDown: (_view, event) => {
+      if (showPagePicker.value && pagePickerMode.value === 'wiki') {
+        if (!matchingPages.value.length && ['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) {
+          event.preventDefault()
+          return true
+        }
+        if (event.key === 'ArrowDown') {
+          event.preventDefault()
+          selectedPageIndex.value = (selectedPageIndex.value + 1) % matchingPages.value.length
+          return true
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault()
+          selectedPageIndex.value = (selectedPageIndex.value - 1 + matchingPages.value.length) % matchingPages.value.length
+          return true
+        }
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          insertPageLink(matchingPages.value[selectedPageIndex.value])
+          return true
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          closePagePicker()
+          return true
+        }
+      }
       if (slashQuery.value === null) return false
       if (!filteredCommands.value.length && ['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) {
         event.preventDefault()
@@ -141,10 +171,10 @@ const editor = useEditor({
   onCreate: () => void nextTick(decorateChildPageLinks),
   onUpdate: ({ editor: currentEditor }) => {
     if (!syncingExternalValue) emit('update:modelValue', currentEditor.getMarkdown())
-    updateSlashState(currentEditor)
+    updateMenus(currentEditor)
     void nextTick(decorateChildPageLinks)
   },
-  onSelectionUpdate: ({ editor: currentEditor }) => updateSlashState(currentEditor),
+  onSelectionUpdate: ({ editor: currentEditor }) => updateMenus(currentEditor),
 })
 
 watch(() => props.modelValue, (markdown) => {
@@ -169,20 +199,38 @@ function decorateChildPageLinks() {
 
 function insertPageLink(page: Page) {
   const current = editor.value
-  if (!current) return
+  if (!current || !page) return
   const href = `tie://page/${page.id}`
-  if (current.state.selection.empty) {
+  if (pagePickerMode.value === 'wiki' && wikiStart.value !== null) {
+    current.chain().focus().deleteRange({ from: wikiStart.value, to: current.state.selection.from }).insertContent({ type: 'text', text: page.title, marks: [{ type: 'link', attrs: { href } }] }).run()
+  } else if (current.state.selection.empty) {
     current.chain().focus().insertContent({ type: 'text', text: page.title, marks: [{ type: 'link', attrs: { href } }] }).run()
   } else {
     current.chain().focus().extendMarkRange('link').setLink({ href }).run()
   }
-  showPagePicker.value = false
-  pageQuery.value = ''
+  closePagePicker()
 }
 
-function updateSlashState(currentEditor: Editor) {
+function updateMenus(currentEditor: Editor) {
   const { $from } = currentEditor.state.selection
   const beforeCursor = $from.parent.textContent.slice(0, $from.parentOffset)
+  const wikiMatch = beforeCursor.match(/\[\[([^\]]*)$/)
+  if (wikiMatch) {
+    pagePickerMode.value = 'wiki'
+    showPagePicker.value = true
+    wikiQuery.value = wikiMatch[1]
+    wikiStart.value = currentEditor.state.selection.from - wikiMatch[1].length - 2
+    selectedPageIndex.value = 0
+    closeSlashMenu()
+    return
+  }
+  if (pagePickerMode.value === 'wiki') closePagePicker()
+  updateSlashState(currentEditor, beforeCursor)
+}
+
+function updateSlashState(currentEditor: Editor, textBeforeCursor?: string) {
+  const { $from } = currentEditor.state.selection
+  const beforeCursor = textBeforeCursor ?? $from.parent.textContent.slice(0, $from.parentOffset)
   const match = beforeCursor.match(/(?:^|\s)\/([^\s]*)$/)
   if (!match) return closeSlashMenu()
   slashQuery.value = match[1]
@@ -194,6 +242,21 @@ function closeSlashMenu() {
   slashQuery.value = null
   slashStart.value = null
   selectedCommandIndex.value = 0
+}
+
+function openSlashPagePicker() {
+  pagePickerMode.value = 'slash'
+  pageQuery.value = ''
+  selectedPageIndex.value = 0
+  showPagePicker.value = true
+}
+
+function closePagePicker() {
+  showPagePicker.value = false
+  pageQuery.value = ''
+  wikiQuery.value = ''
+  wikiStart.value = null
+  selectedPageIndex.value = 0
 }
 
 function executeSlashCommand(index: number) {
@@ -213,8 +276,9 @@ onBeforeUnmount(() => editor.value?.destroy())
   <div class="tiptap-editor" v-if="editor">
     <slot name="meta"></slot>
     <div v-if="showPagePicker" class="page-picker">
-      <input v-model="pageQuery" autofocus placeholder="搜索并关联页面…" />
-      <button v-for="page in matchingPages" :key="page.id" @click="insertPageLink(page)">
+      <input v-if="pagePickerMode === 'slash'" v-model="pageQuery" autofocus placeholder="搜索并关联页面…" />
+      <p v-else class="wiki-picker-hint">正在关联：<strong>{{ wikiQuery || '全部页面' }}</strong><small>↑↓ 选择，Enter 插入，Esc 取消</small></p>
+      <button v-for="(page, index) in matchingPages" :key="page.id" :class="{ selected: pagePickerMode === 'wiki' && selectedPageIndex === index }" @mousedown.prevent="insertPageLink(page)">
         <span>{{ page.title }}</span><small>{{ page.parentId ? '子页面' : '顶层页面' }}</small>
       </button>
       <p v-if="!matchingPages.length">没有匹配页面</p>

@@ -7,6 +7,11 @@ const tab = ref<'outline' | 'properties' | 'links' | 'graph'>('outline')
 const headings = computed(() => (store.activePage?.markdown.match(/^#{1,6} .+$/gm) ?? []).map((line) => ({ level: line.indexOf(' '), text: line.replace(/^#+ /, '') })))
 const outgoing = computed(() => store.activePage ? store.outgoingLinks(store.activePage.id) : [])
 const incoming = computed(() => store.activePage ? store.backlinks(store.activePage.id) : [])
+const storageLabel = computed(() => {
+  const source = store.workspace?.sources.find((item) => item.id === store.activePage?.storageSourceId)
+  if (!source) return '未知存储源'
+  return source.kind === 'smb' ? `SMB · ${source.name}` : `本地 · ${source.name}`
+})
 const graph = computed(() => {
   const current = store.activePage
   if (!current) return { nodes: [], edges: [] }
@@ -57,7 +62,7 @@ const graph = computed(() => {
       <button v-for="heading in headings" :key="heading.text" :style="{ paddingLeft: `${(heading.level - 1) * 10}px` }">{{ heading.text }}</button>
     </div>
     <div v-else-if="tab === 'properties'" class="context-content property-list">
-      <div><span>存储源</span><strong>本地工作区</strong></div>
+      <div><span>存储源</span><strong>{{ storageLabel }}</strong></div>
       <div><span>创建时间</span><strong>{{ store.activePage?.createdAt.slice(0, 10) }}</strong></div>
       <div><span>更新时间</span><strong>{{ store.activePage?.updatedAt.slice(0, 10) }}</strong></div>
       <div><span>页面 ID</span><code>{{ store.activePage?.id }}</code></div>

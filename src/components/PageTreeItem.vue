@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { PageTreeNode } from '@/types'
+import type { PageTreeNode, StorageSource } from '@/types'
 
-const props = defineProps<{ node: PageTreeNode; activePageId: string | null; depth?: number }>()
+const props = defineProps<{ node: PageTreeNode; activePageId: string | null; sourcesById: Record<string, StorageSource>; depth?: number }>()
 const emit = defineEmits<{
   select: [id: string]
   create: [parentId: string]
@@ -12,6 +12,7 @@ const emit = defineEmits<{
 }>()
 const expanded = ref(true)
 const hasChildren = computed(() => props.node.children.length > 0)
+const source = computed(() => props.sourcesById[props.node.storageSourceId])
 const dropPosition = ref<'before' | 'inside' | 'after' | null>(null)
 
 function startDrag(event: DragEvent) {
@@ -54,6 +55,7 @@ function dropOnPage(event: DragEvent) {
       </button>
       <span class="page-glyph">▱</span>
       <span class="tree-title">{{ node.title || '无标题' }}</span>
+      <span v-if="source" class="page-source-badge" :class="source.kind" :title="`${source.kind === 'smb' ? 'SMB 工作区' : '本地工作区'}：${source.name}\n${source.path}`">{{ source.name }}</span>
       <span class="tree-actions" @click.stop>
         <button title="新建子页面" @click="emit('create', node.id)">+</button>
         <button title="删除页面" @click="emit('remove', node.id)">×</button>
@@ -65,6 +67,7 @@ function dropOnPage(event: DragEvent) {
         :key="child.id"
         :node="child"
         :active-page-id="activePageId"
+        :sources-by-id="sourcesById"
         :depth="(depth ?? 0) + 1"
         @select="emit('select', $event)"
         @create="emit('create', $event)"
