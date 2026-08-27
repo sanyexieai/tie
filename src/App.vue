@@ -4,6 +4,7 @@ import AppSidebar from '@/components/AppSidebar.vue'
 import ContextPanel from '@/components/ContextPanel.vue'
 import DocumentEditor from '@/components/DocumentEditor.vue'
 import TrashView from '@/components/TrashView.vue'
+import SearchView from '@/components/SearchView.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 const store = useWorkspaceStore()
@@ -15,7 +16,8 @@ onMounted(() => void store.initialize())
 <template>
   <div v-if="store.initialized" class="app-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
     <AppSidebar v-if="!sidebarCollapsed" />
-    <TrashView v-if="store.showingTrash" />
+    <SearchView v-if="store.showingSearch" />
+    <TrashView v-else-if="store.showingTrash" />
     <DocumentEditor v-else @toggle-sidebar="toggleSidebar" />
     <ContextPanel />
   </div>

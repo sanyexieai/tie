@@ -1,13 +1,15 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { workspaceService } from '@/services/workspace'
-import type { Page, PageId, PageLink, PageTreeNode, Workspace } from '@/types'
+import type { Page, PageId, PageLink, PageTreeNode, SearchResult, Workspace } from '@/types'
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   const workspace = ref<Workspace | null>(null)
   const pages = ref<Page[]>([])
   const activePageId = ref<PageId | null>(null)
   const showingTrash = ref(false)
+  const showingSearch = ref(false)
+  const searchQuery = ref('')
   const saving = ref(false)
   const initialized = ref(false)
 
@@ -19,6 +21,27 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       const matches = [...page.markdown.matchAll(linkPattern)]
       return matches.map((match) => ({ fromPageId: page.id, toPageId: match[1] }))
     })
+  })
+  const searchResults = computed<SearchResult[]>(() => {
+    const query = searchQuery.value.trim().toLocaleLowerCase()
+    if (!query) return []
+    return pages.value
+      .filter((page) => !page.deletedAt)
+      .map((page) => {
+        const title = page.title.toLocaleLowerCase()
+        const tagText = page.tags.join(' ').toLocaleLowerCase()
+        const body = page.markdown.replace(/^# .*\n?/, '').toLocaleLowerCase()
+        const titleScore = title === query ? 120 : title.startsWith(query) ? 90 : title.includes(query) ? 70 : 0
+        const tagScore = tagText.includes(query) ? 45 : 0
+        const bodyPosition = body.indexOf(query)
+        const bodyScore = bodyPosition >= 0 ? Math.max(10, 35 - Math.min(bodyPosition, 25)) : 0
+        const source = page.markdown.replace(/^# .*\n?/, '').replace(/[#>*_~`|()[\]]/g, ' ').replace(/\s+/g, ' ').trim()
+        const originalPosition = source.toLocaleLowerCase().indexOf(query)
+        const snippet = originalPosition >= 0 ? `${originalPosition > 42 ? '…' : ''}${source.slice(Math.max(0, originalPosition - 42), originalPosition + query.length + 72)}${source.length > originalPosition + query.length + 72 ? '…' : ''}` : source.slice(0, 114)
+        return { page, score: titleScore + tagScore + bodyScore, snippet }
+      })
+      .filter((result) => result.score > 0)
+      .sort((a, b) => b.score - a.score || b.page.updatedAt.localeCompare(a.page.updatedAt))
   })
   const tree = computed<PageTreeNode[]>(() => {
     const children = new Map<PageId | null, Page[]>()
@@ -46,6 +69,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     pages.value.push(page)
     activePageId.value = page.id
     showingTrash.value = false
+    showingSearch.value = false
     return page
   }
 
@@ -234,11 +258,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return true
   }
 
-  function openPage(pageId: PageId) { activePageId.value = pageId; showingTrash.value = false }
-  function openTrash() { showingTrash.value = true }
+  function openPage(pageId: PageId) { activePageId.value = pageId; showingTrash.value = false; showingSearch.value = false }
+  function openTrash() { showingTrash.value = true; showingSearch.value = false }
+  function openSearch() { showingSearch.value = true; showingTrash.value = false }
   function pageById(pageId: PageId) { return pages.value.find((page) => page.id === pageId) ?? null }
   function outgoingLinks(pageId: PageId) { return links.value.filter((link) => link.fromPageId === pageId).map((link) => pageById(link.toPageId)).filter((page): page is Page => Boolean(page && !page.deletedAt)) }
   function backlinks(pageId: PageId) { return links.value.filter((link) => link.toPageId === pageId).map((link) => pageById(link.fromPageId)).filter((page): page is Page => Boolean(page && !page.deletedAt)) }
 
-  return { workspace, pages, activePageId, activePage, saving, initialized, tree, trashedPages, showingTrash, links, initialize, createPage, createChildPage, persist, trashPage, restorePage, movePage, reorderPage, openPage, openTrash, outgoingLinks, backlinks }
+  return { workspace, pages, activePageId, activePage, saving, initialized, tree, trashedPages, showingTrash, showingSearch, searchQuery, searchResults, links, initialize, createPage, createChildPage, persist, trashPage, restorePage, movePage, reorderPage, openPage, openTrash, openSearch, outgoingLinks, backlinks }
 })

@@ -37,7 +37,7 @@ async function dropAtTopLevel(event: DragEvent) {
       <button :class="{ selected: !store.showingTrash && rootPage?.id === store.activePageId }" @click="rootPage && store.openPage(rootPage.id)"><span>⌑</span> 收集箱</button>
       <button disabled><span>◷</span> 最近打开</button>
       <button disabled><span>☆</span> 收藏</button>
-      <button disabled><span>⌕</span> 搜索</button>
+      <button :class="{ selected: store.showingSearch }" @click="store.openSearch()"><span>⌕</span> 搜索</button>
       <button :class="{ selected: store.showingTrash }" @click="store.openTrash()"><span>⌫</span> 回收站</button>
     </nav>
 

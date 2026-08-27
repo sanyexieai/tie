@@ -27,6 +27,12 @@ export interface PageLink {
   toPageId: PageId
 }
 
+export interface SearchResult {
+  page: Page
+  score: number
+  snippet: string
+}
+
 export interface WorkspaceSnapshot {
   workspace: Workspace
   pages: Page[]

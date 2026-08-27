@@ -85,6 +85,11 @@ function onShortcut(event: KeyboardEvent) {
     void saveNow()
     return
   }
+  if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLocaleLowerCase() === 'f') {
+    event.preventDefault()
+    store.openSearch()
+    return
+  }
   if ((event.ctrlKey || event.metaKey) && event.key === '/') {
     event.preventDefault()
     toggleSourceMode()
