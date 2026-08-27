@@ -13,7 +13,7 @@ import TaskList from '@tiptap/extension-task-list'
 import { Markdown } from '@tiptap/markdown'
 import type { Page } from '@/types'
 
-const props = defineProps<{ modelValue: string; pages: Page[]; pageId: string }>()
+const props = defineProps<{ modelValue: string; pages: Page[]; pageId: string; spellcheck: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
 const showPagePicker = ref(false)
 const pageQuery = ref('')
@@ -65,6 +65,24 @@ function openInternalLink(event: MouseEvent) {
   return true
 }
 
+function focusNextWritingLine(event: MouseEvent) {
+  const current = editor.value
+  const root = current?.view.dom
+  if (!current || !root || event.target !== root) return false
+  const blocks = [...root.children]
+  const lastBlock = blocks.at(-1)
+  if (lastBlock && event.clientY <= lastBlock.getBoundingClientRect().bottom) return false
+  event.preventDefault()
+  const lastNode = current.state.doc.lastChild
+  if (lastNode?.type.name === 'paragraph' && lastNode.content.size === 0) current.chain().focus('end').run()
+  else current.chain().insertContentAt(current.state.doc.content.size, { type: 'paragraph' }).focus('end').run()
+  return true
+}
+
+function handleEditorClick(event: MouseEvent) {
+  return openInternalLink(event) || focusNextWritingLine(event)
+}
+
 let syncingExternalValue = false
 const editor = useEditor({
   content: props.modelValue,
@@ -89,9 +107,8 @@ const editor = useEditor({
     TableCell,
   ],
   editorProps: {
-    attributes: { class: 'tiptap-content', spellcheck: 'false' },
-    handleClick: (_view, _position, event) => openInternalLink(event),
-    handleDOMEvents: { click: (_view, event) => openInternalLink(event) },
+    attributes: { class: 'tiptap-content', spellcheck: String(props.spellcheck) },
+    handleDOMEvents: { click: (_view, event) => handleEditorClick(event) },
     handleKeyDown: (_view, event) => {
       if (slashQuery.value === null) return false
       if (!filteredCommands.value.length && ['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) {
@@ -139,6 +156,7 @@ watch(() => props.modelValue, (markdown) => {
 })
 
 watch(childPageIds, () => void nextTick(decorateChildPageLinks), { deep: true })
+watch(() => props.spellcheck, (enabled) => editor.value?.view.dom.setAttribute('spellcheck', String(enabled)))
 
 function decorateChildPageLinks() {
   const root = editor.value?.view.dom
@@ -193,6 +211,7 @@ onBeforeUnmount(() => editor.value?.destroy())
 
 <template>
   <div class="tiptap-editor" v-if="editor">
+    <slot name="meta"></slot>
     <div v-if="showPagePicker" class="page-picker">
       <input v-model="pageQuery" autofocus placeholder="搜索并关联页面…" />
       <button v-for="page in matchingPages" :key="page.id" @click="insertPageLink(page)">

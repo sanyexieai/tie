@@ -10,6 +10,7 @@ button, input, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .46; }
 .app-shell { display: grid; grid-template-columns: 256px minmax(460px, 1fr) 244px; height: 100vh; overflow: hidden; background: #fbfaf8; }
+.app-shell.sidebar-collapsed { grid-template-columns: minmax(460px, 1fr) 244px; }
 .sidebar { display: flex; flex-direction: column; padding: 16px 10px 12px; background: #f2f1ee; border-right: 1px solid #e7e4df; color: #4c4842; min-width: 0; }
 .workspace-heading { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 7px; font-weight: 650; font-size: 14px; }
 .workspace-mark, .loading-mark { display: grid; place-items: center; width: 21px; height: 21px; border-radius: 6px; background: #32312e; color: #fff; font-size: 12px; font-family: Georgia, serif; }
@@ -45,19 +46,23 @@ button:disabled { cursor: not-allowed; opacity: .46; }
 .storage-row small { margin-left: auto; color: #999188; font-size: 10px; }
 .storage-status { width: 7px; height: 7px; background: #6b9e79; border-radius: 50%; }
 .storage-footer p { margin: 5px 8px 0; color: #9a938a; font-size: 10px; line-height: 1.45; }
-.editor-pane { min-width: 0; overflow: auto; background: #fbfaf8; }
+.editor-pane { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; background: #fbfaf8; }
 .editor-header { height: 54px; display: flex; align-items: center; justify-content: space-between; padding: 0 32px; border-bottom: 1px solid #efede9; color: #9a938a; font-size: 12px; }
 .breadcrumbs { display: flex; align-items: center; gap: 7px; max-width: 60%; overflow: hidden; white-space: nowrap; }
 .breadcrumbs span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .save-state { display: flex; align-items: center; gap: 6px; }
 .save-state button { border: 0; background: transparent; color: #8f8981; letter-spacing: 2px; }
+.editor-scroll { min-height: 0; flex: 1; overflow: auto; }
 .save-dot { width: 6px; height: 6px; border-radius: 50%; background: #69a77e; }
 .save-dot.saving { background: #d5a759; }
-.document { width: min(820px, calc(100% - 92px)); margin: 0 auto; padding: 76px 0 140px; }
+.document { width: 100%; min-height: 100%; padding: 42px 52px 100px; }
 .document-title { width: 100%; border: 0; outline: 0; padding: 0; color: #28241f; background: transparent; font-size: 38px; font-weight: 720; line-height: 1.25; letter-spacing: -.04em; }
 .document-title::placeholder { color: #c4bdb5; }
+.editor-embedded-meta { padding-bottom: 2px; }
 .tag-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 34px; margin: 17px 0 25px; }
 .tag { padding: 3px 8px; border-radius: 999px; background: #eee6d6; color: #80633e; font-size: 12px; }
+.tag button { margin-left: 3px; border: 0; padding: 0; color: #9c8058; background: transparent; font-size: 12px; line-height: 1; }
+.tag button:hover { color: #684b29; }
 .tag-input { flex: 1 1 160px; min-width: 120px; border: 0; outline: 0; padding: 4px 0; color: #6a645c; background: transparent; font-size: 12px; }
 .tag-input::placeholder { color: #b9b2aa; }
 .tiptap-editor { position: relative; }
@@ -102,8 +107,14 @@ button:disabled { cursor: not-allowed; opacity: .46; }
 .tiptap-content .task-item > label { padding-top: .38em; }
 .tiptap-content .task-item input { accent-color: #726c59; }
 .tiptap-content .is-editor-empty:first-child::before { float: left; height: 0; color: #bcb5ad; content: attr(data-placeholder); pointer-events: none; }
-.create-child-page-button { border: 0; border-radius: 6px; padding: 7px 9px; color: #928a82; background: transparent; font-size: 13px; }
-.create-child-page-button:hover { color: #655c52; background: #f1efeb; }
+.source-editor-panel { min-height: 510px; border: 1px solid #e8e3db; border-radius: 8px; padding: 20px; background: #fdfcf9; }
+.source-editor { display: block; width: 100%; min-height: 430px; border: 0; outline: none; resize: vertical; padding: 14px 0 0; color: #3d3933; background: transparent; font: 14px/1.8 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.source-editor:focus { border-color: #bcb5ab; box-shadow: 0 0 0 3px rgba(190, 181, 170, .16); }
+.editor-statusbar { display: flex; align-items: center; gap: 3px; min-height: 29px; padding: 0 10px; border-top: 1px solid #e9e5df; color: #9a9288; background: #f8f6f2; font-size: 11px; }
+.editor-statusbar button { border: 0; border-radius: 4px; padding: 3px 5px; color: inherit; background: transparent; font-size: 11px; }
+.editor-statusbar button:hover, .editor-statusbar button.active { color: #514a41; background: #ebe7e0; }
+.status-divider { width: 1px; height: 13px; margin: 0 4px; background: #ddd7cf; }
+.word-count { padding: 0 5px; }
 .context-panel { padding: 16px 15px; border-left: 1px solid #ece9e4; background: #f8f7f4; color: #625d56; }
 .context-tabs { display: flex; gap: 3px; padding-bottom: 14px; border-bottom: 1px solid #e7e3de; }
 .context-tabs button { border: 0; border-radius: 5px; padding: 5px 7px; color: #918a82; background: transparent; font-size: 12px; }
