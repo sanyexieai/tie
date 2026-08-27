@@ -16,8 +16,8 @@ function initialSnapshot(): WorkspaceSnapshot {
   return {
     workspace: { id: 'local-demo', name: '我的知识库', path: '浏览器演示工作区' },
     pages: [
-      { id: root, title: '收集箱', parentId: null, sortKey: 0, markdown: '# 收集箱\n\n把想法先放在这里，再慢慢整理。\n\n- 输入 `[[` 可以关联页面\n- 点击左侧的 + 创建子页面', tags: ['收集'], createdAt, updatedAt: createdAt },
-      { id: welcome, title: '欢迎使用 Tie', parentId: root, sortKey: 0, markdown: '# 欢迎使用 Tie\n\nTie 把 **Notion 的页面树**、**Typora 的写作感** 和 **Obsidian 的链接关系** 放在一起。\n\n## 从这里开始\n\n1. 在左侧创建页面或子页面\n2. 直接用 Markdown 写作\n3. 用标签与链接整理知识', tags: ['开始'], createdAt, updatedAt: createdAt },
+      { id: root, title: '收集箱', parentId: null, sortKey: 0, markdown: '# 收集箱\n\n把想法先放在这里，再慢慢整理。\n\n- 输入 `[[` 可以关联页面\n- 点击左侧的 + 创建子页面', tags: ['收集'], createdAt, updatedAt: createdAt, deletedAt: null },
+      { id: welcome, title: '欢迎使用 Tie', parentId: root, sortKey: 0, markdown: '# 欢迎使用 Tie\n\nTie 把 **Notion 的页面树**、**Typora 的写作感** 和 **Obsidian 的链接关系** 放在一起。\n\n## 从这里开始\n\n1. 在左侧创建页面或子页面\n2. 直接用 Markdown 写作\n3. 用标签与链接整理知识', tags: ['开始'], createdAt, updatedAt: createdAt, deletedAt: null },
     ],
   }
 }
@@ -63,25 +63,9 @@ export const workspaceService = {
       tags: [],
       createdAt: now(),
       updatedAt: now(),
+      deletedAt: null,
     }
     return this.savePage(page)
-  },
-  async deletePage(pageId: PageId) {
-    if (await isTauri()) return invoke<void>('delete_page', { pageId })
-    const snapshot = localSnapshot()
-    const descendants = new Set<PageId>([pageId])
-    let updated = true
-    while (updated) {
-      updated = false
-      snapshot.pages.forEach((page) => {
-        if (page.parentId && descendants.has(page.parentId) && !descendants.has(page.id)) {
-          descendants.add(page.id)
-          updated = true
-        }
-      })
-    }
-    snapshot.pages = snapshot.pages.filter((page) => !descendants.has(page.id))
-    saveLocal(snapshot)
   },
   async updateWorkspace(workspace: Workspace) {
     if (await isTauri()) return invoke<Workspace>('update_workspace', { workspace })

@@ -10,5 +10,15 @@ export default defineConfig({
   clearScreen: false,
   server: { port: 1420, strictPort: true },
   envPrefix: ['VITE_', 'TAURI_'],
-  build: { target: 'es2021', sourcemap: true },
+  build: {
+    target: 'es2021',
+    sourcemap: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('@tiptap') || id.includes('prosemirror')) return 'editor'
+        },
+      },
+    },
+  },
 })

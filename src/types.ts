@@ -9,6 +9,7 @@ export interface Page {
   tags: string[]
   createdAt: string
   updatedAt: string
+  deletedAt: string | null
 }
 
 export interface Workspace {
@@ -21,8 +22,12 @@ export interface PageTreeNode extends Page {
   children: PageTreeNode[]
 }
 
+export interface PageLink {
+  fromPageId: PageId
+  toPageId: PageId
+}
+
 export interface WorkspaceSnapshot {
   workspace: Workspace
   pages: Page[]
 }
-
