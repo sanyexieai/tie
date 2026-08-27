@@ -10,18 +10,37 @@ const incoming = computed(() => store.activePage ? store.backlinks(store.activeP
 const graph = computed(() => {
   const current = store.activePage
   if (!current) return { nodes: [], edges: [] }
-  const neighbours = [
+  const linkedPages = [
     ...outgoing.value.map((page) => ({ page, relation: 'outgoing' as const })),
     ...incoming.value.map((page) => ({ page, relation: 'incoming' as const })),
   ].filter((item, index, all) => all.findIndex((candidate) => candidate.page.id === item.page.id) === index).slice(0, 8)
+  const tags = current.tags.slice(0, 4).map((tag) => ({ id: `tag:${tag}`, title: `# ${tag}`, type: 'tag' as const, relation: 'tag' as const }))
+  const concepts = (current.markdown.match(/^#{2,6} (.+)$/gm) ?? []).slice(0, 4).map((heading, index) => ({
+    id: `concept:${current.id}:${index}`,
+    title: heading.replace(/^#+ /, ''),
+    type: 'content' as const,
+    relation: 'content' as const,
+  }))
+  const neighbours = [
+    ...linkedPages.map((item) => ({ id: item.page.id, title: item.page.title, type: 'title' as const, relation: item.relation })),
+    ...tags,
+    ...concepts,
+  ].slice(0, 10)
   const nodes = [
-    { id: current.id, title: current.title, x: 120, y: 100, current: true },
+    { id: current.id, title: current.title, type: 'title' as const, x: 120, y: 100, current: true },
     ...neighbours.map((item, index) => {
       const angle = -Math.PI / 2 + (index * Math.PI * 2) / Math.max(neighbours.length, 1)
-      return { id: item.page.id, title: item.page.title, x: 120 + Math.cos(angle) * 75, y: 100 + Math.sin(angle) * 68, current: false }
+      return { id: item.id, title: item.title, type: item.type, x: 120 + Math.cos(angle) * 78, y: 100 + Math.sin(angle) * 70, current: false }
     }),
   ]
-  return { nodes, edges: neighbours.map((item) => ({ from: item.relation === 'incoming' ? item.page.id : current.id, to: item.relation === 'incoming' ? current.id : item.page.id, incoming: item.relation === 'incoming' })) }
+  return {
+    nodes,
+    edges: neighbours.map((item) => ({
+      from: item.relation === 'incoming' ? item.id : current.id,
+      to: item.relation === 'incoming' ? current.id : item.id,
+      relation: item.relation,
+    })),
+  }
 })
 </script>
 
@@ -67,16 +86,19 @@ const graph = computed(() => {
           :y1="graph.nodes.find((node) => node.id === edge.from)?.y"
           :x2="graph.nodes.find((node) => node.id === edge.to)?.x"
           :y2="graph.nodes.find((node) => node.id === edge.to)?.y"
-          :class="{ incoming: edge.incoming }"
+          :class="edge.relation"
           marker-end="url(#graph-arrow)"
         />
-        <g v-for="node in graph.nodes" :key="node.id" class="graph-node" :class="{ current: node.current }" @click="store.openPage(node.id)">
-          <circle :cx="node.x" :cy="node.y" :r="node.current ? 18 : 13" />
+        <g v-for="node in graph.nodes" :key="node.id" class="graph-node" :class="{ current: node.current, [node.type]: true }" @click="node.type === 'title' && store.openPage(node.id)">
+          <circle v-if="node.type === 'title'" :cx="node.x" :cy="node.y" :r="node.current ? 18 : 13" />
+          <rect v-else-if="node.type === 'tag'" :x="node.x - 13" :y="node.y - 10" width="26" height="20" rx="5" />
+          <path v-else :d="`M ${node.x} ${node.y - 13} L ${node.x + 13} ${node.y} L ${node.x} ${node.y + 13} L ${node.x - 13} ${node.y} Z`" />
           <text :x="node.x" :y="node.y + (node.current ? 31 : 25)">{{ node.title.slice(0, 8) }}</text>
         </g>
       </svg>
       <p v-else class="muted">用“链接页面”关联其他页面后，这里会呈现局部知识图谱。</p>
-      <p v-if="graph.nodes.length > 1" class="graph-caption">箭头表示链接方向；点击节点可打开页面。</p>
+      <div v-if="graph.nodes.length > 1" class="graph-legend"><span class="legend-title">● 标题页</span><span class="legend-tag">■ 标签</span><span class="legend-content">◆ 内容抽象</span></div>
+      <p v-if="graph.nodes.length > 1" class="graph-caption">实线为页面链接，虚线为标签关系，点线为正文内容抽象；可点击标题页节点打开页面。</p>
     </div>
   </aside>
 </template>

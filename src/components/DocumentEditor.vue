@@ -13,8 +13,10 @@ const tags = ref<string[]>([])
 const tagDraft = ref('')
 const sourceMode = ref(false)
 const spellcheckEnabled = ref(true)
+const manualSaveNotice = ref(false)
+let manualSaveTimer: number | undefined
 
-const status = computed(() => store.saving ? '保存中…' : '已保存到本地')
+const status = computed(() => store.saving ? '保存中…' : manualSaveNotice.value ? '已手动保存' : '已保存到本地')
 const wordCount = computed(() => bodyMarkdown.value
   .replace(/```[\s\S]*?```/g, '')
   .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
@@ -49,6 +51,15 @@ function onInput() {
   if (page) void save(page)
 }
 
+async function saveNow() {
+  const page = draft()
+  if (!page) return
+  await store.persist(page)
+  manualSaveNotice.value = true
+  if (manualSaveTimer) window.clearTimeout(manualSaveTimer)
+  manualSaveTimer = window.setTimeout(() => { manualSaveNotice.value = false }, 2400)
+}
+
 function onBodyChange(markdown: string) {
   bodyMarkdown.value = markdown
   onInput()
@@ -69,6 +80,11 @@ function navigateToPage(pageId: string) { store.openPage(pageId) }
 function toggleSourceMode() { sourceMode.value = !sourceMode.value }
 
 function onShortcut(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 's') {
+    event.preventDefault()
+    void saveNow()
+    return
+  }
   if ((event.ctrlKey || event.metaKey) && event.key === '/') {
     event.preventDefault()
     toggleSourceMode()
@@ -76,7 +92,10 @@ function onShortcut(event: KeyboardEvent) {
 }
 
 onMounted(() => window.addEventListener('keydown', onShortcut))
-onBeforeUnmount(() => window.removeEventListener('keydown', onShortcut))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onShortcut)
+  if (manualSaveTimer) window.clearTimeout(manualSaveTimer)
+})
 
 async function createChild() {
   if (store.activePage) await store.createChildPage(store.activePage.id)
