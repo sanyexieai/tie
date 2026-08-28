@@ -4,6 +4,7 @@ import { useWorkspaceStore } from '@/stores/workspace'
 
 const store = useWorkspaceStore()
 const tab = ref<'outline' | 'properties' | 'links' | 'graph'>('outline')
+const emit = defineEmits<{ close: [] }>()
 const headings = computed(() => (store.activePage?.markdown.match(/^#{2,6} .+$/gm) ?? []).map((line, index) => ({ index, level: line.indexOf(' '), text: line.replace(/^#+ /, '') })))
 const outgoing = computed(() => store.activePage ? store.outgoingLinks(store.activePage.id) : [])
 const incoming = computed(() => store.activePage ? store.backlinks(store.activePage.id) : [])
@@ -91,6 +92,7 @@ async function unlinkPage(pageId: string) {
       <button :class="{ active: tab === 'properties' }" @click="tab = 'properties'">属性</button>
       <button :class="{ active: tab === 'links' }" @click="tab = 'links'">链接</button>
       <button :class="{ active: tab === 'graph' }" @click="tab = 'graph'">图谱</button>
+      <button class="context-collapse-button" type="button" title="收起右侧栏" aria-label="收起右侧栏" @click="emit('close')">‹</button>
     </div>
     <div v-if="tab === 'outline'" class="context-content outline-list">
       <p v-if="!headings.length" class="muted">添加标题后将在这里生成大纲。</p>

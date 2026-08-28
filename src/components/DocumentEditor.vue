@@ -1,13 +1,18 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { useBackendStore } from '@/stores/backend'
 import type { Page, PageRevision } from '@/types'
 import TiptapEditor from '@/components/TiptapEditor.vue'
 import DocumentMeta from '@/components/DocumentMeta.vue'
+import { loadAiTaggingConfig, suggestTagsWithAi } from '@/services/ai-tagging'
+import { isBackendRemoteSourceId } from '@/services/backend'
+import { isS3SourceId } from '@/services/s3'
 import { suggestTags, type TagSuggestion } from '@/services/tagging'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
 
 const store = useWorkspaceStore()
+const backend = useBackendStore()
 const isDesktop = '__TAURI_INTERNALS__' in window
 const icon = ref('')
 const title = ref('')
@@ -35,9 +40,10 @@ const selectedRevisionId = ref<string | null>(null)
 const revisionPreviewLoading = ref(false)
 const revisionPreviewError = ref<string | null>(null)
 const tagSuggestions = ref<TagSuggestion[]>([])
+const tagSuggestLoading = ref(false)
 const documentRoot = ref<HTMLElement | null>(null)
 const sourceEditor = ref<HTMLTextAreaElement | null>(null)
-const richEditor = ref<{ undo: () => void; redo: () => void; findText: (query: string, direction?: number) => { count: number; index: number } } | null>(null)
+const richEditor = ref<{ undo: () => void; redo: () => void; findText: (query: string, direction?: number) => { count: number; index: number }; focusBlank?: (event: MouseEvent) => boolean } | null>(null)
 let manualSaveTimer: number | undefined
 let copiedLinkTimer: number | undefined
 let exportedTimer: number | undefined
@@ -50,7 +56,23 @@ const status = computed(() => {
 })
 const isFavorite = computed(() => Boolean(store.activePage && store.favoritePageIds.includes(store.activePage.id)))
 const activeSource = computed(() => store.allSources.find((source) => source.id === store.activePage?.storageSourceId) ?? null)
-const hasBackendConflict = computed(() => activeSource.value?.kind === 'backend' && saveError.value?.includes('其他设备更新'))
+const supportsRemoteConflict = computed(() => Boolean(
+  activeSource.value && (isBackendRemoteSourceId(activeSource.value.id) || isS3SourceId(activeSource.value.id)),
+))
+const hasRemoteSaveConflict = computed(() => supportsRemoteConflict.value && saveError.value?.includes('其他设备更新'))
+const hasSyncConflict = computed(() => Boolean(store.activePage && store.syncConflicts.has(store.activePage.id)))
+const hasRemoteConflict = computed(() => hasRemoteSaveConflict.value || hasSyncConflict.value)
+const remoteConflictLabel = computed(() => {
+  if (activeSource.value?.kind === 'backend') return '后台'
+  if (isS3SourceId(activeSource.value?.id ?? '')) return '远程'
+  return '远程'
+})
+const transferTargets = computed(() => (
+  store.activePage
+    ? store.allSources.filter((source) => store.canTransferPageTo(source.id))
+    : []
+))
+const canSwitchStorageSource = computed(() => transferTargets.value.length > 0)
 const conflictLocalMarkdown = computed(() => `# ${title.value.trim() || '无标题'}\n\n${bodyMarkdown.value}`)
 type ConflictLine = { text: string; kind: 'same' | 'changed' }
 const conflictDiff = computed(() => {
@@ -152,7 +174,7 @@ function queueAutoSave(page: Page, revision: number) {
       saveError.value = null
     } catch (reason) {
       saveError.value = saveFailureMessage(reason)
-      if (hasBackendConflict.value) void loadConflictPreview()
+      if (hasRemoteConflict.value) void loadConflictPreview()
     }
   }, 650)
 }
@@ -164,7 +186,7 @@ function saveFailureMessage(reason: unknown) {
 }
 
 async function loadConflictPreview() {
-  if (conflictLoading.value || activeSource.value?.kind !== 'backend' || !store.activePage) return
+  if (conflictLoading.value || !supportsRemoteConflict.value || !store.activePage) return
   conflictLoading.value = true
   try { conflictRemotePage.value = await store.readLatestPage(store.activePage.id) }
   catch (reason) { saveError.value = saveFailureMessage(reason) }
@@ -202,19 +224,37 @@ async function saveNow() {
     return true
   } catch (reason) {
     saveError.value = saveFailureMessage(reason)
-    if (hasBackendConflict.value) void loadConflictPreview()
+    if (hasRemoteConflict.value) void loadConflictPreview()
     return false
   }
 }
 
-async function reloadBackendPage() {
-  if (activeSource.value?.kind !== 'backend') return
-  if (!window.confirm('将重新载入后台版本，当前未保存的本地修改会丢失。是否继续？')) return
+async function reloadRemotePage() {
+  if (!supportsRemoteConflict.value) return
+  if (!window.confirm(`将重新载入${remoteConflictLabel.value}版本，当前未保存的本地修改会丢失。是否继续？`)) return
   try {
     await store.reloadWorkspace()
     loadActivePage()
     saveError.value = null
     conflictRemotePage.value = null
+    store.clearSyncConflict(store.activePage?.id)
+  } catch (reason) {
+    saveError.value = saveFailureMessage(reason)
+  }
+}
+
+async function forceOverwriteRemote() {
+  const page = draft()
+  if (!page || !supportsRemoteConflict.value) return
+  if (!window.confirm(`将用本地草稿覆盖${remoteConflictLabel.value}版本，其他设备上的修改会丢失。是否继续？`)) return
+  try {
+    await store.persist(page, { force: true })
+    hasUnsavedChanges.value = false
+    saveError.value = null
+    conflictRemotePage.value = null
+    manualSaveNotice.value = true
+    if (manualSaveTimer) window.clearTimeout(manualSaveTimer)
+    manualSaveTimer = window.setTimeout(() => { manualSaveNotice.value = false }, 2400)
   } catch (reason) {
     saveError.value = saveFailureMessage(reason)
   }
@@ -241,8 +281,9 @@ async function transferStorage(targetSourceId: string) {
   }
   const target = store.allSources.find((source) => source.id === targetSourceId)
   sourceMenuOpen.value = false
-  if (!target || target.kind === 'backend') return
-  if (!window.confirm(`将“${store.activePage.title}”及其全部子页面迁移到“${target.name}”？页面树、Markdown 文件与历史版本会一并移动。`)) {
+  if (!target || !store.canTransferPageTo(targetSourceId)) return
+  const historyNotice = store.transferHistoryNotice(store.activePage.storageSourceId, targetSourceId)
+  if (!window.confirm(`将“${store.activePage.title}”及其全部子页面迁移到“${target.name}”？${historyNotice}`)) {
     return
   }
   if (!await saveNow()) {
@@ -345,13 +386,32 @@ function addTags(value: string) {
 }
 function removeTag(tag: string) { tags.value = tags.value.filter((item) => item !== tag); onInput() }
 function selectTag(tag: string) { store.openTags(tag) }
-function generateTagSuggestions() {
-  tagSuggestions.value = suggestTags({
-    title: title.value,
-    markdown: bodyMarkdown.value,
-    existingTags: tags.value,
-    workspaceTags: store.tagIndex.map((tag) => tag.name),
-  })
+async function generateTagSuggestions() {
+  if (tagSuggestLoading.value) return
+  tagSuggestLoading.value = true
+  try {
+    const input = {
+      title: title.value,
+      markdown: bodyMarkdown.value,
+      existingTags: tags.value,
+      workspaceTags: store.tagIndex.map((tag) => tag.name),
+    }
+    const aiConfig = loadAiTaggingConfig()
+    const aiSuggestions = aiConfig.enabled && aiConfig.endpoint
+      ? await suggestTagsWithAi(aiConfig, input, backend.profile).catch(() => [])
+      : []
+    const localSuggestions = suggestTags(input)
+    const merged = new Map<string, TagSuggestion>()
+    for (const suggestion of [...aiSuggestions, ...localSuggestions]) {
+      const existing = merged.get(suggestion.tag.toLocaleLowerCase())
+      merged.set(suggestion.tag.toLocaleLowerCase(), existing
+        ? { ...existing, score: existing.score + suggestion.score, reasons: [...new Set([...existing.reasons, ...suggestion.reasons])] }
+        : suggestion)
+    }
+    tagSuggestions.value = [...merged.values()].sort((a, b) => b.score - a.score || a.tag.localeCompare(b.tag, 'zh-CN')).slice(0, 8)
+  } finally {
+    tagSuggestLoading.value = false
+  }
 }
 function acceptTagSuggestions() {
   if (!tagSuggestions.value.length) return
@@ -364,6 +424,17 @@ function navigateToPage(pageId: string) { store.openPage(pageId) }
 function toggleSourceMode() { store.toggleSourceMode() }
 function undo() { richEditor.value?.undo() }
 function redo() { richEditor.value?.redo() }
+
+function onEditorSurfaceClick(event: MouseEvent) {
+  const target = event.target
+  if (!(target instanceof Element)) return
+  if (!target.classList.contains('editor-scroll') && !target.classList.contains('document') && !target.classList.contains('source-editor-panel')) return
+  if (store.sourceMode) {
+    sourceEditor.value?.focus()
+    return
+  }
+  richEditor.value?.focusBlank?.(event)
+}
 
 function openFind() {
   showingFind.value = true
@@ -486,8 +557,8 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
 <template>
   <main v-if="store.activePage" class="editor-pane">
     <header class="editor-header">
-      <nav class="breadcrumbs" aria-label="页面层级"><span>我的知识库</span><template v-for="(page, index) in breadcrumbs" :key="page.id"><span>›</span><button :class="{ current: index === breadcrumbs.length - 1 }" :title="page.title" @click="store.openPage(page.id)">{{ page.title }}</button></template></nav>
-      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span>{{ sourceBadgeLabel(activeSource.kind) }} ·</span><button class="source-select-trigger" :aria-expanded="sourceMenuOpen" aria-haspopup="menu" :title="activeSource.path" :disabled="activeSource.kind === 'backend'" @click.stop="activeSource.kind !== 'backend' && (sourceMenuOpen = !sourceMenuOpen)">{{ activeSource.name }}</button><div v-if="sourceMenuOpen && activeSource && activeSource.kind !== 'backend'" class="source-select-menu" role="menu"><button v-for="source in store.allSources.filter((item) => item.kind !== 'backend' && item.id !== activeSource!.id)" :key="source.id" :class="{ selected: source.id === activeSource.id, unavailable: source.available === false }" role="menuitem" :disabled="source.available === false" @click="transferStorage(source.id)"><span><i :class="source.kind"></i>{{ sourceBadgeLabel(source.kind) }} · {{ source.name }}</span><small>{{ source.available === false ? '当前不可访问' : source.path }}</small></button></div></div><span class="save-dot" :class="{ saving: store.saving, error: Boolean(saveError) }"></span><span :title="saveError ?? undefined">{{ status }}</span><button v-if="hasBackendConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与后台当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" title="重新尝试保存当前页面" @click="saveNow">重试</button> <button v-if="isDesktop && activeSource?.kind !== 'backend'" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button class="copy-link-button" title="导出 Markdown" @click="exportMarkdown">⇩</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
+      <nav class="breadcrumbs" aria-label="页面层级"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><template v-for="(page, index) in breadcrumbs" :key="page.id"><span>›</span><button :class="{ current: index === breadcrumbs.length - 1 }" :title="page.title" @click="store.openPage(page.id)">{{ page.title }}</button></template></nav>
+      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span>{{ sourceBadgeLabel(activeSource.kind) }} ·</span><button class="source-select-trigger" :aria-expanded="sourceMenuOpen" aria-haspopup="menu" :title="activeSource.path" :disabled="!canSwitchStorageSource" @click.stop="canSwitchStorageSource && (sourceMenuOpen = !sourceMenuOpen)">{{ activeSource.name }}</button><div v-if="sourceMenuOpen && activeSource && canSwitchStorageSource" class="source-select-menu" role="menu"><button v-for="source in transferTargets" :key="source.id" :class="{ unavailable: source.available === false }" role="menuitem" :disabled="source.available === false" @click="transferStorage(source.id)"><span><i :class="source.kind"></i>{{ sourceBadgeLabel(source.kind) }} · {{ source.name }}</span><small>{{ source.available === false ? '当前不可访问' : source.path }}</small></button></div></div><span class="save-dot" :class="{ saving: store.saving, error: Boolean(saveError) }"></span><span :title="saveError ?? undefined">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" title="重新尝试保存当前页面" @click="saveNow">重试</button> <button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button class="copy-link-button" title="导出 Markdown" @click="exportMarkdown">⇩</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
     </header>
     <aside v-if="showingHistory" class="history-popover">
       <div class="history-popover-heading"><strong>页面历史</strong><button aria-label="关闭页面历史" @click="showingHistory = false">×</button></div>
@@ -498,13 +569,13 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
     </aside>
     <div v-if="conflictRemotePage" class="conflict-dialog-backdrop" @mousedown.self="conflictRemotePage = null">
       <section class="conflict-dialog" role="dialog" aria-modal="true" aria-label="页面同步冲突">
-        <header><div><strong>页面已在其他设备更新</strong><small>先对照内容，再决定是否载入后台版本。</small></div><button aria-label="关闭" @click="conflictRemotePage = null">×</button></header>
-        <div class="conflict-version-grid"><section><strong>本地未保存草稿</strong><small>{{ title || '无标题' }}</small><pre><code v-for="(line, index) in conflictDiff.local" :key="`local-${index}`" :class="line.kind">{{ line.text || ' ' }}</code></pre></section><section><strong>后台当前版本</strong><small>{{ conflictRemotePage.updatedAt.slice(0, 19).replace('T', ' ') }}</small><pre><code v-for="(line, index) in conflictDiff.remote" :key="`remote-${index}`" :class="line.kind">{{ line.text || ' ' }}</code></pre></section></div>
-        <footer><button @click="copyConflictDraft">复制本地草稿</button><button @click="conflictRemotePage = null">保留草稿</button><button class="conflict-load-button" @click="reloadBackendPage">载入后台版本</button></footer>
+        <header><div><strong>{{ hasSyncConflict ? '同步检测到内容冲突' : '页面已在其他设备更新' }}</strong><small>{{ hasSyncConflict ? '远程与本地版本不一致，请选择保留哪一方。' : `先对照内容，再决定是否载入${remoteConflictLabel}版本。` }}</small></div><button aria-label="关闭" @click="conflictRemotePage = null">×</button></header>
+        <div class="conflict-version-grid"><section><strong>本地未保存草稿</strong><small>{{ title || '无标题' }}</small><pre><code v-for="(line, index) in conflictDiff.local" :key="`local-${index}`" :class="line.kind">{{ line.text || ' ' }}</code></pre></section><section><strong>{{ remoteConflictLabel }}当前版本</strong><small>{{ conflictRemotePage.updatedAt.slice(0, 19).replace('T', ' ') }}</small><pre><code v-for="(line, index) in conflictDiff.remote" :key="`remote-${index}`" :class="line.kind">{{ line.text || ' ' }}</code></pre></section></div>
+        <footer><button @click="copyConflictDraft">复制本地草稿</button><button @click="conflictRemotePage = null">保留草稿</button><button :disabled="store.saving" @click="forceOverwriteRemote">{{ store.saving ? '覆盖中…' : `覆盖${remoteConflictLabel}版本` }}</button><button class="conflict-load-button" @click="reloadRemotePage">载入{{ remoteConflictLabel }}版本</button></footer>
       </section>
     </div>
-    <div class="editor-scroll">
-      <article ref="documentRoot" class="document">
+    <div class="editor-scroll" @click="onEditorSurfaceClick">
+      <article ref="documentRoot" class="document" @click="onEditorSurfaceClick">
         <div v-if="showingFind" class="document-find" role="search">
           <input v-model="findQuery" autofocus placeholder="在当前页面查找" aria-label="在当前页面查找" @input="findNext(1)" @keydown.enter.prevent="findNext($event.shiftKey ? -1 : 1)" @keydown.escape.prevent="closeFind" />
           <span>{{ findQuery ? (findResult.count ? `${findResult.index}/${findResult.count}` : '无结果') : '' }}</span>
@@ -527,12 +598,12 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
     <footer class="editor-statusbar">
       <button title="收起或展开左侧栏" @click="emit('toggle-sidebar')">▤ 侧栏</button>
       <button title="切换专注模式（Ctrl/Cmd + Shift + Enter）" @click="emit('toggle-focus')">⛶ 专注</button>
-      <button class="mobile-context-button" title="打开大纲、链接与图谱" @click="emit('toggle-context')">◎ 关系</button>
       <template v-if="!store.sourceMode"><button title="撤销（Ctrl/Cmd + Z）" @click="undo">↶ 撤销</button><button title="重做（Ctrl/Cmd + Shift + Z）" @click="redo">↷ 重做</button></template>
       <button :class="{ active: store.sourceMode }" title="切换 Markdown 源码模式（Ctrl/Cmd + /）" @click="toggleSourceMode">&lt;/&gt; 源码</button>
       <span class="status-divider"></span>
       <button :class="{ active: store.spellcheckEnabled }" :title="store.spellcheckEnabled ? '关闭拼写检查' : '开启拼写检查'" @click="store.toggleSpellcheck">✓ 拼写检查</button>
       <span class="word-count">字数 {{ wordCount }}</span>
+      <button class="context-toggle-button" title="收起或展开右侧栏（Ctrl/Cmd + Shift + \\）" @click="emit('toggle-context')">◎ 关系</button>
     </footer>
   </main>
   <main v-else class="empty-editor">

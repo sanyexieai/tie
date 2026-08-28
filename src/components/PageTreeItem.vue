@@ -17,6 +17,7 @@ const store = useWorkspaceStore()
 const expanded = computed(() => !store.collapsedPageIds.includes(props.node.id))
 const hasChildren = computed(() => props.node.children.length > 0)
 const source = computed(() => props.sourcesById[props.node.storageSourceId])
+const hasSyncConflict = computed(() => store.syncConflicts.has(props.node.id))
 const dropPosition = ref<'before' | 'inside' | 'after' | null>(null)
 const actionsOpen = ref(false)
 const actionsRoot = ref<HTMLElement | null>(null)
@@ -129,6 +130,7 @@ onBeforeUnmount(() => document.removeEventListener('click', closeActionsOnOutsid
       </button>
       <span class="page-glyph">{{ node.icon || '▱' }}</span>
       <span class="tree-title">{{ node.title || '无标题' }}</span>
+      <span v-if="hasSyncConflict" class="page-sync-conflict-badge" title="同步冲突，打开页面后可查看差异">!</span>
       <span v-if="source" class="page-source-badge" :class="source.kind" :title="`${source.kind === 'smb' ? 'SMB 工作区' : '本地工作区'}：${source.name}\n${source.path}`">{{ source.name }}</span>
       <span ref="actionsRoot" class="tree-actions" :class="{ open: actionsOpen }" @click.stop>
         <button class="tree-more-button" :aria-expanded="actionsOpen" aria-label="页面操作" @click="actionsOpen = !actionsOpen">⋯</button>

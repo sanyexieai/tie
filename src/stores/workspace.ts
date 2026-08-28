@@ -1,9 +1,12 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
-import { backendWorkspaceSource } from '@/services/backend'
-import { loadLocalS3Providers, s3StorageSource } from '@/services/s3'
+import { backendWorkspaceSource, backendS3ProviderSource, isBackendRemoteSourceId } from '@/services/backend'
+import { loadLocalS3Providers, refreshS3Providers, s3StorageSource } from '@/services/s3'
+import { sourceStatusStore, syncQueue, storageRegistry } from '@/services/storage'
+import { transferPreservesHistory } from '@/services/transfer-policy'
 import { workspaceService } from '@/services/workspace'
 import { useBackendStore } from '@/stores/backend'
+import type { SyncConflict, SyncResult } from '@/services/storage/types'
 import type { Page, PageId, PageLink, PageRevision, PageTreeNode, SearchResult, StorageKind, StorageSource, TagSummary, Workspace } from '@/types'
 
 function sortSourcesByOrder(sources: StorageSource[], order: string[]) {
@@ -44,15 +47,34 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const spellcheckEnabled = ref(true)
   const sourceMode = ref(false)
   const s3ProvidersVersion = ref(0)
+  const syncQueueVersion = ref(0)
+  const syncConflicts = ref<Map<PageId, SyncConflict & { sourceId: string }>>(new Map())
+  const syncConflictsCount = computed(() => syncConflicts.value.size)
+  const syncConflictPages = computed(() => [...syncConflicts.value.entries()]
+    .map(([pageId, conflict]) => {
+      const page = pages.value.find((item) => item.id === pageId)
+      const source = allSources.value.find((item) => item.id === conflict.sourceId)
+      return page && !page.deletedAt ? { pageId, conflict, page, source } : null
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item)))
 
   const rawSources = computed(() => [
     ...(workspace.value?.sources ?? []),
     ...(backend.connected ? backend.workspaces.map((item) => backendWorkspaceSource(item, backend.profile.endpoint)) : []),
+    ...(backend.connected ? backend.providers.filter((provider) => provider.kind === 's3').map((provider) => backendS3ProviderSource(provider, backend.providerAvailability[provider.id] !== false)) : []),
     ...(s3ProvidersVersion.value >= 0 ? loadLocalS3Providers().map(s3StorageSource) : []),
   ])
 
-  if (typeof window !== 'undefined') window.addEventListener('tie:s3-providers-changed', () => { s3ProvidersVersion.value += 1 })
+  if (typeof window !== 'undefined') {
+    window.addEventListener('tie:s3-providers-changed', () => { s3ProvidersVersion.value += 1 })
+    window.addEventListener('tie:sync-queue-changed', () => { syncQueueVersion.value += 1 })
+  }
   const allSources = computed(() => sortSourcesByOrder(rawSources.value, storageSourceOrder.value))
+  const pendingSyncCount = computed(() => syncQueueVersion.value >= 0 ? syncQueue.count() : 0)
+  function sourceRuntimeStatus(sourceId: string) {
+    void syncQueueVersion.value
+    return sourceStatusStore.get(sourceId)
+  }
   const defaultStorageSourceId = computed(() => allSources.value.find((source) => source.available !== false)?.id ?? allSources.value[0]?.id ?? null)
   const activeStorageSourceId = defaultStorageSourceId
 
@@ -160,33 +182,83 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   })
 
   async function initialize() {
-    const snapshot = await workspaceService.load()
-    workspace.value = snapshot.workspace
-    pages.value = snapshot.pages
-    const preferences = workspaceService.loadPreferences(snapshot.workspace.id)
-    favoritePageIds.value = preferences.favoritePageIds
-    recentPageIds.value = preferences.recentPageIds
-    collapsedPageIds.value = preferences.collapsedPageIds
-    spellcheckEnabled.value = preferences.spellcheckEnabled
-    sourceMode.value = preferences.sourceMode
-    storageSourceOrder.value = preferences.storageSourceOrder
-    activePageId.value = preferences.recentPageIds
-      .map((pageId) => snapshot.pages.find((page) => page.id === pageId && !page.deletedAt)?.id)
-      .find((pageId): pageId is PageId => Boolean(pageId))
-      ?? snapshot.pages.find((page) => !page.deletedAt)?.id
-      ?? null
-    syncStorageSourceOrder()
-    if (activePageId.value) expandPageAncestors(activePageId.value)
-    initialized.value = true
+    try {
+      await refreshS3Providers({ migrateLegacy: true })
+      const snapshot = await workspaceService.loadLocal()
+      workspace.value = snapshot.workspace
+      pages.value = snapshot.pages
+      const preferences = workspaceService.loadPreferences(snapshot.workspace.id)
+      favoritePageIds.value = preferences.favoritePageIds
+      recentPageIds.value = preferences.recentPageIds
+      collapsedPageIds.value = preferences.collapsedPageIds
+      spellcheckEnabled.value = preferences.spellcheckEnabled
+      sourceMode.value = preferences.sourceMode
+      storageSourceOrder.value = preferences.storageSourceOrder
+      activePageId.value = preferences.recentPageIds
+        .map((pageId) => snapshot.pages.find((page) => page.id === pageId && !page.deletedAt)?.id)
+        .find((pageId): pageId is PageId => Boolean(pageId))
+        ?? snapshot.pages.find((page) => !page.deletedAt)?.id
+        ?? null
+      syncStorageSourceOrder()
+      if (activePageId.value) expandPageAncestors(activePageId.value)
+    } catch (error) {
+      console.error('工作区初始化失败', error)
+    } finally {
+      initialized.value = true
+    }
+    void bootstrapRemoteSync()
+  }
+
+  function applySyncResults(results: SyncResult[]) {
+    const next = new Map(syncConflicts.value)
+    for (const result of results) {
+      for (const [pageId, conflict] of next) {
+        if (conflict.sourceId === result.sourceId && !result.conflicts.some((item) => item.pageId === pageId)) {
+          next.delete(pageId)
+        }
+      }
+      for (const conflict of result.conflicts) {
+        next.set(conflict.pageId, { ...conflict, sourceId: result.sourceId })
+      }
+    }
+    syncConflicts.value = next
+  }
+
+  function clearSyncConflict(pageId: PageId | null | undefined) {
+    if (!pageId || !syncConflicts.value.has(pageId)) return
+    const next = new Map(syncConflicts.value)
+    next.delete(pageId)
+    syncConflicts.value = next
+  }
+
+  async function bootstrapRemoteSync() {
+    try {
+      const flushed = await workspaceService.flushSyncQueue()
+      if (flushed.length) {
+        flushed.forEach((page) => {
+          const index = pages.value.findIndex((item) => item.id === page.id)
+          if (index === -1) pages.value.push(page)
+          else pages.value[index] = page
+        })
+      }
+      const { snapshot, syncResults } = await workspaceService.loadWithSync(pages.value)
+      workspace.value = snapshot.workspace
+      pages.value = snapshot.pages
+      applySyncResults(syncResults)
+      syncStorageSourceOrder()
+    } catch (error) {
+      console.warn('远程存储源同步失败', error)
+    }
   }
 
   async function reloadWorkspace() {
     if (reloading.value) return false
     reloading.value = true
     try {
-      const snapshot = await workspaceService.load()
+      const { snapshot, syncResults } = await workspaceService.loadWithSync(pages.value)
       workspace.value = snapshot.workspace
       pages.value = snapshot.pages
+      applySyncResults(syncResults)
       const availablePageIds = new Set(snapshot.pages.filter((page) => !page.deletedAt).map((page) => page.id))
       favoritePageIds.value = favoritePageIds.value.filter((pageId) => availablePageIds.has(pageId))
       recentPageIds.value = recentPageIds.value.filter((pageId) => availablePageIds.has(pageId))
@@ -205,6 +277,37 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const connected = await backend.sync()
     if (!connected) throw new Error(backend.error || '后台同步失败')
     return reloadWorkspace()
+  }
+
+  async function syncSource(sourceId: string) {
+    const result = await workspaceService.syncSource(sourceId, pages.value)
+    pages.value = [
+      ...pages.value.filter((page) => page.storageSourceId !== sourceId),
+      ...result.pages,
+    ]
+    applySyncResults([result])
+    return result
+  }
+
+  async function syncRemoteSources() {
+    await workspaceService.flushSyncQueue()
+    if (backend.connected) {
+      const connected = await backend.sync()
+      if (!connected) throw new Error(backend.error || '后台同步失败')
+    }
+    await reloadWorkspace()
+    syncQueueVersion.value += 1
+  }
+
+  async function flushOfflineQueue() {
+    const flushed = await workspaceService.flushSyncQueue()
+    flushed.forEach((page) => {
+      const index = pages.value.findIndex((item) => item.id === page.id)
+      if (index === -1) pages.value.push(page)
+      else pages.value[index] = page
+    })
+    syncQueueVersion.value += 1
+    return flushed.length
   }
 
   async function addStorageSource(kind: StorageKind = 'local') {
@@ -243,7 +346,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const snapshot = await workspaceService.removeStorageSource(sourceId)
     if (!snapshot) return false
     workspace.value = snapshot.workspace
-    pages.value = snapshot.pages
+    pages.value = snapshot.pages.filter((page) => page.storageSourceId !== sourceId)
     syncStorageSourceOrder()
     persistPreferences()
     return true
@@ -471,14 +574,18 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return true
   }
 
-  async function persist(page: Page) {
+  async function persist(page: Page, options?: { force?: boolean }) {
     saving.value = true
     try {
       const previous = pages.value.find((item) => item.id === page.id)
-      const saved = await workspaceService.savePage({ ...page, markdown: withChildPageLinks(page), updatedAt: new Date().toISOString() }, previous?.updatedAt)
+      const saved = await workspaceService.savePage(
+        { ...page, markdown: withChildPageLinks(page), updatedAt: new Date().toISOString() },
+        { expectedUpdatedAt: options?.force ? undefined : previous?.updatedAt, force: options?.force },
+      )
       const index = pages.value.findIndex((item) => item.id === saved.id)
       if (index === -1) pages.value.push(saved)
       else pages.value[index] = saved
+      clearSyncConflict(saved.id)
       if (previous && previous.title !== saved.title) {
         const linkPattern = pageLinkPattern(saved.id)
         const targetUrl = `tie://page/${saved.id}`
@@ -489,6 +596,21 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         }
       }
     } finally { saving.value = false }
+  }
+
+  function canTransferPageTo(targetSourceId: string, fromSourceId = activePage.value?.storageSourceId) {
+    if (!fromSourceId) return false
+    return storageRegistry.canTransfer(fromSourceId, targetSourceId)
+  }
+
+  function transferHistoryNotice(fromSourceId: string, toSourceId: string) {
+    if (transferPreservesHistory(fromSourceId, toSourceId)) {
+      return '页面树、Markdown 文件、历史版本与图片附件会一并移动。'
+    }
+    if (isBackendRemoteSourceId(fromSourceId) || isBackendRemoteSourceId(toSourceId)) {
+      return '页面正文与图片附件会迁移；历史版本可能不会完整保留。'
+    }
+    return '页面正文会迁移，但历史版本与部分附件可能不会完整保留。'
   }
 
   async function transferPage(pageId: PageId, targetSourceId: string, includeChildren = false) {
@@ -795,5 +917,5 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, storageSourceOrder, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, initialize, reloadWorkspace, syncBackendSources, addStorageSource, importMarkdownFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, initialize, reloadWorkspace, syncBackendSources, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, importMarkdownFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, clearSyncConflict, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })

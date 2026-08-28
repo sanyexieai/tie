@@ -34,7 +34,7 @@ onMounted(() => void nextTick(() => input.value?.focus()))
 
 <template>
   <main class="search-view">
-    <header class="editor-header"><div class="breadcrumbs"><span>我的知识库</span><span>›</span><span>搜索</span></div></header>
+    <header class="editor-header"><div class="breadcrumbs"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><span>›</span><span>搜索</span></div></header>
     <section class="search-content">
       <p class="eyebrow">全局搜索</p>
       <h1>查找你的知识</h1>

@@ -1,7 +1,14 @@
 node_modules/
 dist/
+backend/node_modules/
+backend/data/
+backend/.env
 src-tauri/target/
 .env
 .env.*
 !.env.example
 
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/

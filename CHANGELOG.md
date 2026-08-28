@@ -1,0 +1,37 @@
+# Changelog
+
+All notable changes to Tie are documented in this file.
+
+## [Unreleased]
+
+### Added
+
+- Playwright browser E2E smoke tests (workspace load, navigation, Markdown export).
+- Backend API integration tests (auth, workspace pages, optimistic locking, assets).
+- Linux Tauri build step in CI.
+- Release checklist (`RELEASE.md`).
+
+### Added
+
+- Production backend security: JWT secret validation, loopback bind default, configurable CORS.
+- Tauri CSP and tightened capability permissions for dialog/opener plugins.
+- User-facing install, backup, and known-limitations documentation in README.
+
+### Changed
+
+- Backend refactored to export `createApp()` for testability; data directory configurable via `TIE_DATA_DIR`.
+- Generated desktop app icons; Linux CI bundles `.deb` and `.rpm` (AppImage deferred).
+
+## [0.1.0] - 2026-08-28
+
+### Added
+
+- Notion-style page tree, Tiptap/Typora-style editor, tags, links, and knowledge graph.
+- Multi-storage providers: local/SMB directories, S3, custom Express backend, backend-s3 proxy.
+- Offline sync queue, S3 incremental sync, conflict detection with diff UI.
+- Page attachments (`tie://asset/`) with cross-source migration and Markdown export bundling.
+- Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
+- Unit tests for sync merge, attachments, transfer policy, and sync queue.
+
+[Unreleased]: https://github.com/example/tie/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/example/tie/releases/tag/v0.1.0

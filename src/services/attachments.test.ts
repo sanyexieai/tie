@@ -1,0 +1,56 @@
+import { describe, expect, it } from 'vitest'
+import {
+  ASSET_URL_PREFIX,
+  buildAssetUrl,
+  collectAssetNamesFromMarkdown,
+  parseAssetUrl,
+  preparePageExportBundle,
+  rewriteMarkdownAssetsForExport,
+} from '@/services/attachments'
+import type { Page } from '@/types'
+
+describe('attachments', () => {
+  it('builds and parses asset urls', () => {
+    const url = buildAssetUrl('pg_abc', 'a1b2.png')
+    expect(url).toBe(`${ASSET_URL_PREFIX}pg_abc/a1b2.png`)
+    expect(parseAssetUrl(url)).toEqual({ pageId: 'pg_abc', assetName: 'a1b2.png' })
+  })
+
+  it('rejects non asset urls', () => {
+    expect(parseAssetUrl('https://example.com/a.png')).toBeNull()
+    expect(parseAssetUrl(`${ASSET_URL_PREFIX}only-id`)).toBeNull()
+  })
+
+  it('collects asset names from markdown', () => {
+    const markdown = '![](tie://asset/pg_abc/a1.png) and ![](/tie://asset/pg_abc/b2.jpg)'
+    expect(collectAssetNamesFromMarkdown(markdown, 'pg_abc')).toEqual(['a1.png', 'b2.jpg'])
+  })
+
+  it('rewrites asset urls for export', () => {
+    const markdown = '![](tie://asset/pg_abc/a1.png) text ![](/tie://asset/pg_abc/b2.jpg)'
+    expect(rewriteMarkdownAssetsForExport(markdown, 'pg_abc')).toBe(
+      '![](assets/a1.png) text ![](/assets/b2.jpg)',
+    )
+  })
+
+  it('prepares export bundle and rewrites markdown when assets are unavailable', async () => {
+    const page: Page = {
+      id: 'pg_export',
+      title: '导出测试',
+      icon: '',
+      markdown: '![](tie://asset/pg_export/a1.png)\n\nplain text',
+      tags: [],
+      parentId: null,
+      sortKey: 0,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      deletedAt: null,
+      storageSourceId: 'source-demo-local',
+    }
+    const bundle = await preparePageExportBundle(page)
+    expect(bundle.markdown).toBe('![](assets/a1.png)\n\nplain text')
+    expect(bundle.assets).toEqual({})
+    expect(collectAssetNamesFromMarkdown(page.markdown, page.id)).toEqual(['a1.png'])
+    expect(buildAssetUrl(page.id, 'a1.png')).toBe(`${ASSET_URL_PREFIX}${page.id}/a1.png`)
+  })
+})

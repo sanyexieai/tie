@@ -23,7 +23,7 @@ async function deleteSelectedTag() {
 
 <template>
   <main class="tag-view">
-    <header class="editor-header"><div class="breadcrumbs"><span>我的知识库</span><span>›</span><span>标签</span></div></header>
+    <header class="editor-header"><div class="breadcrumbs"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><span>›</span><span>标签</span></div></header>
     <section class="tag-content">
       <p class="eyebrow">标签</p>
       <div class="tag-title-row"><h1>{{ store.selectedTag ? `# ${store.selectedTag}` : '所有标签' }}</h1><div v-if="store.selectedTag" class="tag-title-actions"><button class="rename-tag-button" :disabled="store.saving" @click="renameSelectedTag">重命名</button><button class="delete-tag-button" :disabled="store.saving" @click="deleteSelectedTag">删除标签</button></div></div>

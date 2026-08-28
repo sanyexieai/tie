@@ -26,6 +26,20 @@ struct S3Connection {
     provider_id: String,
     endpoint: String,
     bucket: String,
+    region: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct S3PageIndexEntry {
+    page_id: String,
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+
+fn is_minio_like_endpoint(endpoint: &str) -> bool {
+    let lower = endpoint.to_ascii_lowercase();
+    !lower.contains("amazonaws.com") && !lower.contains("cloudflarestorage.com")
 }
 
 fn s3_credential_entry(provider_id: &str) -> Result<Entry, String> {
@@ -44,11 +58,61 @@ fn s3_client(connection: &S3Connection) -> Result<(MinioClient, BucketName), Str
     let endpoint = connection.endpoint.trim().parse()
         .map_err(|error| format!("Endpoint 格式无效：{error}"))?;
     let bucket = BucketName::new(connection.bucket.trim()).map_err(|error| format!("Bucket 名称无效：{error}"))?;
+    let skip_region_lookup = is_minio_like_endpoint(connection.endpoint.trim())
+        || connection.region.is_some();
     let client = MinioClientBuilder::new(endpoint)
+        .skip_region_lookup(skip_region_lookup)
         .provider(Some(StaticProvider::new(&credentials.access_key, &credentials.secret_key, None)))
         .build()
         .map_err(|error| format!("无法创建 S3 客户端：{error}"))?;
     Ok((client, bucket))
+}
+
+fn s3_page_id_from_key(name: &str) -> Option<String> {
+    name.strip_prefix("tie/pages/")?.strip_suffix(".md").map(str::to_owned)
+}
+
+async fn list_s3_object_index(connection: &S3Connection) -> Result<Vec<S3PageIndexEntry>, String> {
+    let (client, bucket) = s3_client(connection)?;
+    let mut stream = client.list_objects(bucket.clone())
+        .map_err(|error| format!("无法列出 S3 页面：{error}"))?
+        .prefix(Some("tie/pages/".to_owned()))
+        .recursive(true)
+        .build()
+        .to_stream()
+        .await;
+    let mut entries = Vec::new();
+    while let Some(batch) = stream.next().await {
+        let batch = batch.map_err(|error| format!("无法读取 S3 页面列表：{error}"))?;
+        for entry in batch.contents.into_iter().filter(|entry| entry.name.ends_with(".md")) {
+            let Some(page_id) = s3_page_id_from_key(&entry.name) else { continue };
+            entries.push(S3PageIndexEntry {
+                page_id,
+                etag: entry.etag.clone(),
+                last_modified: entry.last_modified.map(|value| value.to_rfc3339()),
+            });
+        }
+    }
+    Ok(entries)
+}
+
+async fn download_s3_page(
+    client: &MinioClient,
+    bucket: BucketName,
+    source_id: &str,
+    object_name: String,
+) -> Result<Page, String> {
+    let response = client.get_object(bucket, object_name)
+        .map_err(|error| format!("无法读取 S3 页面：{error}"))?
+        .build()
+        .send()
+        .await
+        .map_err(|error| format!("无法下载 S3 页面：{error}"))?;
+    let content = String::from_utf8(response.into_bytes().await.map_err(|error| format!("无法读取 S3 页面内容：{error}"))?.to_vec())
+        .map_err(|_| "S3 页面不是 UTF-8 Markdown 文件".to_owned())?;
+    let mut page = parse_page(&content).map_err(|error| format!("S3 页面格式无效：{error}"))?;
+    page.storage_source_id = source_id.to_owned();
+    Ok(page)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -119,6 +183,30 @@ struct WorkspaceSettings {
     kind: String,
     #[serde(default)]
     sources: Vec<StorageSource>,
+    #[serde(default, rename = "s3Providers")]
+    s3_providers: Vec<S3ProviderConfig>,
+}
+
+fn default_created_at() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_owned())
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct S3ProviderConfig {
+    id: String,
+    name: String,
+    endpoint: String,
+    bucket: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(default)]
+    credential_stored: bool,
+    #[serde(default = "default_created_at")]
+    created_at: String,
 }
 
 fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -139,6 +227,7 @@ fn load_settings(app: &tauri::AppHandle) -> Result<WorkspaceSettings, String> {
             path: String::new(),
             kind: String::new(),
             sources: Vec::new(),
+            s3_providers: Vec::new(),
         }),
         Err(error) => Err(error.to_string()),
     }
@@ -200,6 +289,55 @@ fn revision_dir(root: &Path, page_id: &str) -> PathBuf {
     root.join(".tie").join("history").join(page_id)
 }
 
+fn page_asset_dir(root: &Path, page_id: &str) -> PathBuf {
+    root.join(".tie").join("assets").join(page_id)
+}
+
+fn sanitize_asset_name(file_name: &str) -> Result<String, String> {
+    let base = Path::new(file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("附件名称无效")?;
+    if base.is_empty()
+        || base == "."
+        || base == ".."
+        || !base
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '.' || character == '-' || character == '_')
+    {
+        return Err("附件名称无效".to_owned());
+    }
+    Ok(base.to_owned())
+}
+
+#[tauri::command]
+fn list_file_page_assets(app: tauri::AppHandle, page: Page) -> Result<Vec<String>, String> {
+    let root = source_root(&app, &page.storage_source_id)?;
+    let directory = page_asset_dir(&root, &page.id);
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if path.is_file() {
+            if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    Ok(names)
+}
+
+fn source_root(app: &tauri::AppHandle, storage_source_id: &str) -> Result<PathBuf, String> {
+    let (sources, _) = workspace_sources(app)?;
+    let source = sources
+        .iter()
+        .find(|item| item.id == storage_source_id)
+        .ok_or("页面所属存储源不存在")?;
+    Ok(PathBuf::from(&source.path))
+}
+
 fn revision_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -236,6 +374,33 @@ fn archive_page_revision(root: &Path, page: &Page) -> Result<(), String> {
     while revisions.len() > MAX_PAGE_REVISIONS {
         let oldest = revisions.remove(0);
         fs::remove_file(oldest).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn copy_page_assets(source_root: &Path, target_root: &Path, page_id: &str) -> Result<(), String> {
+    let source_directory = page_asset_dir(source_root, page_id);
+    if !source_directory.exists() {
+        return Ok(());
+    }
+    let target_directory = page_asset_dir(target_root, page_id);
+    fs::create_dir_all(&target_directory).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(&source_directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if path.is_file() {
+            if let Err(error) = fs::copy(&path, target_directory.join(entry.file_name())) {
+                return Err(format!("无法迁移页面附件：{error}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_page_assets(root: &Path, page_id: &str) -> Result<(), String> {
+    let directory = page_asset_dir(root, page_id);
+    if directory.exists() {
+        fs::remove_dir_all(directory).map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -417,13 +582,14 @@ fn add_storage_source(
         path: String::new(),
         kind: String::new(),
         sources,
+        s3_providers: existing_settings.s3_providers,
     };
     save_settings(&app, &settings)?;
     load_workspace(app)
 }
 
 #[tauri::command]
-fn save_page(app: tauri::AppHandle, page: Page) -> Result<Page, String> {
+fn save_page(app: tauri::AppHandle, page: Page, expected_updated_at: Option<String>) -> Result<Page, String> {
     let (sources, _) = workspace_sources(&app)?;
     let source = sources
         .iter()
@@ -434,6 +600,11 @@ fn save_page(app: tauri::AppHandle, page: Page) -> Result<Page, String> {
     let path = markdown_path(&root, &page.id);
     if let Ok(content) = fs::read_to_string(&path) {
         if let Ok(previous) = parse_page(&content) {
+            if let Some(expected) = &expected_updated_at {
+                if previous.updated_at != *expected {
+                    return Err("页面已在其他设备更新，请重新载入后再保存".to_owned());
+                }
+            }
             if page_has_changed(&previous, &page) {
                 archive_page_revision(&root, &previous)?;
             }
@@ -520,16 +691,53 @@ fn restore_page_revision(
         updated_at: page.updated_at,
         ..revision
     };
-    save_page(app, restored)
+    save_page(app, restored, None)
+}
+
+#[derive(serde::Deserialize)]
+struct ExportAssetPayload {
+    name: String,
+    data: Vec<u8>,
 }
 
 #[tauri::command]
 fn export_page_markdown(page: Page, target_path: String) -> Result<(), String> {
-    let path = PathBuf::from(target_path);
+    export_page_markdown_bundle(page.markdown, target_path, Vec::new())
+}
+
+#[tauri::command]
+fn export_page_markdown_bundle(
+    markdown: String,
+    target_path: String,
+    assets: Vec<ExportAssetPayload>,
+) -> Result<(), String> {
+    let path = PathBuf::from(&target_path);
     if path.extension().is_none() {
         return Err("导出文件需要使用 .md 扩展名".to_owned());
     }
-    fs::write(path, page.markdown).map_err(|error| format!("无法导出 Markdown：{error}"))
+    fs::write(&path, markdown).map_err(|error| format!("无法导出 Markdown：{error}"))?;
+    if assets.is_empty() {
+        return Ok(());
+    }
+    let assets_dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("assets");
+    fs::create_dir_all(&assets_dir)
+        .map_err(|error| format!("无法创建附件目录：{error}"))?;
+    for asset in assets {
+        if asset.name.contains('/')
+            || asset.name.contains('\\')
+            || asset.name.contains("..")
+            || asset.name.is_empty()
+        {
+            return Err(format!("非法附件名：{}", asset.name));
+        }
+        let asset_path = assets_dir.join(&asset.name);
+        fs::write(asset_path, asset.data)
+            .map_err(|error| format!("无法导出附件 {}：{error}", asset.name))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -591,15 +799,23 @@ fn transfer_page_storage(
         let _ = fs::remove_file(&target_path);
         return Err(error);
     }
+    if let Err(error) = copy_page_assets(&source_root, &target_root, &transferred.id) {
+        let _ = fs::remove_file(&target_path);
+        let _ = fs::remove_dir_all(revision_dir(&target_root, &transferred.id));
+        let _ = remove_page_assets(&target_root, &transferred.id);
+        return Err(error);
+    }
     if let Err(error) = fs::remove_file(source_path) {
         let _ = fs::remove_file(&target_path);
         let _ = fs::remove_dir_all(revision_dir(&target_root, &transferred.id));
+        let _ = remove_page_assets(&target_root, &transferred.id);
         return Err(format!("无法移除原页面文件，迁移已取消：{error}"));
     }
     let source_history = revision_dir(&source_root, &transferred.id);
     if source_history.exists() {
         let _ = fs::remove_dir_all(source_history);
     }
+    let _ = remove_page_assets(&source_root, &transferred.id);
     Ok(transferred)
 }
 
@@ -795,6 +1011,7 @@ fn remove_storage_source(
             path: String::new(),
             kind: String::new(),
             sources,
+            s3_providers: existing_settings.s3_providers,
         },
     )?;
     load_workspace(app)
@@ -824,6 +1041,7 @@ fn rename_storage_source(
             path: String::new(),
             kind: String::new(),
             sources,
+            s3_providers: existing_settings.s3_providers,
         },
     )?;
     load_workspace(app)
@@ -839,6 +1057,388 @@ fn rename_workspace(app: tauri::AppHandle, name: String) -> Result<WorkspaceSnap
     settings.name = clean_name.to_owned();
     save_settings(&app, &settings)?;
     load_workspace(app)
+}
+
+fn s3_page_object(page_id: &str) -> String {
+    format!("tie/pages/{page_id}.md")
+}
+
+fn s3_history_prefix(page_id: &str) -> String {
+    format!("tie/history/{page_id}/")
+}
+
+fn s3_history_object(page_id: &str, revision_id: &str) -> String {
+    format!("tie/history/{page_id}/{revision_id}.md")
+}
+
+async fn list_s3_object_keys(
+    client: &MinioClient,
+    bucket: BucketName,
+    prefix: &str,
+) -> Result<Vec<String>, String> {
+    let mut stream = client.list_objects(bucket)
+        .map_err(|error| format!("无法列出 S3 对象：{error}"))?
+        .prefix(Some(prefix.to_owned()))
+        .recursive(true)
+        .build()
+        .to_stream()
+        .await;
+    let mut keys = Vec::new();
+    while let Some(batch) = stream.next().await {
+        let batch = batch.map_err(|error| format!("无法读取 S3 对象列表：{error}"))?;
+        for entry in batch.contents {
+            keys.push(entry.name);
+        }
+    }
+    Ok(keys)
+}
+
+async fn trim_s3_history(client: &MinioClient, bucket: BucketName, page_id: &str) -> Result<(), String> {
+    let prefix = s3_history_prefix(page_id);
+    let mut keys = list_s3_object_keys(client, bucket.clone(), &prefix).await?;
+    keys.sort();
+    while keys.len() > MAX_PAGE_REVISIONS {
+        let oldest = keys.remove(0);
+        client.delete_object(bucket.clone(), oldest)
+            .map_err(|error| format!("无法清理 S3 历史版本：{error}"))?
+            .build()
+            .send()
+            .await
+            .map_err(|error| format!("无法清理 S3 历史版本：{error}"))?;
+    }
+    Ok(())
+}
+
+async fn archive_s3_page_revision(
+    client: &MinioClient,
+    bucket: BucketName,
+    page: &Page,
+) -> Result<(), String> {
+    let revision_key = s3_history_object(&page.id, &revision_id());
+    client.put_object_content(bucket.clone(), revision_key, ObjectContent::from(frontmatter(page)))
+        .map_err(|error| format!("无法写入 S3 历史版本：{error}"))?
+        .build()
+        .send()
+        .await
+        .map_err(|error| format!("无法写入 S3 历史版本：{error}"))?;
+    trim_s3_history(client, bucket, &page.id).await
+}
+
+async fn delete_s3_history(client: &MinioClient, bucket: BucketName, page_id: &str) -> Result<(), String> {
+    for key in list_s3_object_keys(client, bucket.clone(), &s3_history_prefix(page_id)).await? {
+        client.delete_object(bucket.clone(), key)
+            .map_err(|error| format!("无法删除 S3 历史版本：{error}"))?
+            .build()
+            .send()
+            .await
+            .map_err(|error| format!("无法删除 S3 历史版本：{error}"))?;
+    }
+    Ok(())
+}
+
+fn file_source_root(app: &tauri::AppHandle, source_id: &str) -> Result<PathBuf, String> {
+    let (sources, _) = workspace_sources(app)?;
+    let source = sources
+        .iter()
+        .find(|source| source.id == source_id)
+        .ok_or("存储源不存在")?;
+    Ok(PathBuf::from(&source.path))
+}
+
+#[tauri::command]
+fn load_s3_providers(app: tauri::AppHandle) -> Result<Vec<S3ProviderConfig>, String> {
+    Ok(load_settings(&app)?.s3_providers)
+}
+
+#[tauri::command]
+fn save_s3_providers(app: tauri::AppHandle, providers: Vec<S3ProviderConfig>) -> Result<(), String> {
+    let mut settings = load_settings(&app)?;
+    settings.s3_providers = providers;
+    save_settings(&app, &settings)
+}
+
+#[tauri::command]
+fn upsert_s3_provider(app: tauri::AppHandle, provider: S3ProviderConfig) -> Result<Vec<S3ProviderConfig>, String> {
+    let mut settings = load_settings(&app)?;
+    if let Some(existing) = settings.s3_providers.iter_mut().find(|item| item.id == provider.id) {
+        *existing = provider;
+    } else {
+        settings.s3_providers.push(provider);
+    }
+    save_settings(&app, &settings)?;
+    Ok(settings.s3_providers)
+}
+
+#[tauri::command]
+fn remove_s3_provider_config(app: tauri::AppHandle, provider_id: String) -> Result<Vec<S3ProviderConfig>, String> {
+    let mut settings = load_settings(&app)?;
+    settings.s3_providers.retain(|provider| provider.id != provider_id);
+    save_settings(&app, &settings)?;
+    Ok(settings.s3_providers)
+}
+
+#[tauri::command]
+async fn list_s3_page_revisions(connection: S3Connection, page_id: String) -> Result<Vec<PageRevision>, String> {
+    let (client, bucket) = s3_client(&connection)?;
+    let mut revisions = Vec::new();
+    for key in list_s3_object_keys(&client, bucket.clone(), &s3_history_prefix(&page_id)).await? {
+        if !key.ends_with(".md") {
+            continue;
+        }
+        let response = client.get_object(bucket.clone(), key.clone())
+            .map_err(|error| format!("无法读取 S3 历史版本：{error}"))?
+            .build()
+            .send()
+            .await
+            .map_err(|error| format!("无法下载 S3 历史版本：{error}"))?;
+        let content = String::from_utf8(response.into_bytes().await.map_err(|error| format!("无法读取 S3 历史版本内容：{error}"))?.to_vec())
+            .map_err(|_| "S3 历史版本不是 UTF-8 Markdown 文件".to_owned())?;
+        let page = parse_page(&content).map_err(|error| format!("S3 历史版本格式无效：{error}"))?;
+        let id = key
+            .trim_start_matches(&s3_history_prefix(&page_id))
+            .trim_end_matches(".md")
+            .to_owned();
+        revisions.push(PageRevision {
+            id,
+            saved_at: page.updated_at,
+            title: page.title,
+        });
+    }
+    revisions.sort_by(|a, b| b.id.cmp(&a.id));
+    Ok(revisions)
+}
+
+#[tauri::command]
+async fn read_s3_page_revision(connection: S3Connection, page: Page, revision_id: String) -> Result<Page, String> {
+    let (client, bucket) = s3_client(&connection)?;
+    let key = s3_history_object(&page.id, &revision_id);
+    let mut revision = download_s3_page(&client, bucket, &page.storage_source_id, key).await?;
+    revision.id = page.id;
+    revision.storage_source_id = page.storage_source_id;
+    revision.created_at = page.created_at;
+    Ok(revision)
+}
+
+#[tauri::command]
+async fn copy_file_history_to_s3(
+    app: tauri::AppHandle,
+    page_id: String,
+    file_source_id: String,
+    connection: S3Connection,
+) -> Result<(), String> {
+    let root = file_source_root(&app, &file_source_id)?;
+    let source_directory = revision_dir(&root, &page_id);
+    if !source_directory.exists() {
+        return Ok(());
+    }
+    let (client, bucket) = s3_client(&connection)?;
+    for entry in fs::read_dir(source_directory).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if !path.extension().is_some_and(|extension| extension == "md") {
+            continue;
+        }
+        let revision_id = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .ok_or("版本文件名无效")?;
+        let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        client.put_object_content(
+            bucket.clone(),
+            s3_history_object(&page_id, revision_id),
+            ObjectContent::from(content),
+        )
+        .map_err(|error| format!("无法复制历史版本到 S3：{error}"))?
+        .build()
+        .send()
+        .await
+        .map_err(|error| format!("无法复制历史版本到 S3：{error}"))?;
+    }
+    trim_s3_history(&client, bucket, &page_id).await
+}
+
+#[tauri::command]
+async fn copy_s3_history_to_file(
+    app: tauri::AppHandle,
+    connection: S3Connection,
+    page_id: String,
+    file_source_id: String,
+) -> Result<(), String> {
+    let root = file_source_root(&app, &file_source_id)?;
+    let target_directory = revision_dir(&root, &page_id);
+    if target_directory.exists() {
+        return Err("目标存储源中已存在该页面的历史记录，无法迁移".to_owned());
+    }
+    let (client, bucket) = s3_client(&connection)?;
+    let keys = list_s3_object_keys(&client, bucket.clone(), &s3_history_prefix(&page_id)).await?;
+    if keys.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(&target_directory).map_err(|error| error.to_string())?;
+    for key in keys {
+        if !key.ends_with(".md") {
+            continue;
+        }
+        let revision_id = {
+            let prefix = s3_history_prefix(&page_id);
+            key.strip_prefix(&prefix)
+                .and_then(|name| name.strip_suffix(".md"))
+                .unwrap_or(&key)
+                .to_owned()
+        };
+        let response = client.get_object(bucket.clone(), key)
+            .map_err(|error| format!("无法读取 S3 历史版本：{error}"))?
+            .build()
+            .send()
+            .await
+            .map_err(|error| format!("无法下载 S3 历史版本：{error}"))?;
+        let content = String::from_utf8(response.into_bytes().await.map_err(|error| format!("无法读取 S3 历史版本内容：{error}"))?.to_vec())
+            .map_err(|_| "S3 历史版本不是 UTF-8 Markdown 文件".to_owned())?;
+        fs::write(target_directory.join(format!("{revision_id}.md")), content)
+            .map_err(|error| format!("无法写入本地历史版本：{error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn copy_s3_history_to_s3(
+    source: S3Connection,
+    target: S3Connection,
+    page_id: String,
+) -> Result<(), String> {
+    let (source_client, source_bucket) = s3_client(&source)?;
+    let (target_client, target_bucket) = s3_client(&target)?;
+    let keys = list_s3_object_keys(&source_client, source_bucket.clone(), &s3_history_prefix(&page_id)).await?;
+    for key in keys {
+        if !key.ends_with(".md") {
+            continue;
+        }
+        let response = source_client.get_object(source_bucket.clone(), key.clone())
+            .map_err(|error| format!("无法读取 S3 历史版本：{error}"))?
+            .build()
+            .send()
+            .await
+            .map_err(|error| format!("无法下载 S3 历史版本：{error}"))?;
+        let content = response.into_bytes().await.map_err(|error| format!("无法读取 S3 历史版本内容：{error}"))?;
+        target_client.put_object_content(target_bucket.clone(), key, ObjectContent::from(content.to_vec()))
+            .map_err(|error| format!("无法复制 S3 历史版本：{error}"))?
+            .build()
+            .send()
+            .await
+            .map_err(|error| format!("无法复制 S3 历史版本：{error}"))?;
+    }
+    trim_s3_history(&target_client, target_bucket, &page_id).await
+}
+
+fn s3_asset_prefix(page_id: &str) -> String {
+    format!("tie/assets/{page_id}/")
+}
+
+#[tauri::command]
+async fn copy_file_assets_to_s3(
+    app: tauri::AppHandle,
+    page_id: String,
+    file_source_id: String,
+    connection: S3Connection,
+) -> Result<(), String> {
+    let root = file_source_root(&app, &file_source_id)?;
+    let source_directory = page_asset_dir(&root, &page_id);
+    if !source_directory.exists() {
+        return Ok(());
+    }
+    let (client, bucket) = s3_client(&connection)?;
+    for entry in fs::read_dir(source_directory).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let asset_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("附件名称无效")?;
+        let sanitized = sanitize_asset_name(asset_name)?;
+        let data = fs::read(&path).map_err(|error| error.to_string())?;
+        client.put_object_content(
+            bucket.clone(),
+            s3_asset_object(&page_id, &sanitized),
+            ObjectContent::from(data),
+        )
+        .map_err(|error| format!("无法复制附件到 S3：{error}"))?
+        .build()
+        .send()
+        .await
+        .map_err(|error| format!("无法复制附件到 S3：{error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn copy_s3_assets_to_file(
+    app: tauri::AppHandle,
+    connection: S3Connection,
+    page_id: String,
+    file_source_id: String,
+) -> Result<(), String> {
+    let root = file_source_root(&app, &file_source_id)?;
+    let target_directory = page_asset_dir(&root, &page_id);
+    let (client, bucket) = s3_client(&connection)?;
+    let keys = list_s3_object_keys(&client, bucket.clone(), &s3_asset_prefix(&page_id)).await?;
+    if keys.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(&target_directory).map_err(|error| error.to_string())?;
+    for key in keys {
+        let asset_name = key
+            .strip_prefix(&s3_asset_prefix(&page_id))
+            .ok_or("S3 附件路径无效")?;
+        let sanitized = sanitize_asset_name(asset_name)?;
+        let response = client.get_object(bucket.clone(), key)
+            .map_err(|error| format!("无法读取 S3 附件：{error}"))?
+            .build()
+            .send()
+            .await
+            .map_err(|error| format!("无法下载 S3 附件：{error}"))?;
+        let data = response.into_bytes().await.map_err(|error| format!("无法读取 S3 附件内容：{error}"))?;
+        fs::write(target_directory.join(&sanitized), data.to_vec())
+            .map_err(|error| format!("无法写入本地附件：{error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn copy_s3_assets_to_s3(
+    source: S3Connection,
+    target: S3Connection,
+    page_id: String,
+) -> Result<(), String> {
+    let (source_client, source_bucket) = s3_client(&source)?;
+    let (target_client, target_bucket) = s3_client(&target)?;
+    let keys = list_s3_object_keys(&source_client, source_bucket.clone(), &s3_asset_prefix(&page_id)).await?;
+    for key in keys {
+        let response = source_client.get_object(source_bucket.clone(), key.clone())
+            .map_err(|error| format!("无法读取 S3 附件：{error}"))?
+            .build()
+            .send()
+            .await
+            .map_err(|error| format!("无法下载 S3 附件：{error}"))?;
+        let data = response.into_bytes().await.map_err(|error| format!("无法读取 S3 附件内容：{error}"))?;
+        target_client.put_object_content(target_bucket.clone(), key, ObjectContent::from(data.to_vec()))
+            .map_err(|error| format!("无法复制 S3 附件：{error}"))?
+            .build()
+            .send()
+            .await
+            .map_err(|error| format!("无法复制 S3 附件：{error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_s3_page_assets(connection: S3Connection, page: Page) -> Result<Vec<String>, String> {
+    let (client, bucket) = s3_client(&connection)?;
+    let keys = list_s3_object_keys(&client, bucket, &s3_asset_prefix(&page.id)).await?;
+    Ok(keys
+        .into_iter()
+        .filter_map(|key| key.strip_prefix(&s3_asset_prefix(&page.id)).map(str::to_owned))
+        .collect())
 }
 
 #[tauri::command]
@@ -865,8 +1465,8 @@ fn remove_s3_credentials(provider_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn test_s3_connection(provider_id: String, endpoint: String, bucket: String) -> Result<(), String> {
-    let (client, bucket) = s3_client(&S3Connection { provider_id, endpoint, bucket })?;
+async fn test_s3_connection(provider_id: String, endpoint: String, bucket: String, region: Option<String>) -> Result<(), String> {
+    let (client, bucket) = s3_client(&S3Connection { provider_id, endpoint, bucket, region })?;
     let response: BucketExistsResponse = client.bucket_exists(bucket)
         .map_err(|error| format!("无法检查 Bucket：{error}"))?
         .build()
@@ -877,40 +1477,51 @@ async fn test_s3_connection(provider_id: String, endpoint: String, bucket: Strin
 }
 
 #[tauri::command]
+async fn list_s3_page_index(connection: S3Connection) -> Result<Vec<S3PageIndexEntry>, String> {
+    list_s3_object_index(&connection).await
+}
+
+#[tauri::command]
 async fn load_s3_pages(connection: S3Connection) -> Result<Vec<Page>, String> {
     let source_id = format!("s3:{}", connection.provider_id);
     let (client, bucket) = s3_client(&connection)?;
-    let mut stream = client.list_objects(bucket.clone())
-        .map_err(|error| format!("无法列出 S3 页面：{error}"))?
-        .prefix(Some("tie/pages/".to_owned()))
-        .recursive(true)
-        .build()
-        .to_stream()
-        .await;
-    let mut pages = Vec::new();
-    while let Some(batch) = stream.next().await {
-        let batch = batch.map_err(|error| format!("无法读取 S3 页面列表：{error}"))?;
-        for entry in batch.contents.into_iter().filter(|entry| entry.name.ends_with(".md")) {
-            let response = client.get_object(bucket.clone(), entry.name)
-                .map_err(|error| format!("无法读取 S3 页面：{error}"))?
-                .build()
-                .send()
-                .await
-                .map_err(|error| format!("无法下载 S3 页面：{error}"))?;
-            let content = String::from_utf8(response.into_bytes().await.map_err(|error| format!("无法读取 S3 页面内容：{error}"))?.to_vec())
-                .map_err(|_| "S3 页面不是 UTF-8 Markdown 文件".to_owned())?;
-            let mut page = parse_page(&content).map_err(|error| format!("S3 页面格式无效：{error}"))?;
-            page.storage_source_id = source_id.clone();
-            pages.push(page);
-        }
+    let index = list_s3_object_index(&connection).await?;
+    let mut pages = Vec::with_capacity(index.len());
+    for entry in index {
+        pages.push(download_s3_page(&client, bucket.clone(), &source_id, format!("tie/pages/{}.md", entry.page_id)).await?);
     }
     Ok(pages)
 }
 
 #[tauri::command]
-async fn save_s3_page(connection: S3Connection, page: Page) -> Result<Page, String> {
+async fn load_s3_pages_by_ids(connection: S3Connection, page_ids: Vec<String>) -> Result<Vec<Page>, String> {
+    let source_id = format!("s3:{}", connection.provider_id);
     let (client, bucket) = s3_client(&connection)?;
-    let object = format!("tie/pages/{}.md", page.id);
+    let mut pages = Vec::with_capacity(page_ids.len());
+    for page_id in page_ids {
+        pages.push(download_s3_page(&client, bucket.clone(), &source_id, format!("tie/pages/{page_id}.md")).await?);
+    }
+    Ok(pages)
+}
+
+#[tauri::command]
+async fn save_s3_page(
+    connection: S3Connection,
+    page: Page,
+    expected_updated_at: Option<String>,
+) -> Result<Page, String> {
+    let (client, bucket) = s3_client(&connection)?;
+    let object = s3_page_object(&page.id);
+    if let Ok(previous) = download_s3_page(&client, bucket.clone(), &page.storage_source_id, object.clone()).await {
+        if let Some(expected) = expected_updated_at {
+            if previous.updated_at != expected {
+                return Err("页面已在其他设备更新，请重新载入后再保存".to_owned());
+            }
+        }
+        if page_has_changed(&previous, &page) {
+            archive_s3_page_revision(&client, bucket.clone(), &previous).await?;
+        }
+    }
     client.put_object_content(bucket, object, ObjectContent::from(frontmatter(&page)))
         .map_err(|error| format!("无法创建 S3 写入请求：{error}"))?
         .build()
@@ -924,7 +1535,8 @@ async fn save_s3_page(connection: S3Connection, page: Page) -> Result<Page, Stri
 async fn permanently_delete_s3_pages(connection: S3Connection, page_ids: Vec<String>) -> Result<(), String> {
     let (client, bucket) = s3_client(&connection)?;
     for page_id in page_ids {
-        client.delete_object(bucket.clone(), format!("tie/pages/{page_id}.md"))
+        delete_s3_history(&client, bucket.clone(), &page_id).await?;
+        client.delete_object(bucket.clone(), s3_page_object(&page_id))
             .map_err(|error| format!("无法创建 S3 删除请求：{error}"))?
             .build()
             .send()
@@ -932,6 +1544,85 @@ async fn permanently_delete_s3_pages(connection: S3Connection, page_ids: Vec<Str
             .map_err(|error| format!("无法彻底删除 S3 页面：{error}"))?;
     }
     Ok(())
+}
+
+#[tauri::command]
+fn save_file_page_asset(
+    app: tauri::AppHandle,
+    page: Page,
+    file_name: String,
+    data: Vec<u8>,
+) -> Result<String, String> {
+    if data.is_empty() {
+        return Err("附件内容为空".to_owned());
+    }
+    if data.len() > 20 * 1024 * 1024 {
+        return Err("附件超过 20 MB".to_owned());
+    }
+    let root = source_root(&app, &page.storage_source_id)?;
+    let asset_name = sanitize_asset_name(&file_name)?;
+    let directory = page_asset_dir(&root, &page.id);
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    fs::write(directory.join(&asset_name), data).map_err(|error| error.to_string())?;
+    Ok(asset_name)
+}
+
+#[tauri::command]
+fn read_file_page_asset(app: tauri::AppHandle, page: Page, asset_name: String) -> Result<Vec<u8>, String> {
+    let root = source_root(&app, &page.storage_source_id)?;
+    let asset_name = sanitize_asset_name(&asset_name)?;
+    fs::read(page_asset_dir(&root, &page.id).join(asset_name)).map_err(|error| error.to_string())
+}
+
+fn s3_asset_object(page_id: &str, asset_name: &str) -> String {
+    format!("tie/assets/{page_id}/{asset_name}")
+}
+
+#[tauri::command]
+async fn save_s3_page_asset(
+    connection: S3Connection,
+    page: Page,
+    file_name: String,
+    data: Vec<u8>,
+) -> Result<String, String> {
+    if data.is_empty() {
+        return Err("附件内容为空".to_owned());
+    }
+    if data.len() > 20 * 1024 * 1024 {
+        return Err("附件超过 20 MB".to_owned());
+    }
+    let asset_name = sanitize_asset_name(&file_name)?;
+    let (client, bucket) = s3_client(&connection)?;
+    client
+        .put_object_content(bucket, s3_asset_object(&page.id, &asset_name), ObjectContent::from(data))
+        .map_err(|error| format!("无法创建 S3 附件写入请求：{error}"))?
+        .build()
+        .send()
+        .await
+        .map_err(|error| format!("无法保存 S3 附件：{error}"))?;
+    Ok(asset_name)
+}
+
+#[tauri::command]
+async fn read_s3_page_asset(
+    connection: S3Connection,
+    page: Page,
+    asset_name: String,
+) -> Result<Vec<u8>, String> {
+    let asset_name = sanitize_asset_name(&asset_name)?;
+    let (client, bucket) = s3_client(&connection)?;
+    let response = client
+        .get_object(bucket, s3_asset_object(&page.id, &asset_name))
+        .map_err(|error| format!("无法读取 S3 附件：{error}"))?
+        .build()
+        .send()
+        .await
+        .map_err(|error| format!("无法下载 S3 附件：{error}"))?;
+    Ok(response
+        .into_bytes()
+        .await
+        .map_err(|error| format!("无法读取 S3 附件内容：{error}"))?
+        .to_vec())
 }
 
 pub fn run() {
@@ -949,14 +1640,35 @@ pub fn run() {
             rename_workspace,
             save_s3_credentials,
             remove_s3_credentials,
+            load_s3_providers,
+            save_s3_providers,
+            upsert_s3_provider,
+            remove_s3_provider_config,
             test_s3_connection,
+            list_s3_page_index,
             load_s3_pages,
+            load_s3_pages_by_ids,
             save_s3_page,
             permanently_delete_s3_pages,
+            list_s3_page_revisions,
+            read_s3_page_revision,
+            copy_file_history_to_s3,
+            copy_s3_history_to_file,
+            copy_s3_history_to_s3,
+            copy_file_assets_to_s3,
+            copy_s3_assets_to_file,
+            copy_s3_assets_to_s3,
+            list_file_page_assets,
+            list_s3_page_assets,
+            save_file_page_asset,
+            read_file_page_asset,
+            save_s3_page_asset,
+            read_s3_page_asset,
             list_page_revisions,
             read_page_revision,
             restore_page_revision,
             export_page_markdown,
+            export_page_markdown_bundle,
             permanently_delete_pages
         ])
         .run(tauri::generate_context!())

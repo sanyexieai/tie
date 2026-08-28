@@ -17,7 +17,7 @@ async function emptyTrash() {
 
 <template>
   <main class="trash-view">
-    <header class="editor-header"><div class="breadcrumbs"><span>我的知识库</span><span>›</span><span>回收站</span></div></header>
+    <header class="editor-header"><div class="breadcrumbs"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><span>›</span><span>回收站</span></div></header>
     <section class="trash-content">
       <p class="eyebrow">回收站</p>
       <div class="trash-title-row"><h1>已删除页面</h1><button v-if="store.trashedPages.length" class="danger empty-trash-button" :disabled="store.saving" @click="emptyTrash">{{ store.saving ? '正在清空…' : '清空回收站' }}</button></div>

@@ -17,14 +17,24 @@ import { useBackendStore } from '@/stores/backend'
 const store = useWorkspaceStore()
 const backend = useBackendStore()
 const sidebarCollapsed = ref(false)
+const contextCollapsed = ref(false)
 const isMobileLayout = ref(false)
+const usesContextDrawer = ref(false)
 const focusMode = ref(false)
 const mobileContextOpen = ref(false)
 const backendDialogOpen = ref(false)
 const storageSettingsOpen = ref(false)
 let mobileLayoutQuery: MediaQueryList | null = null
+let contextDrawerQuery: MediaQueryList | null = null
 
 function toggleSidebar() { sidebarCollapsed.value = !sidebarCollapsed.value }
+function toggleContextPanel() {
+  if (usesContextDrawer.value) {
+    mobileContextOpen.value = !mobileContextOpen.value
+    return
+  }
+  contextCollapsed.value = !contextCollapsed.value
+}
 
 function syncMobileLayout() {
   if (!mobileLayoutQuery) return
@@ -34,11 +44,16 @@ function syncMobileLayout() {
   if (mobile) sidebarCollapsed.value = true
   else if (wasMobile) sidebarCollapsed.value = false
 }
+
+function syncContextDrawer() {
+  if (!contextDrawerQuery) return
+  usesContextDrawer.value = contextDrawerQuery.matches
+  if (!usesContextDrawer.value) mobileContextOpen.value = false
+}
 function toggleFocusMode() {
   focusMode.value = !focusMode.value
   if (focusMode.value) mobileContextOpen.value = false
 }
-function toggleMobileContext() { mobileContextOpen.value = !mobileContextOpen.value }
 function onShortcut(event: KeyboardEvent) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'k') {
     event.preventDefault()
@@ -54,11 +69,18 @@ function onShortcut(event: KeyboardEvent) {
     event.preventDefault()
     if (!focusMode.value) toggleSidebar()
   }
+  if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === '\\') {
+    event.preventDefault()
+    if (!focusMode.value) toggleContextPanel()
+  }
 }
 onMounted(async () => {
   mobileLayoutQuery = window.matchMedia('(max-width: 720px)')
+  contextDrawerQuery = window.matchMedia('(max-width: 1080px)')
   syncMobileLayout()
+  syncContextDrawer()
   mobileLayoutQuery.addEventListener('change', syncMobileLayout)
+  contextDrawerQuery.addEventListener('change', syncContextDrawer)
   window.addEventListener('keydown', onShortcut)
   window.addEventListener('tie:toggle-focus-mode', toggleFocusMode)
   await backend.initialize()
@@ -66,13 +88,22 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   mobileLayoutQuery?.removeEventListener('change', syncMobileLayout)
+  contextDrawerQuery?.removeEventListener('change', syncContextDrawer)
   window.removeEventListener('keydown', onShortcut)
   window.removeEventListener('tie:toggle-focus-mode', toggleFocusMode)
 })
 </script>
 
 <template>
-  <div v-if="store.initialized" class="app-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed, 'focus-mode': focusMode }">
+  <div
+    v-if="store.initialized"
+    class="app-shell"
+    :class="{
+      'sidebar-collapsed': sidebarCollapsed,
+      'context-collapsed': contextCollapsed,
+      'focus-mode': focusMode,
+    }"
+  >
     <button v-if="sidebarCollapsed && !focusMode" class="mobile-sidebar-toggle" aria-label="打开侧边栏" @click="toggleSidebar">☰</button>
     <div v-if="isMobileLayout && !sidebarCollapsed && !focusMode" class="mobile-sidebar-scrim" @click="toggleSidebar"></div>
     <AppSidebar v-if="!focusMode" @close="toggleSidebar" @open-storage-settings="storageSettingsOpen = true" />
@@ -82,10 +113,10 @@ onBeforeUnmount(() => {
     <LibraryView v-else-if="store.showingFavorites" mode="favorites" />
     <TagView v-else-if="store.showingTags" />
     <TrashView v-else-if="store.showingTrash" />
-    <DocumentEditor v-else @toggle-sidebar="toggleSidebar" @toggle-focus="toggleFocusMode" @toggle-context="toggleMobileContext" />
-    <ContextPanel v-if="!focusMode" />
+    <DocumentEditor v-else @toggle-sidebar="toggleSidebar" @toggle-focus="toggleFocusMode" @toggle-context="toggleContextPanel" />
+    <ContextPanel v-if="!focusMode && !contextCollapsed" @close="toggleContextPanel" />
     <div v-if="mobileContextOpen" class="mobile-context-scrim" @click="mobileContextOpen = false"></div>
-    <ContextPanel v-if="mobileContextOpen" class="mobile-context-panel" />
+    <ContextPanel v-if="mobileContextOpen" class="mobile-context-panel" @close="mobileContextOpen = false" />
     <CommandPalette v-if="store.showingCommandPalette" />
     <BackendConnectionDialog v-if="backendDialogOpen" @close="backendDialogOpen = false" />
     <StorageSettingsDialog v-if="storageSettingsOpen" @close="storageSettingsOpen = false" @connect-backend="backendDialogOpen = true; storageSettingsOpen = false" />

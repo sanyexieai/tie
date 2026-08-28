@@ -46,8 +46,27 @@ export function backendWorkspaceSource(workspace: BackendWorkspace, endpoint: st
     available: true,
   }
 }
-export function s3ProviderSource(provider: BackendStorageSource): StorageSource {
-  return { id: `s3:${provider.id}`, name: provider.name, kind: 's3', path: `${String(provider.publicConfig.endpoint ?? '')}/${String(provider.publicConfig.bucket ?? '')}`, available: false }
+export function backendS3ProviderSource(provider: BackendStorageSource, connected = true): StorageSource {
+  return {
+    id: `backend-s3:${provider.id}`,
+    name: provider.name,
+    kind: 's3',
+    path: `${String(provider.publicConfig.endpoint ?? '')}/${String(provider.publicConfig.bucket ?? '')}`,
+    available: connected,
+  }
+}
+
+export function isBackendManagedS3SourceId(sourceId: string | null | undefined) {
+  return Boolean(sourceId?.startsWith('backend-s3:'))
+}
+
+export function isBackendRemoteSourceId(sourceId: string | null | undefined) {
+  return isBackendSourceId(sourceId) || isBackendManagedS3SourceId(sourceId)
+}
+
+export function parseBackendProviderId(sourceId: string) {
+  if (!isBackendManagedS3SourceId(sourceId)) throw new Error('不是后台 S3 Provider')
+  return sourceId.slice('backend-s3:'.length)
 }
 
 export function isBackendSourceId(sourceId: string | null | undefined) {
@@ -90,6 +109,42 @@ async function request<T>(profile: BackendProfile, path: string, options: Reques
   }
   if (response.status === 204 || body === null) return null as T
   return body as T
+}
+
+async function uploadBinary(profile: BackendProfile, path: string, data: Uint8Array) {
+  const headers = new Headers()
+  headers.set('content-type', 'application/octet-stream')
+  if (profile.accessToken) headers.set('authorization', `Bearer ${profile.accessToken}`)
+  let response: Response
+  try {
+    response = await fetch(`${normalizeEndpoint(profile.endpoint)}${path}`, {
+      method: 'PUT',
+      headers,
+      body: new Blob([new Uint8Array(data)]),
+    })
+  } catch {
+    throw new Error('无法连接后台，请检查地址和服务是否已启动')
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { message?: string } | null
+    throw new Error(body?.message ?? `后台请求失败（${response.status}）`)
+  }
+}
+
+async function readBinary(profile: BackendProfile, path: string) {
+  const headers = new Headers()
+  if (profile.accessToken) headers.set('authorization', `Bearer ${profile.accessToken}`)
+  let response: Response
+  try {
+    response = await fetch(`${normalizeEndpoint(profile.endpoint)}${path}`, { headers })
+  } catch {
+    throw new Error('无法连接后台，请检查地址和服务是否已启动')
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { message?: string } | null
+    throw new Error(body?.message ?? `后台请求失败（${response.status}）`)
+  }
+  return response.arrayBuffer()
 }
 
 function initialProfile(): BackendProfile {
@@ -137,11 +192,64 @@ export const backendService = {
   async renameWorkspace(profile: BackendProfile, workspaceId: string, name: string) {
     return request<BackendWorkspace>(profile, `/api/v1/workspaces/${workspaceId}`, { method: 'PATCH', body: JSON.stringify({ name }) })
   },
+  async deleteWorkspace(profile: BackendProfile, workspaceId: string) {
+    await request<null>(profile, `/api/v1/workspaces/${workspaceId}`, { method: 'DELETE' })
+  },
+  async checkProviderHealth(profile: BackendProfile, providerId: string) {
+    await request<{ ok: boolean }>(profile, `/api/v1/providers/${providerId}/health`)
+    return true
+  },
   async createProvider(profile: BackendProfile, source: { name: string; kind: BackendStorageSource['kind']; publicConfig: Record<string, unknown>; credentials?: Record<string, string> }) {
     return request<BackendStorageSource>(profile, '/api/v1/providers', { method: 'POST', body: JSON.stringify(source) })
   },
+  async renameProvider(profile: BackendProfile, providerId: string, name: string) {
+    return request<BackendStorageSource>(profile, `/api/v1/providers/${providerId}`, { method: 'PATCH', body: JSON.stringify({ name }) })
+  },
+  async updateProvider(profile: BackendProfile, providerId: string, input: { name?: string; publicConfig?: Record<string, unknown>; credentials?: Record<string, string> }) {
+    return request<BackendStorageSource>(profile, `/api/v1/providers/${providerId}`, { method: 'PATCH', body: JSON.stringify(input) })
+  },
+  async deleteProvider(profile: BackendProfile, providerId: string) {
+    await request<null>(profile, `/api/v1/providers/${providerId}`, { method: 'DELETE' })
+  },
   async listProviders(profile: BackendProfile) {
     return request<BackendStorageSource[]>(profile, '/api/v1/providers')
+  },
+  async listProviderPages(profile: BackendProfile, providerId: string) {
+    return request<BackendPagePayload[]>(profile, `/api/v1/providers/${providerId}/pages`)
+  },
+  async getProviderPage(profile: BackendProfile, providerId: string, pageId: string) {
+    return request<BackendPagePayload>(profile, `/api/v1/providers/${providerId}/pages/${pageId}`)
+  },
+  async saveProviderPage(profile: BackendProfile, providerId: string, page: Page, expectedUpdatedAt?: string) {
+    const saved = await request<BackendPagePayload>(profile, `/api/v1/providers/${providerId}/pages/${page.id}`, {
+      method: 'PUT',
+      headers: expectedUpdatedAt ? { 'if-unmodified-since': expectedUpdatedAt } : undefined,
+      body: JSON.stringify({ ...page, storageSourceId: page.storageSourceId }),
+    })
+    return { ...saved, storageSourceId: page.storageSourceId }
+  },
+  async deleteProviderPages(profile: BackendProfile, providerId: string, pageIds: string[]) {
+    await request<null>(profile, `/api/v1/providers/${providerId}/pages`, {
+      method: 'POST',
+      body: JSON.stringify({ pageIds }),
+    })
+  },
+  async listProviderPageRevisions(profile: BackendProfile, providerId: string, pageId: string) {
+    return request<PageRevision[]>(profile, `/api/v1/providers/${providerId}/pages/${pageId}/revisions`)
+  },
+  async readProviderPageRevision(profile: BackendProfile, providerId: string, pageId: string, revisionId: string) {
+    return request<BackendPagePayload>(profile, `/api/v1/providers/${providerId}/pages/${pageId}/revisions/${revisionId}`)
+  },
+  async loadAllProviderPages(profile: BackendProfile, sourceIdFor: (providerId: string) => string) {
+    if (!profile.accessToken) return [] as Page[]
+    const providers = await this.listProviders(profile).catch(() => [])
+    const pages: Page[] = []
+    for (const provider of providers.filter((item) => item.kind === 's3')) {
+      const sourceId = sourceIdFor(provider.id)
+      const providerPages = await this.listProviderPages(profile, provider.id).catch(() => [])
+      pages.push(...providerPages.map((page) => ({ ...page, storageSourceId: sourceId })))
+    }
+    return pages
   },
   async listLegacyStorageSources(profile: BackendProfile, workspaceId: string) {
     return request<BackendStorageSource[]>(profile, `/api/v1/workspaces/${workspaceId}/sources`)
@@ -171,6 +279,28 @@ export const backendService = {
   },
   async readPageRevision(profile: BackendProfile, workspaceId: string, pageId: string, revisionId: string) {
     return request<BackendPagePayload>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/revisions/${revisionId}`)
+  },
+  async uploadWorkspacePageAsset(profile: BackendProfile, workspaceId: string, pageId: string, assetName: string, data: Uint8Array) {
+    await uploadBinary(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/assets/${encodeURIComponent(assetName)}`, data)
+    return assetName
+  },
+  async readWorkspacePageAsset(profile: BackendProfile, workspaceId: string, pageId: string, assetName: string) {
+    return readBinary(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/assets/${encodeURIComponent(assetName)}`)
+  },
+  async listWorkspacePageAssets(profile: BackendProfile, workspaceId: string, pageId: string) {
+    const result = await request<{ assets: string[] }>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/assets`)
+    return result.assets ?? []
+  },
+  async uploadProviderPageAsset(profile: BackendProfile, providerId: string, pageId: string, assetName: string, data: Uint8Array) {
+    await uploadBinary(profile, `/api/v1/providers/${providerId}/pages/${pageId}/assets/${encodeURIComponent(assetName)}`, data)
+    return assetName
+  },
+  async readProviderPageAsset(profile: BackendProfile, providerId: string, pageId: string, assetName: string) {
+    return readBinary(profile, `/api/v1/providers/${providerId}/pages/${pageId}/assets/${encodeURIComponent(assetName)}`)
+  },
+  async listProviderPageAssets(profile: BackendProfile, providerId: string, pageId: string) {
+    const result = await request<{ assets: string[] }>(profile, `/api/v1/providers/${providerId}/pages/${pageId}/assets`)
+    return result.assets ?? []
   },
   async loadAllPages(profile: BackendProfile, sourceIdFor: (workspaceId: string) => string) {
     if (!profile.accessToken) return [] as Page[]

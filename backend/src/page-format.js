@@ -1,0 +1,53 @@
+export function frontmatter(page) {
+  const parent = page.parentId ?? ''
+  const tags = (page.tags ?? []).join(', ')
+  const deleted = page.deletedAt ? `deleted_at: ${page.deletedAt}\n` : ''
+  const icon = String(page.icon ?? '').replace(/[\n\r]/g, '')
+  return `---\ntie_version: 1\nid: ${page.id}\nstorage_source_id: ${page.storageSourceId ?? ''}\nparent_id: ${parent}\nsort_key: ${page.sortKey ?? 0}\nicon: ${icon}\ntags: [${tags}]\ncreated_at: ${page.createdAt}\nupdated_at: ${page.updatedAt}\n${deleted}---\n\n${page.markdown ?? ''}`
+}
+
+function value(lines, key) {
+  const prefix = `${key}: `
+  const line = lines.find((item) => item.startsWith(prefix))
+  return line ? line.slice(prefix.length) : ''
+}
+
+export function parsePage(content) {
+  const start = content.indexOf('---\n')
+  if (start === -1) throw new Error('缺少 Frontmatter 起始标记')
+  const rest = content.slice(start + 4)
+  const end = rest.indexOf('---\n')
+  if (end === -1) throw new Error('缺少 Frontmatter 结束标记')
+  const meta = rest.slice(0, end)
+  const markdown = rest.slice(end + 4).replace(/^\n/, '')
+  const lines = meta.split('\n')
+  const id = value(lines, 'id')
+  if (!id) throw new Error('页面缺少 id')
+  const tags = value(lines, 'tags')
+    .trim()
+    .replace(/^\[/, '')
+    .replace(/\]$/, '')
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+  const titleLine = markdown.split('\n').find((line) => line.startsWith('# '))
+  const title = titleLine ? titleLine.slice(2) : '无标题'
+  const parentRaw = value(lines, 'parent_id')
+  return {
+    id,
+    title,
+    icon: value(lines, 'icon'),
+    parentId: parentRaw || null,
+    sortKey: Number(value(lines, 'sort_key') || 0),
+    markdown,
+    tags,
+    createdAt: value(lines, 'created_at') || new Date().toISOString(),
+    updatedAt: value(lines, 'updated_at') || new Date().toISOString(),
+    deletedAt: value(lines, 'deleted_at') || null,
+    storageSourceId: value(lines, 'storage_source_id'),
+  }
+}
+
+export function revisionId() {
+  return String(Date.now() * 1_000_000 + Math.floor(Math.random() * 1_000_000))
+}

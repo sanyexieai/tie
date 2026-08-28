@@ -101,8 +101,8 @@ function openFirstInbox() {
     </div>
 
     <button class="sidebar-storage-trigger" type="button" title="管理存储源与优先级" @click="emit('open-storage-settings')">
-      <span>⚙ 存储设置</span>
-      <small>默认 · {{ defaultSourceName }}</small>
+      <span>⚙ 存储设置<span v-if="store.syncConflictsCount > 0" class="sidebar-sync-conflicts">{{ store.syncConflictsCount }}</span></span>
+      <small>{{ store.syncConflictsCount > 0 ? `${store.syncConflictsCount} 个同步冲突 · ` : '' }}默认 · {{ defaultSourceName }}</small>
     </button>
   </aside>
 </template>

@@ -17,6 +17,7 @@ import { Markdown } from '@tiptap/markdown'
 import { common, createLowlight } from 'lowlight'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import type { Page, StorageSource } from '@/types'
+import { canStorePageAssets, embedImageFile, parseAssetUrl, resolveAssetDisplayUrl } from '@/services/attachments'
 
 const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page> }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
@@ -50,11 +51,53 @@ interface SlashCommand {
   run: (editor: Editor) => void
 }
 
+function activePage() {
+  return props.pages.find((page) => page.id === props.pageId) ?? null
+}
+
+function createAssetImageExtension() {
+  return Image.extend({
+    addNodeView() {
+      return ({ node }) => {
+        const wrap = document.createElement('span')
+        wrap.className = 'tie-image-wrap'
+        const img = document.createElement('img')
+        img.className = 'tiptap-image'
+        img.alt = String(node.attrs.alt ?? '')
+        const src = String(node.attrs.src ?? '')
+        if (parseAssetUrl(src)) {
+          img.dataset.tieAsset = src
+          void resolveAssetDisplayUrl(props.pages, src).then((url) => { img.src = url })
+        } else {
+          img.src = src
+        }
+        wrap.appendChild(img)
+        return { dom: wrap }
+      }
+    },
+  })
+}
+
 function canEmbedImage(file: File) {
   if (!file.type.startsWith('image/')) return false
-  if (file.size <= 5 * 1024 * 1024) return true
-  window.alert('图片超过 5 MB，内嵌到 Markdown 会造成页面过大。请使用 /图片 插入图片 URL。')
+  const page = activePage()
+  const maxSize = page && canStorePageAssets(page) ? 20 * 1024 * 1024 : 5 * 1024 * 1024
+  if (file.size <= maxSize) return true
+  window.alert(page && canStorePageAssets(page)
+    ? '图片超过 20 MB，请压缩后重试或使用 /图片 插入 URL。'
+    : '图片超过 5 MB，内嵌到 Markdown 会造成页面过大。请使用 /图片 插入图片 URL。')
   return false
+}
+
+async function insertImageFile(editor: Editor, file: File) {
+  const page = activePage()
+  if (!page) return
+  try {
+    const src = await embedImageFile(page, file)
+    editor.chain().focus().setImage({ src }).run()
+  } catch {
+    window.alert('无法上传图片。')
+  }
 }
 
 function pickLocalImage(editor: Editor) {
@@ -64,7 +107,7 @@ function pickLocalImage(editor: Editor) {
   input.addEventListener('change', () => {
     const file = input.files?.[0]
     if (!file || !canEmbedImage(file)) return
-    void imageDataUrl(file).then((src) => editor.chain().focus().setImage({ src }).run()).catch(() => window.alert('无法读取所选图片。'))
+    void insertImageFile(editor, file)
   }, { once: true })
   input.click()
 }
@@ -81,7 +124,7 @@ const slashCommands: SlashCommand[] = [
     const src = window.prompt('图片 URL 或 data URL')?.trim()
     if (src) editor.chain().focus().setImage({ src }).run()
   } },
-  { id: 'image-upload', label: '上传图片', hint: '从本地选择图片文件', keywords: ['image', '图片', 'upload', '上传', '本地图片'], run: (editor) => pickLocalImage(editor) },
+  { id: 'image-upload', label: '上传图片', hint: '保存到存储源附件目录', keywords: ['image', '图片', 'upload', '上传', '本地图片'], run: (editor) => pickLocalImage(editor) },
   { id: 'table', label: '表格', hint: '插入 3 × 3 表格', keywords: ['table', '表格'], run: (editor) => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run() },
   { id: 'divider', label: '分割线', hint: '分隔内容区域', keywords: ['divider', '分割', 'horizontal'], run: (editor) => editor.chain().focus().setHorizontalRule().run() },
   { id: 'page-link', label: '链接页面', hint: '关联知识库中的页面', keywords: ['link', 'page', '链接', '关联', '页面'], run: () => openSlashPagePicker() },
@@ -119,10 +162,17 @@ function openExternalLink(event: MouseEvent) {
 function focusNextWritingLine(event: MouseEvent) {
   const current = editor.value
   const root = current?.view.dom
-  if (!current || !root || event.target !== root) return false
-  const blocks = [...root.children]
-  const lastBlock = blocks.at(-1)
-  if (lastBlock && event.clientY <= lastBlock.getBoundingClientRect().bottom) return false
+  if (!current || !root) return false
+
+  const target = event.target
+  if (!(target instanceof Element)) return false
+  if (target.closest('.editor-embedded-meta, .page-picker, .slash-menu, button, input, textarea, a, img, label')) return false
+  // 点在正文块内部时交给 ProseMirror 正常处理
+  if (root.contains(target) && target !== root) return false
+
+  const lastBlock = root.lastElementChild as HTMLElement | null
+  if (lastBlock && event.clientY <= lastBlock.getBoundingClientRect().bottom + 1) return false
+
   event.preventDefault()
   const lastNode = current.state.doc.lastChild
   if (lastNode?.type.name === 'paragraph' && lastNode.content.size === 0) current.chain().focus('end').run()
@@ -131,16 +181,14 @@ function focusNextWritingLine(event: MouseEvent) {
 }
 
 function handleEditorClick(event: MouseEvent) {
-  return openInternalLink(event) || openExternalLink(event) || focusNextWritingLine(event)
+  const handled = openInternalLink(event) || openExternalLink(event) || focusNextWritingLine(event)
+  if (handled) event.stopPropagation()
+  return handled
 }
 
-function imageDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.addEventListener('load', () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('无法读取图片')))
-    reader.addEventListener('error', () => reject(reader.error))
-    reader.readAsDataURL(file)
-  })
+function handleSurfaceClick(event: MouseEvent) {
+  if (event.target !== event.currentTarget) return
+  focusNextWritingLine(event)
 }
 
 function handleImagePaste(view: Editor['view'], event: ClipboardEvent) {
@@ -148,7 +196,9 @@ function handleImagePaste(view: Editor['view'], event: ClipboardEvent) {
   if (!image) return false
   event.preventDefault()
   if (!canEmbedImage(image)) return true
-  void imageDataUrl(image).then((src) => {
+  const page = activePage()
+  if (!page) return true
+  void embedImageFile(page, image).then((src) => {
     const transaction = view.state.tr.replaceSelectionWith(view.state.schema.nodes.image.create({ src }))
     view.dispatch(transaction.scrollIntoView())
   }).catch(() => window.alert('无法读取剪贴板图片。'))
@@ -160,8 +210,10 @@ function handleImageDrop(view: Editor['view'], event: DragEvent) {
   if (!image) return false
   event.preventDefault()
   if (!canEmbedImage(image)) return true
+  const page = activePage()
+  if (!page) return true
   const dropPosition = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ?? view.state.selection.from
-  void imageDataUrl(image).then((src) => {
+  void embedImageFile(page, image).then((src) => {
     const transaction = view.state.tr.insert(dropPosition, view.state.schema.nodes.image.create({ src }))
     view.dispatch(transaction.scrollIntoView())
   }).catch(() => window.alert('无法读取拖入的图片。'))
@@ -185,7 +237,7 @@ const editor = useEditor({
     }),
     Markdown,
     CodeBlockLowlight.configure({ lowlight }),
-    Image.configure({ allowBase64: true }),
+    createAssetImageExtension().configure({ allowBase64: true }),
     Placeholder.configure({ placeholder: '开始写作，支持 Markdown 快捷输入…' }),
     TaskList,
     TaskItem.configure({ nested: true }),
@@ -404,11 +456,11 @@ function findText(query: string, direction = 1) {
 
 onBeforeUnmount(() => editor.value?.destroy())
 
-defineExpose({ undo, redo, findText })
+defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
 </script>
 
 <template>
-  <div class="tiptap-editor" v-if="editor">
+  <div class="tiptap-editor" v-if="editor" @click="handleSurfaceClick">
     <slot name="meta"></slot>
     <div v-if="showPagePicker" class="page-picker">
       <input v-if="pagePickerMode === 'slash'" v-model="pageQuery" autofocus placeholder="搜索并关联页面…" />

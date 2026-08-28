@@ -11,7 +11,7 @@ const pages = computed(() => isRecent.value ? store.recentPages : store.favorite
 
 <template>
   <main class="library-view">
-    <header class="editor-header"><div class="breadcrumbs"><span>我的知识库</span><span>›</span><span>{{ title }}</span></div></header>
+    <header class="editor-header"><div class="breadcrumbs"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><span>›</span><span>{{ title }}</span></div></header>
     <section class="library-content">
       <p class="eyebrow">{{ isRecent ? '最近访问' : '快捷访问' }}</p>
       <h1>{{ title }}</h1>
