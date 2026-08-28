@@ -2,8 +2,11 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import type { Editor } from '@tiptap/core'
+import { TextSelection } from '@tiptap/pm/state'
 import StarterKit from '@tiptap/starter-kit'
+import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight'
 import Placeholder from '@tiptap/extension-placeholder'
+import Image from '@tiptap/extension-image'
 import { Table } from '@tiptap/extension-table'
 import TableCell from '@tiptap/extension-table-cell'
 import TableHeader from '@tiptap/extension-table-header'
@@ -11,10 +14,13 @@ import TableRow from '@tiptap/extension-table-row'
 import TaskItem from '@tiptap/extension-task-item'
 import TaskList from '@tiptap/extension-task-list'
 import { Markdown } from '@tiptap/markdown'
-import type { Page } from '@/types'
+import { common, createLowlight } from 'lowlight'
+import { openUrl } from '@tauri-apps/plugin-opener'
+import type { Page, StorageSource } from '@/types'
 
-const props = defineProps<{ modelValue: string; pages: Page[]; pageId: string; spellcheck: boolean }>()
+const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page> }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
+const lowlight = createLowlight(common)
 const showPagePicker = ref(false)
 const pagePickerMode = ref<'slash' | 'wiki'>('slash')
 const pageQuery = ref('')
@@ -29,6 +35,12 @@ const matchingPages = computed(() => {
   return props.pages.filter((page) => !page.deletedAt && (!query || page.title.toLocaleLowerCase().includes(query))).slice(0, 8)
 })
 const childPageIds = computed(() => new Set(props.pages.filter((page) => page.parentId === props.pageId && !page.deletedAt).map((page) => page.id)))
+const pagesById = computed(() => new Map(props.pages.filter((page) => !page.deletedAt).map((page) => [page.id, page])))
+function sourceLabel(page: Page) {
+  const source = props.sources.find((item) => item.id === page.storageSourceId)
+  if (!source) return '未知来源'
+  return `${source.kind === 'smb' ? 'SMB' : '本地'} · ${source.name}`
+}
 
 interface SlashCommand {
   id: string
@@ -36,6 +48,25 @@ interface SlashCommand {
   hint: string
   keywords: string[]
   run: (editor: Editor) => void
+}
+
+function canEmbedImage(file: File) {
+  if (!file.type.startsWith('image/')) return false
+  if (file.size <= 5 * 1024 * 1024) return true
+  window.alert('图片超过 5 MB，内嵌到 Markdown 会造成页面过大。请使用 /图片 插入图片 URL。')
+  return false
+}
+
+function pickLocalImage(editor: Editor) {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = 'image/*'
+  input.addEventListener('change', () => {
+    const file = input.files?.[0]
+    if (!file || !canEmbedImage(file)) return
+    void imageDataUrl(file).then((src) => editor.chain().focus().setImage({ src }).run()).catch(() => window.alert('无法读取所选图片。'))
+  }, { once: true })
+  input.click()
 }
 
 const slashCommands: SlashCommand[] = [
@@ -46,6 +77,11 @@ const slashCommands: SlashCommand[] = [
   { id: 'task-list', label: '待办事项', hint: '可勾选的任务', keywords: ['task', 'todo', '待办', '任务'], run: (editor) => editor.chain().focus().toggleTaskList().run() },
   { id: 'quote', label: '引用', hint: '突出一段内容', keywords: ['quote', '引用'], run: (editor) => editor.chain().focus().toggleBlockquote().run() },
   { id: 'code', label: '代码块', hint: '带语法标记的代码', keywords: ['code', '代码'], run: (editor) => editor.chain().focus().toggleCodeBlock().run() },
+  { id: 'image', label: '图片', hint: '插入图片 URL 或 data URL', keywords: ['image', '图片', 'photo', '图像'], run: (editor) => {
+    const src = window.prompt('图片 URL 或 data URL')?.trim()
+    if (src) editor.chain().focus().setImage({ src }).run()
+  } },
+  { id: 'image-upload', label: '上传图片', hint: '从本地选择图片文件', keywords: ['image', '图片', 'upload', '上传', '本地图片'], run: (editor) => pickLocalImage(editor) },
   { id: 'table', label: '表格', hint: '插入 3 × 3 表格', keywords: ['table', '表格'], run: (editor) => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run() },
   { id: 'divider', label: '分割线', hint: '分隔内容区域', keywords: ['divider', '分割', 'horizontal'], run: (editor) => editor.chain().focus().setHorizontalRule().run() },
   { id: 'page-link', label: '链接页面', hint: '关联知识库中的页面', keywords: ['link', 'page', '链接', '关联', '页面'], run: () => openSlashPagePicker() },
@@ -69,6 +105,17 @@ function openInternalLink(event: MouseEvent) {
   return true
 }
 
+function openExternalLink(event: MouseEvent) {
+  const target = event.target
+  if (!(target instanceof Element)) return false
+  const href = target.closest('a')?.getAttribute('href')
+  if (!href || !/^(https?:|mailto:)/i.test(href)) return false
+  event.preventDefault()
+  if ('__TAURI_INTERNALS__' in window) void openUrl(href)
+  else window.open(href, '_blank', 'noopener,noreferrer')
+  return true
+}
+
 function focusNextWritingLine(event: MouseEvent) {
   const current = editor.value
   const root = current?.view.dom
@@ -84,7 +131,41 @@ function focusNextWritingLine(event: MouseEvent) {
 }
 
 function handleEditorClick(event: MouseEvent) {
-  return openInternalLink(event) || focusNextWritingLine(event)
+  return openInternalLink(event) || openExternalLink(event) || focusNextWritingLine(event)
+}
+
+function imageDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.addEventListener('load', () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('无法读取图片')))
+    reader.addEventListener('error', () => reject(reader.error))
+    reader.readAsDataURL(file)
+  })
+}
+
+function handleImagePaste(view: Editor['view'], event: ClipboardEvent) {
+  const image = [...(event.clipboardData?.files ?? [])].find((file) => file.type.startsWith('image/'))
+  if (!image) return false
+  event.preventDefault()
+  if (!canEmbedImage(image)) return true
+  void imageDataUrl(image).then((src) => {
+    const transaction = view.state.tr.replaceSelectionWith(view.state.schema.nodes.image.create({ src }))
+    view.dispatch(transaction.scrollIntoView())
+  }).catch(() => window.alert('无法读取剪贴板图片。'))
+  return true
+}
+
+function handleImageDrop(view: Editor['view'], event: DragEvent) {
+  const image = [...(event.dataTransfer?.files ?? [])].find((file) => file.type.startsWith('image/'))
+  if (!image) return false
+  event.preventDefault()
+  if (!canEmbedImage(image)) return true
+  const dropPosition = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ?? view.state.selection.from
+  void imageDataUrl(image).then((src) => {
+    const transaction = view.state.tr.insert(dropPosition, view.state.schema.nodes.image.create({ src }))
+    view.dispatch(transaction.scrollIntoView())
+  }).catch(() => window.alert('无法读取拖入的图片。'))
+  return true
 }
 
 let syncingExternalValue = false
@@ -93,6 +174,7 @@ const editor = useEditor({
   contentType: 'markdown',
   extensions: [
     StarterKit.configure({
+      codeBlock: false,
       link: {
         openOnClick: false,
         autolink: true,
@@ -102,6 +184,8 @@ const editor = useEditor({
       },
     }),
     Markdown,
+    CodeBlockLowlight.configure({ lowlight }),
+    Image.configure({ allowBase64: true }),
     Placeholder.configure({ placeholder: '开始写作，支持 Markdown 快捷输入…' }),
     TaskList,
     TaskItem.configure({ nested: true }),
@@ -113,10 +197,17 @@ const editor = useEditor({
   editorProps: {
     attributes: { class: 'tiptap-content', spellcheck: String(props.spellcheck) },
     handleDOMEvents: { click: (_view, event) => handleEditorClick(event) },
+    handlePaste: (view, event) => handleImagePaste(view, event),
+    handleDrop: (view, event) => handleImageDrop(view, event),
     handleKeyDown: (_view, event) => {
       if (showPagePicker.value && pagePickerMode.value === 'wiki') {
-        if (!matchingPages.value.length && ['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) {
+        if (!matchingPages.value.length && ['ArrowDown', 'ArrowUp'].includes(event.key)) {
           event.preventDefault()
+          return true
+        }
+        if (!matchingPages.value.length && event.key === 'Enter') {
+          event.preventDefault()
+          void createWikiPage()
           return true
         }
         if (event.key === 'ArrowDown') {
@@ -186,6 +277,7 @@ watch(() => props.modelValue, (markdown) => {
 })
 
 watch(childPageIds, () => void nextTick(decorateChildPageLinks), { deep: true })
+watch(() => props.pages, () => void nextTick(decorateChildPageLinks), { deep: true })
 watch(() => props.spellcheck, (enabled) => editor.value?.view.dom.setAttribute('spellcheck', String(enabled)))
 
 function decorateChildPageLinks() {
@@ -193,7 +285,11 @@ function decorateChildPageLinks() {
   if (!root) return
   root.querySelectorAll<HTMLAnchorElement>('a[href^="tie://page/"]').forEach((link) => {
     const targetId = link.getAttribute('href')?.slice('tie://page/'.length)
-    link.classList.toggle('child-page-link', Boolean(targetId && childPageIds.value.has(targetId)))
+    const page = targetId ? pagesById.value.get(targetId) : undefined
+    const isChild = Boolean(page && targetId && childPageIds.value.has(targetId))
+    link.classList.toggle('child-page-link', isChild)
+    if (isChild) link.dataset.pageIcon = page?.icon || '▱'
+    else delete link.dataset.pageIcon
   })
 }
 
@@ -259,6 +355,13 @@ function closePagePicker() {
   selectedPageIndex.value = 0
 }
 
+async function createWikiPage() {
+  const title = wikiQuery.value.trim()
+  if (!title) return
+  const page = await props.createLinkedPage(title)
+  insertPageLink(page)
+}
+
 function executeSlashCommand(index: number) {
   const command = filteredCommands.value[index]
   const current = editor.value
@@ -269,7 +372,39 @@ function executeSlashCommand(index: number) {
   command.run(current)
 }
 
+function undo() { editor.value?.chain().focus().undo().run() }
+function redo() { editor.value?.chain().focus().redo().run() }
+
+function findText(query: string, direction = 1) {
+  const current = editor.value
+  const cleanQuery = query.trim()
+  if (!current || !cleanQuery) return { count: 0, index: 0 }
+  const matches: Array<{ from: number; to: number }> = []
+  const needle = cleanQuery.toLocaleLowerCase()
+  current.state.doc.descendants((node, position) => {
+    if (!node.isText || !node.text) return
+    const text = node.text.toLocaleLowerCase()
+    let offset = text.indexOf(needle)
+    while (offset >= 0) {
+      matches.push({ from: position + offset, to: position + offset + cleanQuery.length })
+      offset = text.indexOf(needle, offset + Math.max(cleanQuery.length, 1))
+    }
+  })
+  if (!matches.length) return { count: 0, index: 0 }
+  const cursor = direction > 0 ? current.state.selection.to : current.state.selection.from
+  let index = direction > 0
+    ? matches.findIndex((match) => match.from >= cursor)
+    : [...matches].map((match, matchIndex) => ({ match, matchIndex })).reverse().find((item) => item.match.to <= cursor)?.matchIndex ?? -1
+  if (index < 0) index = direction > 0 ? 0 : matches.length - 1
+  const match = matches[index]
+  current.view.dispatch(current.state.tr.setSelection(TextSelection.create(current.state.doc, match.from, match.to)).scrollIntoView())
+  current.commands.focus()
+  return { count: matches.length, index: index + 1 }
+}
+
 onBeforeUnmount(() => editor.value?.destroy())
+
+defineExpose({ undo, redo, findText })
 </script>
 
 <template>
@@ -279,9 +414,10 @@ onBeforeUnmount(() => editor.value?.destroy())
       <input v-if="pagePickerMode === 'slash'" v-model="pageQuery" autofocus placeholder="搜索并关联页面…" />
       <p v-else class="wiki-picker-hint">正在关联：<strong>{{ wikiQuery || '全部页面' }}</strong><small>↑↓ 选择，Enter 插入，Esc 取消</small></p>
       <button v-for="(page, index) in matchingPages" :key="page.id" :class="{ selected: pagePickerMode === 'wiki' && selectedPageIndex === index }" @mousedown.prevent="insertPageLink(page)">
-        <span>{{ page.title }}</span><small>{{ page.parentId ? '子页面' : '顶层页面' }}</small>
+        <span>{{ page.icon || '▱' }} {{ page.title }}</span><small>{{ sourceLabel(page) }} · {{ page.parentId ? '子页面' : '顶层页面' }}</small>
       </button>
-      <p v-if="!matchingPages.length">没有匹配页面</p>
+      <button v-if="!matchingPages.length && pagePickerMode === 'wiki' && wikiQuery.trim()" class="page-picker-create" @mousedown.prevent="createWikiPage"><span>创建“{{ wikiQuery.trim() }}”</span><small>并插入页面链接</small></button>
+      <p v-else-if="!matchingPages.length">没有匹配页面</p>
     </div>
     <div v-if="slashQuery !== null" class="slash-menu" role="listbox" aria-label="插入块">
       <button

@@ -1,28 +1,60 @@
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
+import { backendWorkspaceSource } from '@/services/backend'
 import { workspaceService } from '@/services/workspace'
-import type { Page, PageId, PageLink, PageTreeNode, SearchResult, StorageKind, TagSummary, Workspace } from '@/types'
+import { useBackendStore } from '@/stores/backend'
+import type { Page, PageId, PageLink, PageRevision, PageTreeNode, SearchResult, StorageKind, StorageSource, TagSummary, Workspace } from '@/types'
+
+function sortSourcesByOrder(sources: StorageSource[], order: string[]) {
+  const index = new Map(order.map((id, position) => [id, position]))
+  return [...sources].sort((a, b) => {
+    const left = index.get(a.id) ?? Number.MAX_SAFE_INTEGER
+    const right = index.get(b.id) ?? Number.MAX_SAFE_INTEGER
+    return left - right || a.name.localeCompare(b.name, 'zh-CN')
+  })
+}
 
 export const useWorkspaceStore = defineStore('workspace', () => {
+  const backend = useBackendStore()
   const workspace = ref<Workspace | null>(null)
   const pages = ref<Page[]>([])
   const activePageId = ref<PageId | null>(null)
-  const activeStorageSourceId = ref<string | null>(null)
+  const storageSourceOrder = ref<string[]>([])
   const showingTrash = ref(false)
   const showingSearch = ref(false)
   const showingTags = ref(false)
   const showingGraph = ref(false)
   const showingRecent = ref(false)
   const showingFavorites = ref(false)
+  const showingCommandPalette = ref(false)
   const selectedTag = ref<string | null>(null)
+  const tagStorageSourceId = ref<string | null>(null)
   const searchQuery = ref('')
+  const searchStorageSourceId = ref<string | null>(null)
+  const commandQuery = ref('')
+  const outlineScrollTarget = ref<number | null>(null)
+  const outlineScrollRequest = ref(0)
   const saving = ref(false)
+  const reloading = ref(false)
   const initialized = ref(false)
   const favoritePageIds = ref<PageId[]>([])
   const recentPageIds = ref<PageId[]>([])
+  const collapsedPageIds = ref<PageId[]>([])
+  const spellcheckEnabled = ref(true)
+  const sourceMode = ref(false)
+
+  const rawSources = computed(() => [
+    ...(workspace.value?.sources ?? []),
+    ...(backend.connected ? backend.workspaces.map((item) => backendWorkspaceSource(item, backend.profile.endpoint)) : []),
+  ])
+  const allSources = computed(() => sortSourcesByOrder(rawSources.value, storageSourceOrder.value))
+  const defaultStorageSourceId = computed(() => allSources.value.find((source) => source.available !== false)?.id ?? allSources.value[0]?.id ?? null)
+  const activeStorageSourceId = defaultStorageSourceId
 
   const activePage = computed(() => pages.value.find((page) => page.id === activePageId.value && !page.deletedAt) ?? null)
-  const trashedPages = computed(() => pages.value.filter((page) => page.deletedAt).sort((a, b) => b.deletedAt!.localeCompare(a.deletedAt!)))
+  const trashedPages = computed(() => pages.value
+    .filter((page) => page.deletedAt)
+    .sort((a, b) => b.deletedAt!.localeCompare(a.deletedAt!)))
   const favoritePages = computed(() => favoritePageIds.value.map((id) => pages.value.find((page) => page.id === id && !page.deletedAt)).filter((page): page is Page => Boolean(page)))
   const recentPages = computed(() => recentPageIds.value.map((id) => pages.value.find((page) => page.id === id && !page.deletedAt)).filter((page): page is Page => Boolean(page)))
   const links = computed<PageLink[]>(() => {
@@ -36,7 +68,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const query = searchQuery.value.trim().toLocaleLowerCase()
     if (!query) return []
     return pages.value
-      .filter((page) => !page.deletedAt)
+      .filter((page) => !page.deletedAt && (!searchStorageSourceId.value || page.storageSourceId === searchStorageSourceId.value))
       .map((page) => {
         const title = page.title.toLocaleLowerCase()
         const tagText = page.tags.join(' ').toLocaleLowerCase()
@@ -45,26 +77,33 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         const tagScore = tagText.includes(query) ? 45 : 0
         const bodyPosition = body.indexOf(query)
         const bodyScore = bodyPosition >= 0 ? Math.max(10, 35 - Math.min(bodyPosition, 25)) : 0
-        const source = page.markdown.replace(/^# .*\n?/, '').replace(/[#>*_~`|()[\]]/g, ' ').replace(/\s+/g, ' ').trim()
-        const originalPosition = source.toLocaleLowerCase().indexOf(query)
-        const snippet = originalPosition >= 0 ? `${originalPosition > 42 ? '…' : ''}${source.slice(Math.max(0, originalPosition - 42), originalPosition + query.length + 72)}${source.length > originalPosition + query.length + 72 ? '…' : ''}` : source.slice(0, 114)
-        return { page, score: titleScore + tagScore + bodyScore, snippet }
+        const previewText = page.markdown.replace(/^# .*\n?/, '').replace(/[#>*_~`|()[\]]/g, ' ').replace(/\s+/g, ' ').trim()
+        const originalPosition = previewText.toLocaleLowerCase().indexOf(query)
+        const snippet = originalPosition >= 0 ? `${originalPosition > 42 ? '…' : ''}${previewText.slice(Math.max(0, originalPosition - 42), originalPosition + query.length + 72)}${previewText.length > originalPosition + query.length + 72 ? '…' : ''}` : previewText.slice(0, 114)
+        const source = allSources.value.find((item) => item.id === page.storageSourceId)
+        return { page, score: titleScore + tagScore + bodyScore, snippet, sourceName: source?.name ?? '未知来源', sourceKind: source?.kind ?? 'local' }
       })
       .filter((result) => result.score > 0)
       .sort((a, b) => b.score - a.score || b.page.updatedAt.localeCompare(a.page.updatedAt))
   })
   const tagIndex = computed<TagSummary[]>(() => {
     const counts = new Map<string, number>()
-    pages.value.filter((page) => !page.deletedAt).forEach((page) => page.tags.forEach((tag) => counts.set(tag, (counts.get(tag) ?? 0) + 1)))
+    pages.value.filter((page) => !page.deletedAt && (!tagStorageSourceId.value || page.storageSourceId === tagStorageSourceId.value)).forEach((page) => page.tags.forEach((tag) => counts.set(tag, (counts.get(tag) ?? 0) + 1)))
     return [...counts.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-CN'))
   })
-  const taggedPages = computed(() => selectedTag.value ? pages.value.filter((page) => !page.deletedAt && page.tags.includes(selectedTag.value!)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) : [])
+  const taggedPages = computed(() => selectedTag.value ? pages.value.filter((page) => !page.deletedAt && (!tagStorageSourceId.value || page.storageSourceId === tagStorageSourceId.value) && page.tags.includes(selectedTag.value!)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) : [])
   const tree = computed<PageTreeNode[]>(() => {
+    const scopedPages = pages.value.filter((page) => !page.deletedAt)
     const children = new Map<PageId | null, Page[]>()
-    pages.value.filter((page) => !page.deletedAt).forEach((page) => {
-      const list = children.get(page.parentId) ?? []
-      list.push(page)
-      children.set(page.parentId, list)
+    scopedPages.forEach((page) => {
+      let parentId = page.parentId
+      if (parentId) {
+        const parent = scopedPages.find((item) => item.id === parentId)
+        if (!parent || parent.storageSourceId !== page.storageSourceId) parentId = null
+      }
+      const list = children.get(parentId) ?? []
+      list.push({ ...page, parentId })
+      children.set(parentId, list)
     })
     const build = (parentId: PageId | null): PageTreeNode[] => (children.get(parentId) ?? [])
       .sort((a, b) => a.sortKey - b.sortKey || a.title.localeCompare(b.title, 'zh-CN'))
@@ -72,28 +111,103 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return build(null)
   })
 
+  function syncStorageSourceOrder(sources: StorageSource[] = rawSources.value) {
+    const ids = new Set(sources.map((source) => source.id))
+    const next = storageSourceOrder.value.filter((id) => ids.has(id))
+    sources.forEach((source) => {
+      if (!next.includes(source.id)) next.push(source.id)
+    })
+    storageSourceOrder.value = next
+  }
+
+  function moveStorageSource(sourceId: string, direction: -1 | 1) {
+    syncStorageSourceOrder()
+    const index = storageSourceOrder.value.indexOf(sourceId)
+    if (index === -1) return false
+    const target = index + direction
+    if (target < 0 || target >= storageSourceOrder.value.length) return false
+    const next = [...storageSourceOrder.value]
+    ;[next[index], next[target]] = [next[target], next[index]]
+    storageSourceOrder.value = next
+    persistPreferences()
+    return true
+  }
+
+  function reorderStorageSource(sourceId: string, targetId: string, position: 'before' | 'after') {
+    syncStorageSourceOrder()
+    if (sourceId === targetId) return false
+    const order = [...storageSourceOrder.value]
+    const from = order.indexOf(sourceId)
+    const targetIndex = order.indexOf(targetId)
+    if (from === -1 || targetIndex === -1) return false
+    order.splice(from, 1)
+    const insertAt = order.indexOf(targetId)
+    order.splice(position === 'after' ? insertAt + 1 : insertAt, 0, sourceId)
+    storageSourceOrder.value = order
+    persistPreferences()
+    return true
+  }
+
+  watch(() => rawSources.value.map((source) => source.id).join('\n'), () => {
+    const previous = storageSourceOrder.value.join('\n')
+    syncStorageSourceOrder()
+    if (storageSourceOrder.value.join('\n') !== previous) persistPreferences()
+  })
+
   async function initialize() {
     const snapshot = await workspaceService.load()
     workspace.value = snapshot.workspace
     pages.value = snapshot.pages
-    activePageId.value = snapshot.pages.find((page) => !page.deletedAt)?.id ?? null
-    activeStorageSourceId.value = snapshot.pages.find((page) => page.id === activePageId.value)?.storageSourceId ?? snapshot.workspace.sources[0]?.id ?? null
     const preferences = workspaceService.loadPreferences(snapshot.workspace.id)
     favoritePageIds.value = preferences.favoritePageIds
     recentPageIds.value = preferences.recentPageIds
+    collapsedPageIds.value = preferences.collapsedPageIds
+    spellcheckEnabled.value = preferences.spellcheckEnabled
+    sourceMode.value = preferences.sourceMode
+    storageSourceOrder.value = preferences.storageSourceOrder
+    activePageId.value = preferences.recentPageIds
+      .map((pageId) => snapshot.pages.find((page) => page.id === pageId && !page.deletedAt)?.id)
+      .find((pageId): pageId is PageId => Boolean(pageId))
+      ?? snapshot.pages.find((page) => !page.deletedAt)?.id
+      ?? null
+    syncStorageSourceOrder()
+    if (activePageId.value) expandPageAncestors(activePageId.value)
     initialized.value = true
   }
 
+  async function reloadWorkspace() {
+    if (reloading.value) return false
+    reloading.value = true
+    try {
+      const snapshot = await workspaceService.load()
+      workspace.value = snapshot.workspace
+      pages.value = snapshot.pages
+      const availablePageIds = new Set(snapshot.pages.filter((page) => !page.deletedAt).map((page) => page.id))
+      favoritePageIds.value = favoritePageIds.value.filter((pageId) => availablePageIds.has(pageId))
+      recentPageIds.value = recentPageIds.value.filter((pageId) => availablePageIds.has(pageId))
+      collapsedPageIds.value = collapsedPageIds.value.filter((pageId) => availablePageIds.has(pageId))
+      if (!activePageId.value || !availablePageIds.has(activePageId.value)) {
+        activePageId.value = snapshot.pages.find((page) => !page.deletedAt)?.id ?? null
+      }
+      syncStorageSourceOrder()
+      persistPreferences()
+      return true
+    } finally { reloading.value = false }
+  }
+
   async function addStorageSource(kind: StorageKind = 'local') {
-    const knownSourceIds = new Set(workspace.value?.sources.map((source) => source.id) ?? [])
     const snapshot = await workspaceService.addStorageSource(kind)
     if (!snapshot) return false
     workspace.value = snapshot.workspace
     pages.value = snapshot.pages
-    activeStorageSourceId.value = snapshot.workspace.sources.find((source) => !knownSourceIds.has(source.id))?.id ?? activeStorageSourceId.value ?? snapshot.workspace.sources[0]?.id ?? null
+    syncStorageSourceOrder()
     const preferences = workspaceService.loadPreferences(snapshot.workspace.id)
     favoritePageIds.value = preferences.favoritePageIds
     recentPageIds.value = preferences.recentPageIds
+    collapsedPageIds.value = preferences.collapsedPageIds
+    spellcheckEnabled.value = preferences.spellcheckEnabled
+    sourceMode.value = preferences.sourceMode
+    persistPreferences()
     showingTrash.value = false
     showingSearch.value = false
     showingTags.value = false
@@ -103,11 +217,53 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return true
   }
 
+  async function importMarkdownFiles() {
+    const targetSourceId = defaultStorageSourceId.value
+    if (!targetSourceId) return false
+    const snapshot = await workspaceService.importMarkdownFiles(targetSourceId)
+    if (!snapshot) return false
+    workspace.value = snapshot.workspace
+    pages.value = snapshot.pages
+    return true
+  }
+
+  async function removeStorageSource(sourceId: string) {
+    const snapshot = await workspaceService.removeStorageSource(sourceId)
+    if (!snapshot) return false
+    workspace.value = snapshot.workspace
+    pages.value = snapshot.pages
+    syncStorageSourceOrder()
+    persistPreferences()
+    return true
+  }
+
+  async function renameStorageSource(sourceId: string, name: string) {
+    const cleanName = name.trim()
+    if (!cleanName || cleanName.length > 80) return false
+    const snapshot = await workspaceService.renameStorageSource(sourceId, cleanName)
+    workspace.value = snapshot.workspace
+    pages.value = snapshot.pages
+    return true
+  }
+
+  async function renameWorkspace(name: string) {
+    const cleanName = name.trim()
+    if (!cleanName || cleanName.length > 80) return false
+    const snapshot = await workspaceService.renameWorkspace(cleanName)
+    workspace.value = snapshot.workspace
+    pages.value = snapshot.pages
+    return true
+  }
+
   function persistPreferences() {
     if (!workspace.value) return
     workspaceService.savePreferences(workspace.value.id, {
       favoritePageIds: favoritePageIds.value,
       recentPageIds: recentPageIds.value,
+      collapsedPageIds: collapsedPageIds.value,
+      spellcheckEnabled: spellcheckEnabled.value,
+      sourceMode: sourceMode.value,
+      storageSourceOrder: storageSourceOrder.value,
     })
   }
 
@@ -123,9 +279,47 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     persistPreferences()
   }
 
+  function toggleSpellcheck() {
+    spellcheckEnabled.value = !spellcheckEnabled.value
+    persistPreferences()
+  }
+
+  function toggleSourceMode() {
+    sourceMode.value = !sourceMode.value
+    persistPreferences()
+  }
+
+  function togglePageCollapsed(pageId: PageId) {
+    collapsedPageIds.value = collapsedPageIds.value.includes(pageId)
+      ? collapsedPageIds.value.filter((id) => id !== pageId)
+      : [...collapsedPageIds.value, pageId]
+    persistPreferences()
+  }
+
+  function expandPage(pageId: PageId) {
+    if (!collapsedPageIds.value.includes(pageId)) return
+    collapsedPageIds.value = collapsedPageIds.value.filter((id) => id !== pageId)
+    persistPreferences()
+  }
+
+  function expandPageAncestors(pageId: PageId) {
+    const ancestors = new Set<PageId>()
+    const seen = new Set<PageId>()
+    let current = pages.value.find((page) => page.id === pageId && !page.deletedAt)
+    while (current?.parentId && !seen.has(current.id)) {
+      seen.add(current.id)
+      ancestors.add(current.parentId)
+      current = pages.value.find((page) => page.id === current!.parentId && !page.deletedAt)
+    }
+    const next = collapsedPageIds.value.filter((id) => !ancestors.has(id))
+    if (next.length === collapsedPageIds.value.length) return
+    collapsedPageIds.value = next
+    persistPreferences()
+  }
+
   async function createPage(parentId: PageId | null) {
     const parent = parentId ? pages.value.find((item) => item.id === parentId) : null
-    const storageSourceId = parent?.storageSourceId ?? activeStorageSourceId.value ?? workspace.value?.sources[0]?.id
+    const storageSourceId = parent?.storageSourceId ?? defaultStorageSourceId.value
     if (!storageSourceId) throw new Error('请先连接一个存储源')
     const page = await workspaceService.createPage(parentId, storageSourceId)
     pages.value.push(page)
@@ -141,6 +335,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return `[${title.replaceAll('\\', '\\\\').replaceAll('[', '\\[').replaceAll(']', '\\]')}](tie://page/${pageId})`
   }
 
+  function markdownWithTitle(markdown: string, title: string) {
+    if (/^# .+$/m.test(markdown)) return markdown.replace(/^# .*$/m, `# ${title}`)
+    return `# ${title}\n\n${markdown}`
+  }
+
   function pageLinkPattern(pageId: PageId) {
     const escapedId = pageId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     return new RegExp(`\\[[^\\]]*\\]\\(tie:\\/\\/page\\/${escapedId}\\)`, 'g')
@@ -150,6 +349,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const escapedId = pageId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const standaloneLink = new RegExp(`^[\\t ]*\\[[^\\]]*\\]\\(tie:\\/\\/page\\/${escapedId}\\)[\\t ]*\\n?`, 'gm')
     return markdown.replace(standaloneLink, '')
+  }
+
+  function unlinkPageMarkdownReference(markdown: string, pageId: PageId) {
+    const escapedId = pageId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const linkedPage = new RegExp(`\\[([^\\]]*)\\]\\(tie:\\/\\/page\\/${escapedId}\\)`, 'g')
+    return markdown.replace(linkedPage, '$1')
   }
 
   function withChildPageLinks(page: Page) {
@@ -175,10 +380,83 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const child = await workspaceService.createPage(parentId, parent.storageSourceId)
     pages.value.push(child)
     if (parent) await syncChildPageLinks(parent.id)
+    expandPage(parentId)
     activePageId.value = child.id
     markRecentlyOpened(child.id)
     showingTrash.value = false
     return child
+  }
+
+  async function createLinkedPage(title: string) {
+    const storageSourceId = activePage.value?.storageSourceId ?? defaultStorageSourceId.value
+    if (!storageSourceId) throw new Error('请先连接一个存储源')
+    const created = await workspaceService.createPage(null, storageSourceId)
+    const cleanTitle = title.trim() || '无标题'
+    const saved = await workspaceService.savePage({ ...created, title: cleanTitle, markdown: `# ${cleanTitle}\n\n`, updatedAt: new Date().toISOString() })
+    pages.value.push(saved)
+    return saved
+  }
+
+  async function duplicatePage(pageId: PageId) {
+    const original = pages.value.find((page) => page.id === pageId && !page.deletedAt)
+    if (!original) return null
+    const created = await workspaceService.createPage(original.parentId, original.storageSourceId)
+    const childLinksRemoved = pages.value
+      .filter((page) => page.parentId === original.id && !page.deletedAt)
+      .reduce((markdown, child) => removePageLink(markdown, child.id), original.markdown)
+    const title = `${original.title || '无标题'} 副本`
+    const body = childLinksRemoved.replace(/^# .*\n?/, '').trimStart()
+    const saved = await workspaceService.savePage({
+      ...created,
+      title,
+      markdown: `# ${title}\n\n${body}`,
+      tags: [...original.tags],
+      updatedAt: new Date().toISOString(),
+    })
+    pages.value.push(saved)
+    await reorderPage(saved.id, original.id, 'after')
+    activePageId.value = saved.id
+    markRecentlyOpened(saved.id)
+    return saved
+  }
+
+  async function renamePage(pageId: PageId, title: string) {
+    const page = pages.value.find((item) => item.id === pageId && !item.deletedAt)
+    const cleanTitle = title.trim()
+    if (!page || !cleanTitle || cleanTitle === page.title) return false
+    await persist({ ...page, title: cleanTitle, markdown: markdownWithTitle(page.markdown, cleanTitle) })
+    return true
+  }
+
+  async function linkUnlinkedMention(sourcePageId: PageId, targetPageId: PageId) {
+    const source = pages.value.find((page) => page.id === sourcePageId && !page.deletedAt)
+    const target = pages.value.find((page) => page.id === targetPageId && !page.deletedAt)
+    if (!source || !target || source.id === target.id) return false
+    const escapedTitle = target.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    if (!escapedTitle) return false
+    const mentionPattern = new RegExp(escapedTitle)
+    const protectedLinkPattern = /(\[[^\]]*\]\(tie:\/\/page\/[A-Za-z0-9_-]+\))/g
+    const parts = source.markdown.split(protectedLinkPattern)
+    let linked = false
+    const markdown = parts.map((part, index) => {
+      if (linked || index % 2 === 1) return part
+      if (!mentionPattern.test(part)) return part
+      linked = true
+      return part.replace(mentionPattern, markdownLink(target.title, target.id))
+    }).join('')
+    if (!linked) return false
+    await persist({ ...source, markdown })
+    return true
+  }
+
+  async function unlinkPageReference(sourcePageId: PageId, targetPageId: PageId) {
+    const source = pages.value.find((page) => page.id === sourcePageId && !page.deletedAt)
+    const target = pages.value.find((page) => page.id === targetPageId && !page.deletedAt)
+    if (!source || !target || target.parentId === source.id) return false
+    const markdown = unlinkPageMarkdownReference(source.markdown, targetPageId)
+    if (markdown === source.markdown) return false
+    await persist({ ...source, markdown })
+    return true
   }
 
   async function persist(page: Page) {
@@ -199,6 +477,53 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         }
       }
     } finally { saving.value = false }
+  }
+
+  async function transferPage(pageId: PageId, targetSourceId: string, includeChildren = false) {
+    const page = pages.value.find((item) => item.id === pageId)
+    if (!page) return false
+    const pageIds = new Set<PageId>([page.id])
+    if (includeChildren) {
+      let changed = true
+      while (changed) {
+        changed = false
+        pages.value.forEach((candidate) => {
+          if (!candidate.deletedAt && candidate.parentId && pageIds.has(candidate.parentId) && !pageIds.has(candidate.id)) {
+            pageIds.add(candidate.id)
+            changed = true
+          }
+        })
+      }
+    }
+    const moving = pages.value.filter((candidate) => pageIds.has(candidate.id) && candidate.storageSourceId !== targetSourceId)
+    if (!moving.length) return false
+    const moved: Page[] = []
+    for (const candidate of moving) moved.push(await workspaceService.transferPage(candidate, targetSourceId))
+    pages.value = pages.value.map((item) => moved.find((candidate) => candidate.id === item.id) ?? item)
+    return true
+  }
+
+  async function listPageRevisions(pageId: PageId): Promise<PageRevision[]> {
+    const page = pages.value.find((item) => item.id === pageId)
+    return page ? workspaceService.listPageRevisions(page) : []
+  }
+
+  async function readPageRevision(pageId: PageId, revisionId: string): Promise<Page | null> {
+    const page = pages.value.find((item) => item.id === pageId)
+    return page ? workspaceService.readPageRevision(page, revisionId) : null
+  }
+
+  async function restorePageRevision(pageId: PageId, revisionId: string) {
+    const page = pages.value.find((item) => item.id === pageId)
+    if (!page) return null
+    const saved = await workspaceService.restorePageRevision(page, revisionId)
+    pages.value = pages.value.map((item) => item.id === saved.id ? saved : item)
+    return saved
+  }
+
+  async function exportPageMarkdown(pageId: PageId) {
+    const page = pages.value.find((item) => item.id === pageId && !item.deletedAt)
+    return page ? workspaceService.exportPageMarkdown(page) : false
   }
 
   function collectSubtree(pageId: PageId) {
@@ -242,17 +567,22 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function restorePage(pageId: PageId) {
     const restored = collectSubtree(pageId)
-    let parentId = pages.value.find((page) => page.id === pageId)?.parentId ?? null
+    const root = pages.value.find((page) => page.id === pageId)
+    let parentId = root?.parentId ?? null
+    let restoreAtTopLevel = false
     while (parentId) {
       const parent = pages.value.find((page) => page.id === parentId)
-      if (!parent) break
+      if (!parent) {
+        restoreAtTopLevel = true
+        break
+      }
       if (parent.deletedAt) restored.add(parent.id)
       parentId = parent.parentId
     }
     const updatedAt = new Date().toISOString()
     saving.value = true
     try {
-      const updated = await Promise.all(pages.value.filter((page) => restored.has(page.id)).map((page) => workspaceService.savePage({ ...page, deletedAt: null, updatedAt })))
+      const updated = await Promise.all(pages.value.filter((page) => restored.has(page.id)).map((page) => workspaceService.savePage({ ...page, parentId: restoreAtTopLevel && page.id === pageId ? null : page.parentId, deletedAt: null, updatedAt })))
       pages.value = pages.value.map((page) => updated.find((candidate) => candidate.id === page.id) ?? page)
       const parentUpdates = pages.value
         .filter((parent) => !parent.deletedAt)
@@ -272,8 +602,100 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     } finally { saving.value = false }
   }
 
+  async function permanentlyDeletePage(pageId: PageId) {
+    const root = pages.value.find((page) => page.id === pageId && page.deletedAt)
+    if (!root) return false
+    const removed = collectSubtree(pageId)
+    const targets = pages.value.filter((page) => removed.has(page.id) && page.deletedAt)
+    if (!targets.length) return false
+    saving.value = true
+    try {
+      await workspaceService.permanentlyDeletePages(targets)
+      pages.value = pages.value.filter((page) => !removed.has(page.id))
+      await unlinkDeletedPageReferences(removed)
+      favoritePageIds.value = favoritePageIds.value.filter((id) => !removed.has(id))
+      recentPageIds.value = recentPageIds.value.filter((id) => !removed.has(id))
+      persistPreferences()
+      return true
+    } finally { saving.value = false }
+  }
+
+  async function emptyTrash() {
+    const targets = pages.value.filter((page) => page.deletedAt)
+    if (!targets.length) return false
+    saving.value = true
+    try {
+      const removed = new Set(targets.map((page) => page.id))
+      await workspaceService.permanentlyDeletePages(targets)
+      pages.value = pages.value.filter((page) => !removed.has(page.id))
+      await unlinkDeletedPageReferences(removed)
+      favoritePageIds.value = favoritePageIds.value.filter((id) => !removed.has(id))
+      recentPageIds.value = recentPageIds.value.filter((id) => !removed.has(id))
+      persistPreferences()
+      return true
+    } finally { saving.value = false }
+  }
+
+  async function unlinkDeletedPageReferences(removed: Set<PageId>) {
+    const updatedPages = pages.value
+      .filter((page) => !removed.has(page.id))
+      .map((page) => {
+        const markdown = [...removed].reduce((content, pageId) => unlinkPageMarkdownReference(content, pageId), page.markdown)
+        return markdown === page.markdown ? null : { ...page, markdown, updatedAt: new Date().toISOString() }
+      })
+      .filter((page): page is Page => Boolean(page))
+    if (!updatedPages.length) return
+    const saved = await Promise.all(updatedPages.map((page) => workspaceService.savePage(page)))
+    pages.value = pages.value.map((page) => saved.find((candidate) => candidate.id === page.id) ?? page)
+  }
+
+  async function renameTag(oldName: string, nextName: string, storageSourceId: string | null = tagStorageSourceId.value) {
+    const cleanName = nextName.trim().replace(/^#\s*/, '')
+    if (!cleanName || cleanName.length > 32 || cleanName.includes(',')) return false
+    const normalizedOld = oldName.toLocaleLowerCase()
+    const targets = pages.value.filter((page) => !page.deletedAt
+      && (!storageSourceId || page.storageSourceId === storageSourceId)
+      && page.tags.some((tag) => tag.toLocaleLowerCase() === normalizedOld))
+    if (!targets.length) return false
+    saving.value = true
+    try {
+      const updated = await Promise.all(targets.map((page) => {
+        const tags = [...new Map(page.tags.map((tag) => [tag.toLocaleLowerCase() === normalizedOld ? cleanName.toLocaleLowerCase() : tag.toLocaleLowerCase(), tag.toLocaleLowerCase() === normalizedOld ? cleanName : tag])).values()]
+        return workspaceService.savePage({ ...page, tags, updatedAt: new Date().toISOString() })
+      }))
+      pages.value = pages.value.map((page) => updated.find((candidate) => candidate.id === page.id) ?? page)
+      if (selectedTag.value?.toLocaleLowerCase() === normalizedOld) selectedTag.value = cleanName
+      return true
+    } finally { saving.value = false }
+  }
+
+  async function deleteTag(name: string, storageSourceId: string | null = tagStorageSourceId.value) {
+    const normalizedName = name.toLocaleLowerCase()
+    const targets = pages.value.filter((page) => !page.deletedAt
+      && (!storageSourceId || page.storageSourceId === storageSourceId)
+      && page.tags.some((tag) => tag.toLocaleLowerCase() === normalizedName))
+    if (!targets.length) return false
+    saving.value = true
+    try {
+      const updated = await Promise.all(targets.map((page) => workspaceService.savePage({
+        ...page,
+        tags: page.tags.filter((tag) => tag.toLocaleLowerCase() !== normalizedName),
+        updatedAt: new Date().toISOString(),
+      })))
+      pages.value = pages.value.map((page) => updated.find((candidate) => candidate.id === page.id) ?? page)
+      if (selectedTag.value?.toLocaleLowerCase() === normalizedName) selectedTag.value = null
+      return true
+    } finally { saving.value = false }
+  }
+
   function canMovePage(pageId: PageId, parentId: PageId | null) {
     if (pageId === parentId) return false
+    const page = pages.value.find((item) => item.id === pageId)
+    if (!page) return false
+    if (parentId) {
+      const parent = pages.value.find((item) => item.id === parentId)
+      if (!parent || parent.storageSourceId !== page.storageSourceId) return false
+    }
     let current = parentId
     while (current) {
       const parent = pages.value.find((page) => page.id === current)
@@ -293,6 +715,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     try {
       if (previousParentId && previousParentId !== parentId) await syncChildPageLinks(previousParentId)
       if (parentId) await syncChildPageLinks(parentId)
+      if (parentId) expandPage(parentId)
     } finally { saving.value = false }
     return true
   }
@@ -324,8 +747,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return true
   }
 
-  function openPage(pageId: PageId) { activePageId.value = pageId; activeStorageSourceId.value = pages.value.find((page) => page.id === pageId)?.storageSourceId ?? activeStorageSourceId.value; markRecentlyOpened(pageId); showingTrash.value = false; showingSearch.value = false; showingTags.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
-  function selectStorageSource(sourceId: string) { activeStorageSourceId.value = sourceId }
+  function openPage(pageId: PageId) { activePageId.value = pageId; expandPageAncestors(pageId); markRecentlyOpened(pageId); showingTrash.value = false; showingSearch.value = false; showingTags.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
+  function openCommandPalette() { commandQuery.value = ''; showingCommandPalette.value = true }
+  function closeCommandPalette() { showingCommandPalette.value = false }
+  function scrollToOutlineHeading(index: number) { outlineScrollTarget.value = index; outlineScrollRequest.value += 1 }
   function openTrash() { showingTrash.value = true; showingSearch.value = false; showingTags.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
   function openSearch() { showingSearch.value = true; showingTrash.value = false; showingTags.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
   function openTags(tag: string | null = null) { selectedTag.value = tag; showingTags.value = true; showingTrash.value = false; showingSearch.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
@@ -335,6 +760,23 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   function pageById(pageId: PageId) { return pages.value.find((page) => page.id === pageId) ?? null }
   function outgoingLinks(pageId: PageId) { return links.value.filter((link) => link.fromPageId === pageId).map((link) => pageById(link.toPageId)).filter((page): page is Page => Boolean(page && !page.deletedAt)) }
   function backlinks(pageId: PageId) { return links.value.filter((link) => link.toPageId === pageId).map((link) => pageById(link.fromPageId)).filter((page): page is Page => Boolean(page && !page.deletedAt)) }
+  function unlinkedMentions(pageId: PageId) {
+    const page = pageById(pageId)
+    if (!page) return []
+    const linkedPageIds = new Set(outgoingLinks(pageId).map((linked) => linked.id))
+    const text = page.markdown
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/!?\[[^\]]*\]\([^)]*\)/g, ' ')
+      .toLocaleLowerCase()
+    return pages.value
+      .filter((candidate) => !candidate.deletedAt && candidate.id !== pageId && !linkedPageIds.has(candidate.id))
+      .filter((candidate) => {
+        const title = candidate.title.trim()
+        return title.length >= 2 && title !== '无标题' && text.includes(title.toLocaleLowerCase())
+      })
+      .sort((a, b) => b.title.length - a.title.length || a.title.localeCompare(b.title, 'zh-CN'))
+      .slice(0, 8)
+  }
 
-  return { workspace, pages, activePageId, activePage, activeStorageSourceId, saving, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, selectedTag, tagIndex, taggedPages, searchQuery, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, initialize, addStorageSource, selectStorageSource, createPage, createChildPage, persist, trashPage, restorePage, movePage, reorderPage, toggleFavorite, openPage, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, outgoingLinks, backlinks }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, storageSourceOrder, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, initialize, reloadWorkspace, addStorageSource, importMarkdownFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })

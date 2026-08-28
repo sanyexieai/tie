@@ -4,9 +4,11 @@ import { useWorkspaceStore } from '@/stores/workspace'
 
 const store = useWorkspaceStore()
 const tab = ref<'outline' | 'properties' | 'links' | 'graph'>('outline')
-const headings = computed(() => (store.activePage?.markdown.match(/^#{1,6} .+$/gm) ?? []).map((line) => ({ level: line.indexOf(' '), text: line.replace(/^#+ /, '') })))
+const headings = computed(() => (store.activePage?.markdown.match(/^#{2,6} .+$/gm) ?? []).map((line, index) => ({ index, level: line.indexOf(' '), text: line.replace(/^#+ /, '') })))
 const outgoing = computed(() => store.activePage ? store.outgoingLinks(store.activePage.id) : [])
 const incoming = computed(() => store.activePage ? store.backlinks(store.activePage.id) : [])
+const mentions = computed(() => store.activePage ? store.unlinkedMentions(store.activePage.id) : [])
+const linkingMentionId = ref<string | null>(null)
 const storageLabel = computed(() => {
   const source = store.workspace?.sources.find((item) => item.id === store.activePage?.storageSourceId)
   if (!source) return '未知存储源'
@@ -25,6 +27,7 @@ const graph = computed(() => {
     title: heading.replace(/^#+ /, ''),
     type: 'content' as const,
     relation: 'content' as const,
+    headingIndex: index,
   }))
   const neighbours = [
     ...linkedPages.map((item) => ({ id: item.page.id, title: item.page.title, type: 'title' as const, relation: item.relation })),
@@ -35,7 +38,7 @@ const graph = computed(() => {
     { id: current.id, title: current.title, type: 'title' as const, x: 120, y: 100, current: true },
     ...neighbours.map((item, index) => {
       const angle = -Math.PI / 2 + (index * Math.PI * 2) / Math.max(neighbours.length, 1)
-      return { id: item.id, title: item.title, type: item.type, x: 120 + Math.cos(angle) * 78, y: 100 + Math.sin(angle) * 70, current: false }
+      return { id: item.id, title: item.title, type: item.type, headingIndex: item.type === 'content' ? item.headingIndex : undefined, x: 120 + Math.cos(angle) * 78, y: 100 + Math.sin(angle) * 70, current: false }
     }),
   ]
   return {
@@ -47,6 +50,36 @@ const graph = computed(() => {
     })),
   }
 })
+
+async function linkMention(sourcePageId: string) {
+  const target = store.activePage
+  if (!target) return
+  linkingMentionId.value = sourcePageId
+  try {
+    await store.linkUnlinkedMention(sourcePageId, target.id)
+  } finally {
+    linkingMentionId.value = null
+  }
+}
+
+function openGraphNode(node: { id: string; type: 'title' | 'tag' | 'content'; headingIndex?: number }) {
+  if (node.type === 'title') {
+    store.openPage(node.id)
+    return
+  }
+  if (node.type === 'tag') store.openTags(node.id.slice('tag:'.length))
+  if (node.type === 'content' && node.headingIndex !== undefined) store.scrollToOutlineHeading(node.headingIndex)
+}
+
+function isChildLink(pageId: string) {
+  return store.pages.some((page) => page.id === pageId && page.parentId === store.activePage?.id && !page.deletedAt)
+}
+
+async function unlinkPage(pageId: string) {
+  const source = store.activePage
+  if (!source || isChildLink(pageId)) return
+  await store.unlinkPageReference(source.id, pageId)
+}
 </script>
 
 <template>
@@ -59,7 +92,7 @@ const graph = computed(() => {
     </div>
     <div v-if="tab === 'outline'" class="context-content outline-list">
       <p v-if="!headings.length" class="muted">添加标题后将在这里生成大纲。</p>
-      <button v-for="heading in headings" :key="heading.text" :style="{ paddingLeft: `${(heading.level - 1) * 10}px` }">{{ heading.text }}</button>
+      <button v-for="heading in headings" :key="`${heading.index}-${heading.text}`" :style="{ paddingLeft: `${(heading.level - 1) * 10}px` }" @click="store.scrollToOutlineHeading(heading.index)">{{ heading.text }}</button>
     </div>
     <div v-else-if="tab === 'properties'" class="context-content property-list">
       <div><span>存储源</span><strong>{{ storageLabel }}</strong></div>
@@ -70,13 +103,25 @@ const graph = computed(() => {
     <div v-else-if="tab === 'links'" class="context-content link-panel">
       <section>
         <p class="context-section-title">链接到</p>
-        <button v-for="page in outgoing" :key="page.id" @click="store.openPage(page.id)"><span>↗</span>{{ page.title }}</button>
+        <div v-for="page in outgoing" :key="page.id" class="outgoing-link-row">
+          <button @click="store.openPage(page.id)"><span>↗</span>{{ page.title }}</button>
+          <small v-if="isChildLink(page.id)" class="child-link-badge">子页面</small>
+          <button v-else class="unlink-action" :title="`移除到“${page.title}”的页面链接`" @click="unlinkPage(page.id)">×</button>
+        </div>
         <p v-if="!outgoing.length" class="muted">当前页面尚未链接到其他页面。</p>
       </section>
       <section>
         <p class="context-section-title">反向链接</p>
         <button v-for="page in incoming" :key="page.id" @click="store.openPage(page.id)"><span>↙</span>{{ page.title }}</button>
         <p v-if="!incoming.length" class="muted">还没有其他页面链接到这里。</p>
+      </section>
+      <section v-if="mentions.length">
+        <p class="context-section-title">未链接提及</p>
+        <div v-for="page in mentions" :key="page.id" class="mention-row">
+          <button title="正文中出现了该页面标题，但尚未建立页面链接" @click="store.openPage(page.id)"><span>⌁</span>{{ page.title }}</button>
+          <button class="mention-link-action" :disabled="linkingMentionId === page.id" :title="`将“${page.title}”中首次提及当前页的文字转换为页面链接`" @click="linkMention(page.id)">{{ linkingMentionId === page.id ? '关联中…' : '关联' }}</button>
+        </div>
+        <p class="mention-hint">正文中出现标题但未建立链接；可在编辑器中输入 [[ 进行关联。</p>
       </section>
     </div>
     <div v-else class="context-content graph-panel">
@@ -94,7 +139,7 @@ const graph = computed(() => {
           :class="edge.relation"
           marker-end="url(#graph-arrow)"
         />
-        <g v-for="node in graph.nodes" :key="node.id" class="graph-node" :class="{ current: node.current, [node.type]: true }" @click="node.type === 'title' && store.openPage(node.id)">
+        <g v-for="node in graph.nodes" :key="node.id" class="graph-node" :class="{ current: node.current, interactive: true, [node.type]: true }" @click="openGraphNode(node)">
           <circle v-if="node.type === 'title'" :cx="node.x" :cy="node.y" :r="node.current ? 18 : 13" />
           <rect v-else-if="node.type === 'tag'" :x="node.x - 13" :y="node.y - 10" width="26" height="20" rx="5" />
           <path v-else :d="`M ${node.x} ${node.y - 13} L ${node.x + 13} ${node.y} L ${node.x} ${node.y + 13} L ${node.x - 13} ${node.y} Z`" />

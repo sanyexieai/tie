@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
     "check": "vue-tsc -b",
-    "tauri": "tauri"
+    "tauri": "tauri dev",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@lucide/vue": "^1.34.0",
@@ -17,6 +19,7 @@
     "@tauri-apps/plugin-store": "^2.4.0",
     "@tiptap/core": "^3.30.5",
     "@tiptap/extension-code-block-lowlight": "^3.30.5",
+    "@tiptap/extension-image": "^3.30.5",
     "@tiptap/extension-link": "^3.30.5",
     "@tiptap/extension-placeholder": "^3.30.5",
     "@tiptap/extension-table": "^3.30.5",

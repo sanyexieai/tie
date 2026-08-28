@@ -1,20 +1,36 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import PageTreeItem from '@/components/PageTreeItem.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { useBackendStore } from '@/stores/backend'
 
 const store = useWorkspaceStore()
-const rootPage = computed(() => store.tree.find((node) => node.title === '收集箱'))
-const otherPages = computed(() => store.tree.filter((node) => node.id !== rootPage.value?.id))
+const backend = useBackendStore()
+const inboxPages = computed(() => store.tree.filter((node) => node.title === '收集箱'))
 const topLevelDragOver = ref(false)
-const choosingWorkspace = ref(false)
-const storageMenuOpen = ref(false)
-const emit = defineEmits<{ close: [] }>()
-const sources = computed(() => store.workspace?.sources ?? [])
-const sourcesById = computed(() => Object.fromEntries(sources.value.map((source) => [source.id, source])))
+const emit = defineEmits<{ close: []; 'open-storage-settings': [] }>()
+const sourcesById = computed(() => Object.fromEntries(store.allSources.map((source) => [source.id, source])))
+const activePageCount = computed(() => store.pages.filter((page) => !page.deletedAt).length)
+const defaultSourceName = computed(() => store.allSources.find((source) => source.id === store.defaultStorageSourceId)?.name ?? '未设置')
+
+watch(() => backend.connected, (connected) => {
+  if (connected) void backend.refreshWorkspaces()
+}, { immediate: true })
+
+watch(() => backend.workspaces.map((workspace) => workspace.id).join('\n'), () => {
+  if (backend.connected && store.initialized) void store.reloadWorkspace()
+})
 
 async function createTopLevel() { await store.createPage(null) }
 async function createChild(parentId: string) { await store.createChildPage(parentId) }
+async function duplicate(pageId: string) { await store.duplicatePage(pageId) }
+async function rename(pageId: string) {
+  const page = store.pages.find((item) => item.id === pageId)
+  if (!page) return
+  const title = window.prompt('页面标题', page.title)
+  if (title === null || title.trim() === page.title) return
+  await store.renamePage(pageId, title)
+}
 async function remove(pageId: string) {
   if (store.pages.length <= 1) return
   await store.trashPage(pageId)
@@ -26,11 +42,15 @@ async function dropAtTopLevel(event: DragEvent) {
   topLevelDragOver.value = false
   if (pageId) await store.movePage(pageId, null)
 }
-async function chooseWorkspace(kind: 'local' | 'smb') {
-  choosingWorkspace.value = true
-  try { await store.addStorageSource(kind); storageMenuOpen.value = false } finally { choosingWorkspace.value = false }
+async function renameWorkspace() {
+  const name = window.prompt('工作区名称', store.workspace?.name ?? '我的知识库')
+  if (name === null || name.trim() === store.workspace?.name) return
+  await store.renameWorkspace(name)
 }
-function sourceLabel(kind: 'local' | 'smb') { return kind === 'smb' ? 'SMB 挂载目录' : '本地目录' }
+function openFirstInbox() {
+  const inbox = inboxPages.value[0]
+  if (inbox) store.openPage(inbox.id)
+}
 </script>
 
 <template>
@@ -38,14 +58,14 @@ function sourceLabel(kind: 'local' | 'smb') { return kind === 'smb' ? 'SMB 挂�
     <div class="workspace-heading">
       <span class="workspace-mark">T</span>
       <span>{{ store.workspace?.name ?? '加载中…' }}</span>
-      <button class="ghost-button">⌄</button>
+      <button class="ghost-button" title="重命名工作区" @click="renameWorkspace">✎</button>
       <button class="mobile-sidebar-close" aria-label="关闭侧边栏" @click="emit('close')">×</button>
     </div>
 
     <button class="new-page-button" @click="createTopLevel"><span>+</span> 新建页面</button>
 
     <nav class="quick-nav" aria-label="快捷导航">
-      <button :class="{ selected: !store.showingTrash && rootPage?.id === store.activePageId }" @click="rootPage && store.openPage(rootPage.id)"><span>⌑</span> 收集箱</button>
+      <button :class="{ selected: !store.showingTrash && inboxPages.some((page) => page.id === store.activePageId) }" @click="openFirstInbox"><span>⌑</span> 收集箱</button>
       <button :class="{ selected: store.showingRecent }" @click="store.openRecent()"><span>◷</span> 最近打开</button>
       <button :class="{ selected: store.showingFavorites }" @click="store.openFavorites()"><span>☆</span> 收藏</button>
       <button :class="{ selected: store.showingSearch }" @click="store.openSearch()"><span>⌕</span> 搜索</button>
@@ -54,8 +74,8 @@ function sourceLabel(kind: 'local' | 'smb') { return kind === 'smb' ? 'SMB 挂�
       <button :class="{ selected: store.showingTrash }" @click="store.openTrash()"><span>⌫</span> 回收站</button>
     </nav>
 
-    <div class="sidebar-section-title"><span>我的页面</span><button @click="createTopLevel">+</button></div>
-    <div class="page-tree">
+    <div class="sidebar-section-title"><span>我的页面</span><small class="sidebar-page-count">{{ activePageCount }} 页</small><button @click="createTopLevel">+</button></div>
+    <div class="page-tree" role="tree" aria-label="我的页面">
       <div
         class="top-level-drop-zone"
         :class="{ visible: topLevelDragOver }"
@@ -65,38 +85,24 @@ function sourceLabel(kind: 'local' | 'smb') { return kind === 'smb' ? 'SMB 挂�
         @drop.prevent="dropAtTopLevel"
       >拖到这里设为顶层页面</div>
       <PageTreeItem
-        v-for="node in otherPages"
+        v-for="node in store.tree"
         :key="node.id"
         :node="node"
         :active-page-id="store.activePageId"
         :sources-by-id="sourcesById"
         @select="store.openPage($event)"
         @create="createChild"
-        @remove="remove"
-        @move="move"
-        @reorder="reorder"
-      />
-      <PageTreeItem
-        v-if="rootPage"
-        :node="rootPage"
-        :active-page-id="store.activePageId"
-        :sources-by-id="sourcesById"
-        @select="store.openPage($event)"
-        @create="createChild"
+        @duplicate="duplicate"
+        @rename="rename"
         @remove="remove"
         @move="move"
         @reorder="reorder"
       />
     </div>
 
-    <div class="storage-footer">
-      <div class="sidebar-section-title"><span>存储源</span><button title="连接存储源" @click="storageMenuOpen = !storageMenuOpen">+</button></div>
-      <button v-for="source in sources" :key="source.id" class="storage-row storage-source-button" :class="{ active: store.activeStorageSourceId === source.id }" :title="source.path" @click="store.selectStorageSource(source.id)"><span class="storage-status"></span><span>{{ source.name }}</span><small>{{ sourceLabel(source.kind) }}</small></button>
-      <div v-if="storageMenuOpen" class="storage-menu">
-        <button :disabled="choosingWorkspace" @click="chooseWorkspace('local')"><strong>本地目录</strong><small>选择磁盘中的知识库</small></button>
-        <button :disabled="choosingWorkspace" @click="chooseWorkspace('smb')"><strong>SMB 挂载目录</strong><small>选择系统已挂载的共享目录</small></button>
-      </div>
-      <p>新建顶层页会保存到当前选中源；子页面继承父页面的存储源。SMB 由系统负责挂载与鉴权。</p>
-    </div>
+    <button class="sidebar-storage-trigger" type="button" title="管理存储源与优先级" @click="emit('open-storage-settings')">
+      <span>⚙ 存储设置</span>
+      <small>默认 · {{ defaultSourceName }}</small>
+    </button>
   </aside>
 </template>

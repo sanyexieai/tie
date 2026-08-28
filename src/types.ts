@@ -1,16 +1,18 @@
 export type PageId = string
-export type StorageKind = 'local' | 'smb'
+export type StorageKind = 'local' | 'smb' | 'backend'
 
 export interface StorageSource {
   id: string
   name: string
   kind: StorageKind
   path: string
+  available?: boolean
 }
 
 export interface Page {
   id: PageId
   title: string
+  icon: string
   parentId: PageId | null
   sortKey: number
   markdown: string
@@ -36,10 +38,18 @@ export interface PageLink {
   toPageId: PageId
 }
 
+export interface PageRevision {
+  id: string
+  savedAt: string
+  title: string
+}
+
 export interface SearchResult {
   page: Page
   score: number
   snippet: string
+  sourceName: string
+  sourceKind: StorageKind
 }
 
 export interface TagSummary {
@@ -55,4 +65,8 @@ export interface WorkspaceSnapshot {
 export interface WorkspacePreferences {
   favoritePageIds: PageId[]
   recentPageIds: PageId[]
+  collapsedPageIds: PageId[]
+  spellcheckEnabled: boolean
+  sourceMode: boolean
+  storageSourceOrder: string[]
 }

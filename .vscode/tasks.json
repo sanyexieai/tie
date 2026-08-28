@@ -1,0 +1,21 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "tauri",
+      "type": "npm",
+      "script": "tauri",
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "tauri: build",
+      "type": "npm",
+      "script": "tauri:build",
+      "problemMatcher": []
+    }
+  ]
+}
