@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { backendService, isBackendSourceId, parseBackendWorkspaceId } from '@/services/backend'
+import { isS3SourceId, loadLocalS3Providers, providerForS3Source, s3SourceId } from '@/services/s3'
 import type { Page, PageId, PageRevision, StorageKind, WorkspacePreferences, WorkspaceSnapshot } from '@/types'
 
 const fallbackKey = 'tie-demo-workspace-v1'
@@ -106,21 +107,45 @@ async function loadBackendPages() {
   return backendService.loadAllPages(profile, (workspaceId) => `backend:${workspaceId}`)
 }
 
+async function loadS3Pages() {
+  if (!(await isTauri())) return []
+  const providers = loadLocalS3Providers().filter((provider) => provider.credentialStored)
+  const pages = await Promise.all(providers.map(async (provider) => {
+    try {
+      return await invoke<Page[]>('load_s3_pages', {
+        connection: { providerId: provider.id, endpoint: provider.endpoint, bucket: provider.bucket },
+      })
+    } catch {
+      return [] as Page[]
+    }
+  }))
+  return pages.flat()
+}
+
 async function mergeSnapshot(fileSnapshot: WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
   const filePages = fileSnapshot.pages.filter((page) => !isBackendSourceId(page.storageSourceId))
-  const backendPages = await loadBackendPages()
-  return { workspace: fileSnapshot.workspace, pages: [...filePages, ...backendPages] }
+  const [backendPages, s3Pages] = await Promise.all([loadBackendPages(), loadS3Pages()])
+  return { workspace: fileSnapshot.workspace, pages: [...filePages, ...backendPages, ...s3Pages] }
 }
 
 export const workspaceService = {
   async load(): Promise<WorkspaceSnapshot> {
     return mergeSnapshot(await loadFileSnapshot())
   },
-  async savePage(page: Page) {
+  async savePage(page: Page, expectedUpdatedAt?: string) {
     if (isBackendSourceId(page.storageSourceId)) {
       const profile = backendService.loadProfile()
       if (!profile.accessToken) throw new Error('请先连接自定义后台')
-      return backendService.savePage(profile, parseBackendWorkspaceId(page.storageSourceId), page)
+      return backendService.savePage(profile, parseBackendWorkspaceId(page.storageSourceId), page, expectedUpdatedAt)
+    }
+    if (isS3SourceId(page.storageSourceId)) {
+      if (!(await isTauri())) throw new Error('S3 页面仅支持桌面端')
+      const provider = providerForS3Source(page.storageSourceId)
+      if (!provider?.credentialStored) throw new Error('未找到 S3 本机密钥，请重新保存该连接')
+      return invoke<Page>('save_s3_page', {
+        connection: { providerId: provider.id, endpoint: provider.endpoint, bucket: provider.bucket },
+        page: { ...page, storageSourceId: s3SourceId(provider.id) },
+      })
     }
     if (await isTauri()) return invoke<Page>('save_page', { page })
     const snapshot = localSnapshot()
@@ -134,6 +159,13 @@ export const workspaceService = {
     saveLocal(snapshot)
     return page
   },
+  async readLatestPage(page: Page): Promise<Page | null> {
+    if (!isBackendSourceId(page.storageSourceId)) return null
+    const profile = backendService.loadProfile()
+    if (!profile.accessToken) throw new Error('请先连接自定义后台')
+    const remote = await backendService.getPage(profile, parseBackendWorkspaceId(page.storageSourceId), page.id)
+    return { ...remote, storageSourceId: page.storageSourceId }
+  },
   async transferPage(page: Page, targetSourceId: string) {
     if (isBackendSourceId(page.storageSourceId) || isBackendSourceId(targetSourceId)) {
       throw new Error('暂不支持在自定义后台与其他存储源之间迁移页面')
@@ -142,7 +174,12 @@ export const workspaceService = {
     return this.savePage({ ...page, storageSourceId: targetSourceId })
   },
   async listPageRevisions(page: Page): Promise<PageRevision[]> {
-    if (isBackendSourceId(page.storageSourceId)) return []
+    if (isBackendSourceId(page.storageSourceId)) {
+      const profile = backendService.loadProfile()
+      if (!profile.accessToken) throw new Error('请先连接自定义后台')
+      return backendService.listPageRevisions(profile, parseBackendWorkspaceId(page.storageSourceId), page.id)
+    }
+    if (isS3SourceId(page.storageSourceId)) return []
     if (await isTauri()) return invoke<PageRevision[]>('list_page_revisions', { pageId: page.id, storageSourceId: page.storageSourceId })
     return (localHistory()[page.id] ?? []).map((revision) => ({
       id: revision.id,
@@ -151,13 +188,22 @@ export const workspaceService = {
     }))
   },
   async readPageRevision(page: Page, revisionId: string): Promise<Page> {
-    if (isBackendSourceId(page.storageSourceId)) throw new Error('自定义后台暂不支持历史版本')
+    if (isBackendSourceId(page.storageSourceId)) {
+      const profile = backendService.loadProfile()
+      if (!profile.accessToken) throw new Error('请先连接自定义后台')
+      const revision = await backendService.readPageRevision(profile, parseBackendWorkspaceId(page.storageSourceId), page.id, revisionId)
+      return { ...revision, storageSourceId: page.storageSourceId }
+    }
     if (await isTauri()) return invoke<Page>('read_page_revision', { page, revisionId })
     const revision = localHistory()[page.id]?.find((candidate) => candidate.id === revisionId)
     if (!revision) throw new Error('未找到该历史版本')
     return revision.page
   },
   async restorePageRevision(page: Page, revisionId: string): Promise<Page> {
+    if (isBackendSourceId(page.storageSourceId)) {
+      const revision = await this.readPageRevision(page, revisionId)
+      return this.savePage({ ...revision, id: page.id, storageSourceId: page.storageSourceId, createdAt: page.createdAt, updatedAt: now() })
+    }
     const updated = { ...page, updatedAt: now() }
     if (await isTauri()) return invoke<Page>('restore_page_revision', { page: updated, revisionId })
     const revision = localHistory()[page.id]?.find((candidate) => candidate.id === revisionId)
@@ -195,7 +241,8 @@ export const workspaceService = {
   },
   async permanentlyDeletePages(pages: Page[]) {
     const backendPages = pages.filter((page) => isBackendSourceId(page.storageSourceId))
-    const filePages = pages.filter((page) => !isBackendSourceId(page.storageSourceId))
+    const s3Pages = pages.filter((page) => isS3SourceId(page.storageSourceId))
+    const filePages = pages.filter((page) => !isBackendSourceId(page.storageSourceId) && !isS3SourceId(page.storageSourceId))
     if (backendPages.length) {
       const profile = backendService.loadProfile()
       if (!profile.accessToken) throw new Error('请先连接自定义后台')
@@ -208,6 +255,23 @@ export const workspaceService = {
       })
       for (const [workspaceId, pageIds] of grouped) {
         await backendService.deletePages(profile, workspaceId, pageIds)
+      }
+    }
+    if (s3Pages.length) {
+      if (!(await isTauri())) throw new Error('S3 页面仅支持桌面端')
+      const groups = new Map<string, string[]>()
+      s3Pages.forEach((page) => {
+        const pageIds = groups.get(page.storageSourceId) ?? []
+        pageIds.push(page.id)
+        groups.set(page.storageSourceId, pageIds)
+      })
+      for (const [sourceId, pageIds] of groups) {
+        const provider = providerForS3Source(sourceId)
+        if (!provider?.credentialStored) throw new Error('未找到 S3 本机密钥，请重新保存该连接')
+        await invoke('permanently_delete_s3_pages', {
+          connection: { providerId: provider.id, endpoint: provider.endpoint, bucket: provider.bucket },
+          pageIds,
+        })
       }
     }
     if (!filePages.length) return

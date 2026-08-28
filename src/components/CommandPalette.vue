@@ -28,8 +28,8 @@ const actions = computed(() => [
 const total = computed(() => pages.value.length + actions.value.length)
 
 function sourceLabel(sourceId: string) {
-  const source = store.workspace?.sources.find((item) => item.id === sourceId)
-  return source ? `${source.kind === 'smb' ? 'SMB' : '本地'} · ${source.name}` : '未知来源'
+  const source = store.allSources.find((item) => item.id === sourceId)
+  return source ? `${source.kind === 'backend' ? '后台' : source.kind === 's3' ? 'S3' : source.kind === 'smb' ? 'SMB' : '本地'} · ${source.name}` : '未知来源'
 }
 async function select(index: number) {
   const page = pages.value[index]

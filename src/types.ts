@@ -1,5 +1,5 @@
 export type PageId = string
-export type StorageKind = 'local' | 'smb' | 'backend'
+export type StorageKind = 'local' | 'smb' | 's3' | 'backend'
 
 export interface StorageSource {
   id: string

@@ -1,19 +1,23 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { backendService, type BackendProfile, type BackendWorkspace } from '@/services/backend'
+import { backendService, type BackendProfile, type BackendStorageSource, type BackendWorkspace } from '@/services/backend'
 
 export const useBackendStore = defineStore('backend', () => {
   const profile = ref<BackendProfile>(backendService.loadProfile())
   const workspaces = ref<BackendWorkspace[]>([])
+  const providers = ref<BackendStorageSource[]>([])
   const loading = ref(false)
   const error = ref('')
   const initialized = ref(false)
+  const syncing = ref(false)
+  const lastSyncedAt = ref<string | null>(null)
   const connected = computed(() => Boolean(profile.value.accessToken && profile.value.user))
 
   function saveProfile() { backendService.saveProfile(profile.value) }
   async function refreshWorkspaces() {
-    if (!connected.value) { workspaces.value = []; return }
+    if (!connected.value) { workspaces.value = []; providers.value = []; return }
     workspaces.value = await backendService.listWorkspaces(profile.value)
+    providers.value = await backendService.listProviders(profile.value)
   }
   async function initialize() {
     if (initialized.value) return
@@ -24,9 +28,10 @@ export const useBackendStore = defineStore('backend', () => {
       profile.value.user = await backendService.me(profile.value)
       saveProfile()
       await refreshWorkspaces()
+      lastSyncedAt.value = new Date().toISOString()
     } catch {
       profile.value = backendService.clearProfile(profile.value.endpoint)
-      workspaces.value = []
+      workspaces.value = []; providers.value = []
     } finally { loading.value = false }
   }
   async function authenticate(mode: 'login' | 'register', endpoint: string, email: string, password: string, name = '') {
@@ -62,11 +67,36 @@ export const useBackendStore = defineStore('backend', () => {
       throw reason
     } finally { loading.value = false }
   }
+  async function renameWorkspace(workspaceId: string, name: string) {
+    loading.value = true
+    error.value = ''
+    try {
+      const workspace = await backendService.renameWorkspace(profile.value, workspaceId, name)
+      workspaces.value = workspaces.value.map((item) => item.id === workspace.id ? workspace : item)
+      return workspace
+    } catch (reason) {
+      error.value = reason instanceof Error ? reason.message : '重命名后台工作区失败'
+      throw reason
+    } finally { loading.value = false }
+  }
+  async function sync() {
+    if (!connected.value || syncing.value) return false
+    syncing.value = true
+    error.value = ''
+    try {
+      await refreshWorkspaces()
+      lastSyncedAt.value = new Date().toISOString()
+      return true
+    } catch (reason) {
+      error.value = reason instanceof Error ? reason.message : '后台同步失败'
+      return false
+    } finally { syncing.value = false }
+  }
   function logout() {
     profile.value = backendService.clearProfile(profile.value.endpoint)
-    workspaces.value = []
+    workspaces.value = []; providers.value = []
     error.value = ''
   }
 
-  return { profile, workspaces, loading, error, initialized, connected, initialize, authenticate, checkHealth, refreshWorkspaces, createWorkspace, logout }
+  return { profile, workspaces, providers, loading, error, initialized, syncing, lastSyncedAt, connected, initialize, authenticate, checkHealth, refreshWorkspaces, createWorkspace, renameWorkspace, sync, logout }
 })

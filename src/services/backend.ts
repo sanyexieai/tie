@@ -1,4 +1,4 @@
-import type { Page, StorageSource } from '@/types'
+import type { Page, PageRevision, StorageSource } from '@/types'
 
 export interface BackendUser {
   id: string
@@ -11,6 +11,16 @@ export interface BackendWorkspace {
   id: string
   name: string
   ownerId: string
+  createdAt: string
+}
+
+export interface BackendStorageSource {
+  id: string
+  workspaceId: string
+  name: string
+  kind: 'local_folder' | 'smb' | 's3' | 'cloud' | 'backend'
+  publicConfig: Record<string, unknown>
+  credentialRef: string | null
   createdAt: string
 }
 
@@ -35,6 +45,9 @@ export function backendWorkspaceSource(workspace: BackendWorkspace, endpoint: st
     path: `${base}/workspaces/${workspace.id}`,
     available: true,
   }
+}
+export function s3ProviderSource(provider: BackendStorageSource): StorageSource {
+  return { id: `s3:${provider.id}`, name: provider.name, kind: 's3', path: `${String(provider.publicConfig.endpoint ?? '')}/${String(provider.publicConfig.bucket ?? '')}`, available: false }
 }
 
 export function isBackendSourceId(sourceId: string | null | undefined) {
@@ -72,6 +85,7 @@ async function request<T>(profile: BackendProfile, path: string, options: Reques
   const body = await response.json().catch(() => null) as { message?: string; error?: string } | T | null
   if (!response.ok) {
     const error = body as { message?: string; error?: string } | null
+    if (response.status === 409) throw new Error('页面已在其他设备更新，请重新载入后再保存')
     throw new Error(error?.message ?? error?.error ?? `后台请求失败（${response.status}）`)
   }
   if (response.status === 204 || body === null) return null as T
@@ -120,12 +134,28 @@ export const backendService = {
   async createWorkspace(profile: BackendProfile, name: string) {
     return request<BackendWorkspace>(profile, '/api/v1/workspaces', { method: 'POST', body: JSON.stringify({ name }) })
   },
+  async renameWorkspace(profile: BackendProfile, workspaceId: string, name: string) {
+    return request<BackendWorkspace>(profile, `/api/v1/workspaces/${workspaceId}`, { method: 'PATCH', body: JSON.stringify({ name }) })
+  },
+  async createProvider(profile: BackendProfile, source: { name: string; kind: BackendStorageSource['kind']; publicConfig: Record<string, unknown>; credentials?: Record<string, string> }) {
+    return request<BackendStorageSource>(profile, '/api/v1/providers', { method: 'POST', body: JSON.stringify(source) })
+  },
+  async listProviders(profile: BackendProfile) {
+    return request<BackendStorageSource[]>(profile, '/api/v1/providers')
+  },
+  async listLegacyStorageSources(profile: BackendProfile, workspaceId: string) {
+    return request<BackendStorageSource[]>(profile, `/api/v1/workspaces/${workspaceId}/sources`)
+  },
   async listPages(profile: BackendProfile, workspaceId: string) {
     return request<BackendPagePayload[]>(profile, `/api/v1/workspaces/${workspaceId}/pages`)
   },
-  async savePage(profile: BackendProfile, workspaceId: string, page: Page) {
+  async getPage(profile: BackendProfile, workspaceId: string, pageId: string) {
+    return request<BackendPagePayload>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}`)
+  },
+  async savePage(profile: BackendProfile, workspaceId: string, page: Page, expectedUpdatedAt?: string) {
     const saved = await request<BackendPagePayload>(profile, `/api/v1/workspaces/${workspaceId}/pages/${page.id}`, {
       method: 'PUT',
+      headers: expectedUpdatedAt ? { 'if-unmodified-since': expectedUpdatedAt } : undefined,
       body: JSON.stringify({ ...page, storageSourceId: page.storageSourceId }),
     })
     return { ...saved, storageSourceId: page.storageSourceId }
@@ -135,6 +165,12 @@ export const backendService = {
       method: 'POST',
       body: JSON.stringify({ pageIds }),
     })
+  },
+  async listPageRevisions(profile: BackendProfile, workspaceId: string, pageId: string) {
+    return request<PageRevision[]>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/revisions`)
+  },
+  async readPageRevision(profile: BackendProfile, workspaceId: string, pageId: string, revisionId: string) {
+    return request<BackendPagePayload>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/revisions/${revisionId}`)
   },
   async loadAllPages(profile: BackendProfile, sourceIdFor: (workspaceId: string) => string) {
     if (!profile.accessToken) return [] as Page[]

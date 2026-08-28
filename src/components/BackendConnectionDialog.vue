@@ -42,6 +42,14 @@ async function addWorkspace() {
     notice.value = '后台存储源已创建。'
   } catch { /* store exposes message */ }
 }
+async function renameWorkspace(workspaceId: string, currentName: string) {
+  const name = window.prompt('后台工作区名称', currentName)
+  if (name === null || !name.trim() || name.trim() === currentName) return
+  try {
+    await backend.renameWorkspace(workspaceId, name.trim())
+    notice.value = '后台工作区已重命名。'
+  } catch { /* store exposes message */ }
+}
 async function logout() {
   backend.logout()
   await syncWorkspacePages()
@@ -66,7 +74,7 @@ async function logout() {
       <template v-else>
         <div class="backend-account"><span>●</span><div><strong>{{ accountName }}</strong><small>{{ backend.profile.endpoint }}</small></div><button @click="logout">退出登录</button></div>
         <div class="backend-workspace-heading"><span>后台存储源</span><button :disabled="backend.loading" @click="backend.refreshWorkspaces">↻</button></div>
-        <div v-if="backend.workspaces.length" class="backend-workspace-list"><div v-for="workspace in backend.workspaces" :key="workspace.id"><strong>{{ workspace.name }}</strong><small>已加入左侧存储源列表</small></div></div>
+        <div v-if="backend.workspaces.length" class="backend-workspace-list"><div v-for="workspace in backend.workspaces" :key="workspace.id"><span><strong>{{ workspace.name }}</strong><small>已加入左侧存储源列表</small></span><button :disabled="backend.loading" title="重命名后台工作区" @click="renameWorkspace(workspace.id, workspace.name)">✎</button></div></div>
         <p v-else class="backend-empty">创建后会作为存储源显示在左侧，与本地目录、SMB 同级。</p>
         <div class="backend-create-workspace"><input v-model="workspaceName" placeholder="新工作区名称" @keydown.enter="addWorkspace" /><button :disabled="backend.loading || !workspaceName.trim()" @click="addWorkspace">创建</button></div>
       </template>

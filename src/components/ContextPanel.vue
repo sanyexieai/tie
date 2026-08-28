@@ -10,8 +10,10 @@ const incoming = computed(() => store.activePage ? store.backlinks(store.activeP
 const mentions = computed(() => store.activePage ? store.unlinkedMentions(store.activePage.id) : [])
 const linkingMentionId = ref<string | null>(null)
 const storageLabel = computed(() => {
-  const source = store.workspace?.sources.find((item) => item.id === store.activePage?.storageSourceId)
+  const source = store.allSources.find((item) => item.id === store.activePage?.storageSourceId)
   if (!source) return '未知存储源'
+  if (source.kind === 'backend') return `后台 · ${source.name}`
+  if (source.kind === 's3') return `S3 · ${source.name}`
   return source.kind === 'smb' ? `SMB · ${source.name}` : `本地 · ${source.name}`
 })
 const graph = computed(() => {

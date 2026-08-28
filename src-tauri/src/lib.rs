@@ -6,7 +6,50 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+use keyring::Entry;
+use futures_util::StreamExt;
+use minio::s3::{builders::ObjectContent, creds::StaticProvider, response::BucketExistsResponse, types::{BucketName, S3Api, ToStream}, MinioClient, MinioClientBuilder};
 use tauri::Manager;
+
+const S3_CREDENTIAL_SERVICE: &str = "com.tie.knowledge.s3";
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct S3Credentials {
+    access_key: String,
+    secret_key: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct S3Connection {
+    provider_id: String,
+    endpoint: String,
+    bucket: String,
+}
+
+fn s3_credential_entry(provider_id: &str) -> Result<Entry, String> {
+    if provider_id.trim().is_empty() {
+        return Err("S3 配置标识不能为空".to_owned());
+    }
+    Entry::new(S3_CREDENTIAL_SERVICE, provider_id).map_err(|error| error.to_string())
+}
+
+fn s3_client(connection: &S3Connection) -> Result<(MinioClient, BucketName), String> {
+    let raw_credentials = s3_credential_entry(&connection.provider_id)?
+        .get_password()
+        .map_err(|_| "未找到此 S3 连接的本机密钥，请重新保存配置".to_owned())?;
+    let credentials: S3Credentials = serde_json::from_str(&raw_credentials)
+        .map_err(|_| "本机 S3 密钥无效，请重新保存配置".to_owned())?;
+    let endpoint = connection.endpoint.trim().parse()
+        .map_err(|error| format!("Endpoint 格式无效：{error}"))?;
+    let bucket = BucketName::new(connection.bucket.trim()).map_err(|error| format!("Bucket 名称无效：{error}"))?;
+    let client = MinioClientBuilder::new(endpoint)
+        .provider(Some(StaticProvider::new(&credentials.access_key, &credentials.secret_key, None)))
+        .build()
+        .map_err(|error| format!("无法创建 S3 客户端：{error}"))?;
+    Ok((client, bucket))
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -798,6 +841,99 @@ fn rename_workspace(app: tauri::AppHandle, name: String) -> Result<WorkspaceSnap
     load_workspace(app)
 }
 
+#[tauri::command]
+fn save_s3_credentials(provider_id: String, access_key: String, secret_key: String) -> Result<(), String> {
+    if access_key.trim().is_empty() || secret_key.is_empty() {
+        return Err("Access Key 和 Secret Key 不能为空".to_owned());
+    }
+    let payload = serde_json::to_string(&S3Credentials {
+        access_key: access_key.trim().to_owned(),
+        secret_key,
+    })
+    .map_err(|error| error.to_string())?;
+    s3_credential_entry(&provider_id)?
+        .set_password(&payload)
+        .map_err(|error| format!("无法保存到系统凭据库：{error}"))
+}
+
+#[tauri::command]
+fn remove_s3_credentials(provider_id: String) -> Result<(), String> {
+    match s3_credential_entry(&provider_id)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!("无法从系统凭据库移除：{error}")),
+    }
+}
+
+#[tauri::command]
+async fn test_s3_connection(provider_id: String, endpoint: String, bucket: String) -> Result<(), String> {
+    let (client, bucket) = s3_client(&S3Connection { provider_id, endpoint, bucket })?;
+    let response: BucketExistsResponse = client.bucket_exists(bucket)
+        .map_err(|error| format!("无法检查 Bucket：{error}"))?
+        .build()
+        .send()
+        .await
+        .map_err(|error| format!("无法连接 S3：{error}"))?;
+    if response.exists() { Ok(()) } else { Err("已连接 S3，但指定 Bucket 不存在或当前密钥无权访问".to_owned()) }
+}
+
+#[tauri::command]
+async fn load_s3_pages(connection: S3Connection) -> Result<Vec<Page>, String> {
+    let source_id = format!("s3:{}", connection.provider_id);
+    let (client, bucket) = s3_client(&connection)?;
+    let mut stream = client.list_objects(bucket.clone())
+        .map_err(|error| format!("无法列出 S3 页面：{error}"))?
+        .prefix(Some("tie/pages/".to_owned()))
+        .recursive(true)
+        .build()
+        .to_stream()
+        .await;
+    let mut pages = Vec::new();
+    while let Some(batch) = stream.next().await {
+        let batch = batch.map_err(|error| format!("无法读取 S3 页面列表：{error}"))?;
+        for entry in batch.contents.into_iter().filter(|entry| entry.name.ends_with(".md")) {
+            let response = client.get_object(bucket.clone(), entry.name)
+                .map_err(|error| format!("无法读取 S3 页面：{error}"))?
+                .build()
+                .send()
+                .await
+                .map_err(|error| format!("无法下载 S3 页面：{error}"))?;
+            let content = String::from_utf8(response.into_bytes().await.map_err(|error| format!("无法读取 S3 页面内容：{error}"))?.to_vec())
+                .map_err(|_| "S3 页面不是 UTF-8 Markdown 文件".to_owned())?;
+            let mut page = parse_page(&content).map_err(|error| format!("S3 页面格式无效：{error}"))?;
+            page.storage_source_id = source_id.clone();
+            pages.push(page);
+        }
+    }
+    Ok(pages)
+}
+
+#[tauri::command]
+async fn save_s3_page(connection: S3Connection, page: Page) -> Result<Page, String> {
+    let (client, bucket) = s3_client(&connection)?;
+    let object = format!("tie/pages/{}.md", page.id);
+    client.put_object_content(bucket, object, ObjectContent::from(frontmatter(&page)))
+        .map_err(|error| format!("无法创建 S3 写入请求：{error}"))?
+        .build()
+        .send()
+        .await
+        .map_err(|error| format!("无法保存 S3 页面：{error}"))?;
+    Ok(page)
+}
+
+#[tauri::command]
+async fn permanently_delete_s3_pages(connection: S3Connection, page_ids: Vec<String>) -> Result<(), String> {
+    let (client, bucket) = s3_client(&connection)?;
+    for page_id in page_ids {
+        client.delete_object(bucket.clone(), format!("tie/pages/{page_id}.md"))
+            .map_err(|error| format!("无法创建 S3 删除请求：{error}"))?
+            .build()
+            .send()
+            .await
+            .map_err(|error| format!("无法彻底删除 S3 页面：{error}"))?;
+    }
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -811,6 +947,12 @@ pub fn run() {
             remove_storage_source,
             rename_storage_source,
             rename_workspace,
+            save_s3_credentials,
+            remove_s3_credentials,
+            test_s3_connection,
+            load_s3_pages,
+            save_s3_page,
+            permanently_delete_s3_pages,
             list_page_revisions,
             read_page_revision,
             restore_page_revision,

@@ -1,6 +1,7 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { backendWorkspaceSource } from '@/services/backend'
+import { loadLocalS3Providers, s3StorageSource } from '@/services/s3'
 import { workspaceService } from '@/services/workspace'
 import { useBackendStore } from '@/stores/backend'
 import type { Page, PageId, PageLink, PageRevision, PageTreeNode, SearchResult, StorageKind, StorageSource, TagSummary, Workspace } from '@/types'
@@ -42,11 +43,15 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const collapsedPageIds = ref<PageId[]>([])
   const spellcheckEnabled = ref(true)
   const sourceMode = ref(false)
+  const s3ProvidersVersion = ref(0)
 
   const rawSources = computed(() => [
     ...(workspace.value?.sources ?? []),
     ...(backend.connected ? backend.workspaces.map((item) => backendWorkspaceSource(item, backend.profile.endpoint)) : []),
+    ...(s3ProvidersVersion.value >= 0 ? loadLocalS3Providers().map(s3StorageSource) : []),
   ])
+
+  if (typeof window !== 'undefined') window.addEventListener('tie:s3-providers-changed', () => { s3ProvidersVersion.value += 1 })
   const allSources = computed(() => sortSourcesByOrder(rawSources.value, storageSourceOrder.value))
   const defaultStorageSourceId = computed(() => allSources.value.find((source) => source.available !== false)?.id ?? allSources.value[0]?.id ?? null)
   const activeStorageSourceId = defaultStorageSourceId
@@ -193,6 +198,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       persistPreferences()
       return true
     } finally { reloading.value = false }
+  }
+
+  async function syncBackendSources() {
+    if (!backend.connected) throw new Error('请先连接自定义后台')
+    const connected = await backend.sync()
+    if (!connected) throw new Error(backend.error || '后台同步失败')
+    return reloadWorkspace()
   }
 
   async function addStorageSource(kind: StorageKind = 'local') {
@@ -463,7 +475,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     saving.value = true
     try {
       const previous = pages.value.find((item) => item.id === page.id)
-      const saved = await workspaceService.savePage({ ...page, markdown: withChildPageLinks(page), updatedAt: new Date().toISOString() })
+      const saved = await workspaceService.savePage({ ...page, markdown: withChildPageLinks(page), updatedAt: new Date().toISOString() }, previous?.updatedAt)
       const index = pages.value.findIndex((item) => item.id === saved.id)
       if (index === -1) pages.value.push(saved)
       else pages.value[index] = saved
@@ -524,6 +536,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function exportPageMarkdown(pageId: PageId) {
     const page = pages.value.find((item) => item.id === pageId && !item.deletedAt)
     return page ? workspaceService.exportPageMarkdown(page) : false
+  }
+
+  async function readLatestPage(pageId: PageId) {
+    const page = pages.value.find((item) => item.id === pageId)
+    return page ? workspaceService.readLatestPage(page) : null
   }
 
   function collectSubtree(pageId: PageId) {
@@ -778,5 +795,5 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, storageSourceOrder, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, initialize, reloadWorkspace, addStorageSource, importMarkdownFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, storageSourceOrder, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, initialize, reloadWorkspace, syncBackendSources, addStorageSource, importMarkdownFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })

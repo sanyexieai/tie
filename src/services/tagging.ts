@@ -3,6 +3,12 @@ const stopWords = new Set([
   'about', 'after', 'before', 'from', 'have', 'into', 'that', 'this', 'with', 'your',
 ])
 
+export interface TagSuggestion {
+  tag: string
+  score: number
+  reasons: string[]
+}
+
 function clean(value: string) {
   return value
     .replace(/```[\s\S]*?```/g, ' ')
@@ -19,29 +25,33 @@ function isCandidate(value: string) {
 
 export function suggestTags(input: { title: string; markdown: string; existingTags: string[]; workspaceTags: string[] }) {
   const scores = new Map<string, number>()
-  const add = (raw: string, score: number) => {
+  const reasons = new Map<string, Set<string>>()
+  const add = (raw: string, score: number, reason: string) => {
     const tag = raw.trim().replace(/^#\s*/, '')
     if (!isCandidate(tag) || input.existingTags.some((item) => item.toLocaleLowerCase() === tag.toLocaleLowerCase())) return
     scores.set(tag, (scores.get(tag) ?? 0) + score)
+    const items = reasons.get(tag) ?? new Set<string>()
+    items.add(reason)
+    reasons.set(tag, items)
   }
   const text = clean(`${input.title}\n${input.markdown}`)
   const title = clean(input.title)
 
-  for (const match of input.markdown.matchAll(/(?:^|\s)#([\p{L}\p{N}_-]{2,32})/gu)) add(match[1], 12)
+  for (const match of input.markdown.matchAll(/(?:^|\s)#([\p{L}\p{N}_-]{2,32})/gu)) add(match[1], 12, '正文中的显式标签')
   for (const heading of input.markdown.matchAll(/^#{2,6}\s+(.+)$/gm)) {
     const value = clean(heading[1]).replace(/[。！？，、:：].*$/, '')
-    if (isCandidate(value)) add(value, 6)
+    if (isCandidate(value)) add(value, 6, '正文标题')
   }
   for (const tag of input.workspaceTags) {
     const normalized = tag.toLocaleLowerCase()
-    if (text.toLocaleLowerCase().includes(normalized)) add(tag, title.toLocaleLowerCase().includes(normalized) ? 9 : 4)
+    if (text.toLocaleLowerCase().includes(normalized)) add(tag, title.toLocaleLowerCase().includes(normalized) ? 9 : 4, '匹配工作区已有标签')
   }
   for (const word of text.match(/[A-Za-z][A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]{2,8}/g) ?? []) {
-    if (title.includes(word)) add(word, 3)
+    if (title.includes(word)) add(word, 3, '页面标题关键词')
   }
 
   return [...scores.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh-CN'))
     .slice(0, 6)
-    .map(([tag]) => tag)
+    .map(([tag, score]) => ({ tag, score, reasons: [...(reasons.get(tag) ?? [])] }))
 }
