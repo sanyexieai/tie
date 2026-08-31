@@ -2,6 +2,24 @@
 
 在创建 `v1.0.0` tag 并上传安装包前，请逐项确认。
 
+## 自动发布（GitHub Actions）
+
+推送符合 `v*` 的 tag 后，`.github/workflows/release.yml` 会：
+
+1. 在 Ubuntu 构建 Linux 安装包（`.deb` / `.rpm`）
+2. 在 Windows 构建 Windows 安装包（`.msi` / `.exe` NSIS）
+3. 创建 GitHub Release，并附上上述产物
+
+示例：
+
+```bash
+# 确认 package.json / src-tauri/tauri.conf.json / backend/package.json 版本号一致
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+完成后在仓库 Releases 页下载安装包。CI（`ci.yml`）仍会在普通 push / PR 上跑检查与构建产物。
+
 ## 自动化（CI 必须通过）
 
 - [ ] `npm run check`

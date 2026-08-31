@@ -180,6 +180,8 @@ npm run tauri:build:linux    # deb + rpm
 npm run tauri:build:windows  # msi + nsis
 ```
 
+推送版本 tag（如 `v1.0.0`）后，GitHub Actions 会自动构建 Linux / Windows 安装包并发布到 [Releases](../../releases)。详见 [`RELEASE.md`](RELEASE.md)。
+
 Linux 构建需要 WebKitGTK、libsoup 和相关 GTK 开发库；缺少这些依赖时，前端的浏览器开发模式仍可使用。
 
 ### 可选：Codex / Agent 知识库
