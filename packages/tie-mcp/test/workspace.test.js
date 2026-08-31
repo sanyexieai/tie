@@ -75,3 +75,23 @@ test('search write related on local workspace', () => {
   assert.ok(fs.existsSync(historyDir))
   assert.ok(fs.readdirSync(historyDir).some((name) => name.endsWith('.md')))
 })
+
+test('writePage sets parentId from parentTitle without rewriting parent markdown', () => {
+  const root = makeWorkspace()
+  const ws = createWorkspace(root)
+
+  const hub = ws.writePage({
+    title: '产品索引',
+    markdown: '# 产品索引\n\n索引页。\n',
+  })
+  const before = ws.getById(hub.page.id).markdown
+
+  const child = ws.writePage({
+    title: '子页甲',
+    parentTitle: '产品索引',
+    markdown: '# 子页甲\n\n内容。\n',
+    kind: 'note',
+  })
+  assert.equal(child.page.parentId, hub.page.id)
+  assert.equal(ws.getById(hub.page.id).markdown, before)
+})

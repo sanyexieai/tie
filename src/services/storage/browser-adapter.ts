@@ -128,6 +128,10 @@ export const browserStorageAdapter: StorageAdapter = {
     const remoteIds = new Set(loaded.pages.map((page) => page.id))
     return mergeSyncPages(sourceId, context?.localPages ?? [], loaded.pages, remoteIds)
   },
+  async readLatestPage(page) {
+    const loaded = await this.loadPages(page.storageSourceId)
+    return loaded.pages.find((item) => item.id === page.id) ?? null
+  },
 }
 
 export function loadBrowserSnapshot(): LoadPagesResult {

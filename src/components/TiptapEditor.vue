@@ -17,6 +17,7 @@ import { Markdown } from '@tiptap/markdown'
 import { common, createLowlight } from 'lowlight'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import type { Page, StorageSource } from '@/types'
+import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { canStorePageAssets, embedImageFile, parseAssetUrl, resolveAssetDisplayUrl } from '@/services/attachments'
 
 const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page> }>()
@@ -140,7 +141,8 @@ const filteredCommands = computed(() => {
 function openInternalLink(event: MouseEvent) {
   const target = event.target
   if (!(target instanceof Element)) return false
-  const href = target.closest('a')?.getAttribute('href')
+  const anchor = target.closest<HTMLAnchorElement>('a[href^="tie://page/"]')
+  const href = anchor?.getAttribute('href')
   const prefix = 'tie://page/'
   if (!href?.startsWith(prefix)) return false
   event.preventDefault()
@@ -248,7 +250,17 @@ const editor = useEditor({
   ],
   editorProps: {
     attributes: { class: 'tiptap-content', spellcheck: String(props.spellcheck) },
-    handleDOMEvents: { click: (_view, event) => handleEditorClick(event) },
+    handleDOMEvents: {
+      // Child cards: navigate on mousedown so contenteditable selection doesn't swallow the click.
+      mousedown: (_view, event) => {
+        if (event.button !== 0) return false
+        const target = event.target
+        if (!(target instanceof Element)) return false
+        if (!target.closest('a.child-page-link[href^="tie://page/"]')) return false
+        return openInternalLink(event)
+      },
+      click: (_view, event) => handleEditorClick(event),
+    },
     handlePaste: (view, event) => handleImagePaste(view, event),
     handleDrop: (view, event) => handleImageDrop(view, event),
     handleKeyDown: (_view, event) => {
@@ -311,11 +323,11 @@ const editor = useEditor({
       return false
     },
   },
-  onCreate: () => void nextTick(decorateChildPageLinks),
+  onCreate: () => scheduleDecorateChildPageLinks(),
   onUpdate: ({ editor: currentEditor }) => {
     if (!syncingExternalValue) emit('update:modelValue', currentEditor.getMarkdown())
     updateMenus(currentEditor)
-    void nextTick(decorateChildPageLinks)
+    scheduleDecorateChildPageLinks()
   },
   onSelectionUpdate: ({ editor: currentEditor }) => updateMenus(currentEditor),
 })
@@ -325,12 +337,18 @@ watch(() => props.modelValue, (markdown) => {
   syncingExternalValue = true
   editor.value.commands.setContent(markdown, { contentType: 'markdown', emitUpdate: false })
   syncingExternalValue = false
-  void nextTick(decorateChildPageLinks)
+  scheduleDecorateChildPageLinks()
 })
 
-watch(childPageIds, () => void nextTick(decorateChildPageLinks), { deep: true })
-watch(() => props.pages, () => void nextTick(decorateChildPageLinks), { deep: true })
+watch(childPageIds, () => scheduleDecorateChildPageLinks())
+watch(() => props.pages.map((page) => `${page.id}:${page.parentId ?? ''}:${page.deletedAt ?? ''}`).join('|'), () => scheduleDecorateChildPageLinks())
 watch(() => props.spellcheck, (enabled) => editor.value?.view.dom.setAttribute('spellcheck', String(enabled)))
+
+function scheduleDecorateChildPageLinks() {
+  void nextTick(() => {
+    requestAnimationFrame(() => decorateChildPageLinks())
+  })
+}
 
 function decorateChildPageLinks() {
   const root = editor.value?.view.dom
@@ -340,8 +358,9 @@ function decorateChildPageLinks() {
     const page = targetId ? pagesById.value.get(targetId) : undefined
     const isChild = Boolean(page && targetId && childPageIds.value.has(targetId))
     link.classList.toggle('child-page-link', isChild)
-    if (isChild) link.dataset.pageIcon = page?.icon || '▱'
-    else delete link.dataset.pageIcon
+    // Icon is CSS-only (unified ▱); strip any leftover DOM chrome from older builds.
+    link.removeAttribute('data-page-icon')
+    link.querySelectorAll(':scope > .child-page-icon').forEach((node) => node.remove())
   })
 }
 
@@ -466,7 +485,7 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
       <input v-if="pagePickerMode === 'slash'" v-model="pageQuery" autofocus placeholder="搜索并关联页面…" />
       <p v-else class="wiki-picker-hint">正在关联：<strong>{{ wikiQuery || '全部页面' }}</strong><small>↑↓ 选择，Enter 插入，Esc 取消</small></p>
       <button v-for="(page, index) in matchingPages" :key="page.id" :class="{ selected: pagePickerMode === 'wiki' && selectedPageIndex === index }" @mousedown.prevent="insertPageLink(page)">
-        <span>{{ page.icon || '▱' }} {{ page.title }}</span><small>{{ sourceLabel(page) }} · {{ page.parentId ? '子页面' : '顶层页面' }}</small>
+        <span>{{ DEFAULT_PAGE_ICON }} {{ page.title }}</span><small>{{ sourceLabel(page) }} · {{ page.parentId ? '子页面' : '顶层页面' }}</small>
       </button>
       <button v-if="!matchingPages.length && pagePickerMode === 'wiki' && wikiQuery.trim()" class="page-picker-create" @mousedown.prevent="createWikiPage"><span>创建“{{ wikiQuery.trim() }}”</span><small>并插入页面链接</small></button>
       <p v-else-if="!matchingPages.length">没有匹配页面</p>

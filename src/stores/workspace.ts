@@ -228,6 +228,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         ?? null
       syncStorageSourceOrder()
       if (activePageId.value) expandPageAncestors(activePageId.value)
+      await reconcileChildPageLinksFromParentIds()
     } catch (error) {
       console.error('工作区初始化失败', error)
     } finally {
@@ -273,6 +274,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       pages.value = snapshot.pages
       applySyncResults(syncResults)
       syncStorageSourceOrder()
+      await reconcileChildPageLinksFromParentIds()
     } catch (error) {
       console.warn('远程存储源同步失败', error)
     }
@@ -294,6 +296,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         activePageId.value = snapshot.pages.find((page) => !page.deletedAt)?.id ?? null
       }
       syncStorageSourceOrder()
+      await reconcileChildPageLinksFromParentIds()
       persistPreferences()
       return true
     } finally { reloading.value = false }
@@ -524,6 +527,18 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     pages.value = pages.value.map((page) => page.id === saved.id ? saved : page)
   }
 
+  /** parent_id 是树真相源：按子页 parentId 补全父页末尾的 tie://page 子链接（MCP 等外部写入不必手写）。 */
+  async function reconcileChildPageLinksFromParentIds() {
+    const parentIds = new Set(
+      pages.value
+        .filter((page) => !page.deletedAt && page.parentId)
+        .map((page) => page.parentId as PageId),
+    )
+    for (const parentId of parentIds) {
+      await syncChildPageLinks(parentId)
+    }
+  }
+
   async function createChildPage(parentId: PageId) {
     const parent = pages.value.find((page) => page.id === parentId)
     if (!parent) throw new Error('父页面不存在')
@@ -698,6 +713,29 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function readLatestPage(pageId: PageId) {
     const page = pages.value.find((item) => item.id === pageId)
     return page ? workspaceService.readLatestPage(page) : null
+  }
+
+  async function refreshPage(pageId: PageId) {
+    const current = pages.value.find((item) => item.id === pageId)
+    if (!current) throw new Error('页面不存在')
+    let latest = await workspaceService.readLatestPage(current)
+    if (!latest) {
+      const result = await workspaceService.syncSource(current.storageSourceId, pages.value)
+      applySyncResults([result])
+      latest = result.pages.find((item) => item.id === pageId) ?? null
+      if (latest) {
+        pages.value = [
+          ...pages.value.filter((page) => page.storageSourceId !== current.storageSourceId),
+          ...result.pages,
+        ]
+        clearSyncConflict(pageId)
+        return latest
+      }
+    }
+    if (!latest) throw new Error('无法从存储源读取该页面，请检查连接后重试')
+    pages.value = pages.value.map((page) => (page.id === pageId ? latest! : page))
+    clearSyncConflict(pageId)
+    return latest
   }
 
   function collectSubtree(pageId: PageId) {
@@ -1032,5 +1070,5 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, importMarkdownFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, clearSyncConflict, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, importMarkdownFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })

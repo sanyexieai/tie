@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import TieSelect from '@/components/TieSelect.vue'
 import { readGraphPalette } from '@/services/theme'
 import { useWorkspaceStore } from '@/stores/workspace'
+
+const depthOptions = [
+  { value: 1, label: '1' },
+  { value: 2, label: '2' },
+  { value: 3, label: '3' },
+]
 
 interface SimNode {
   id: string
@@ -464,11 +471,7 @@ onBeforeUnmount(() => {
       <label class="graph-toggle"><input v-model="showTags" type="checkbox" />标签</label>
       <label class="graph-toggle" title="关联深度（类似 Obsidian Local Graph Depth）">
         深度
-        <select v-model.number="depth" aria-label="图谱深度">
-          <option :value="1">1</option>
-          <option :value="2">2</option>
-          <option :value="3">3</option>
-        </select>
+        <TieSelect v-model="depth" compact :options="depthOptions" aria-label="图谱深度" />
       </label>
       <small>{{ nodeCount }} 节点</small>
     </div>

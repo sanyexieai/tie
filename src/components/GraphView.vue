@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import TieSelect from '@/components/TieSelect.vue'
 import { readGraphPalette } from '@/services/theme'
 import { useWorkspaceStore } from '@/stores/workspace'
 
@@ -26,6 +27,13 @@ interface SimEdge {
 const store = useWorkspaceStore()
 const filter = ref('')
 const sourceFilter = ref<string | null>(null)
+const sourceFilterOptions = computed(() => [
+  { value: null as string | null, label: '全部存储源' },
+  ...store.allSources.map((source) => ({
+    value: source.id as string | null,
+    label: `${source.kind === 'backend' ? '后台 · ' : source.kind === 's3' ? 'S3 · ' : source.kind === 'smb' ? 'SMB · ' : '本地 · '}${source.name}`,
+  })),
+])
 const tagFilter = ref<string | null>(null)
 const showTags = ref(false)
 const showOrphans = ref(true)
@@ -513,13 +521,8 @@ onBeforeUnmount(() => {
         <span>知识图谱</span>
       </div>
       <div class="graph-toolbar">
-        <input v-model="filter" placeholder="筛选页面…" />
-        <select v-model="sourceFilter" aria-label="筛选存储源">
-          <option :value="null">全部存储源</option>
-          <option v-for="source in store.allSources" :key="source.id" :value="source.id">
-            {{ source.kind === 'backend' ? '后台 · ' : source.kind === 's3' ? 'S3 · ' : source.kind === 'smb' ? 'SMB · ' : '本地 · ' }}{{ source.name }}
-          </option>
-        </select>
+        <input v-model="filter" type="search" placeholder="筛选页面…" />
+        <TieSelect v-model="sourceFilter" :options="sourceFilterOptions" aria-label="筛选存储源" />
         <label class="graph-toggle"><input v-model="showTags" type="checkbox" />标签</label>
         <label class="graph-toggle"><input v-model="showOrphans" type="checkbox" />孤立页</label>
         <button v-if="tagFilter" type="button" class="graph-reset" :title="`清除标签筛选 #${tagFilter}`" @click="clearTagFilter">#{{ tagFilter }} ×</button>

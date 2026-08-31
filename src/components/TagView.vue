@@ -1,9 +1,17 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import TieSelect from '@/components/TieSelect.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 const store = useWorkspaceStore()
 const sourceForPage = computed(() => new Map(store.allSources.map((source) => [source.id, source])))
+const sourceOptions = computed(() => [
+  { value: null as string | null, label: '全部存储源' },
+  ...store.allSources.map((source) => ({
+    value: source.id as string | null,
+    label: `${source.kind === 'backend' ? '后台 · ' : source.kind === 's3' ? 'S3 · ' : source.kind === 'smb' ? 'SMB · ' : '本地 · '}${source.name}`,
+  })),
+])
 async function renameSelectedTag() {
   const tag = store.selectedTag
   if (!tag) return
@@ -27,7 +35,7 @@ async function deleteSelectedTag() {
     <section class="tag-content">
       <p class="eyebrow">标签</p>
       <div class="tag-title-row"><h1>{{ store.selectedTag ? `# ${store.selectedTag}` : '所有标签' }}</h1><div v-if="store.selectedTag" class="tag-title-actions"><button class="rename-tag-button" :disabled="store.saving" @click="renameSelectedTag">重命名</button><button class="delete-tag-button" :disabled="store.saving" @click="deleteSelectedTag">删除标签</button></div></div>
-      <select v-model="store.tagStorageSourceId" class="tag-source-filter" aria-label="筛选存储源"><option :value="null">全部存储源</option><option v-for="source in store.allSources" :key="source.id" :value="source.id">{{ source.kind === 'backend' ? '后台 · ' : source.kind === 's3' ? 'S3 · ' : source.kind === 'smb' ? 'SMB · ' : '本地 · ' }}{{ source.name }}</option></select>
+      <TieSelect v-model="store.tagStorageSourceId" class="tag-source-filter" :options="sourceOptions" aria-label="筛选存储源" />
       <div class="tag-index">
         <button :class="{ active: !store.selectedTag }" @click="store.selectedTag = null">全部 <span>{{ store.tagIndex.length }}</span></button>
         <button v-for="tag in store.tagIndex" :key="tag.name" :class="{ active: store.selectedTag === tag.name }" @click="store.selectedTag = tag.name"># {{ tag.name }} <span>{{ tag.count }}</span></button>

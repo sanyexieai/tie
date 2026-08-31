@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { openPath } from '@tauri-apps/plugin-opener'
+import TieSelect from '@/components/TieSelect.vue'
 import type { StorageKind, StorageSource } from '@/types'
+import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 import { loadAiTaggingConfig, saveAiTaggingConfig, type AiTaggingConfig, type AiTaggingMode } from '@/services/ai-tagging'
@@ -35,8 +37,9 @@ const themeSummary = computed(() => {
   return option?.label ?? '跟随系统'
 })
 
-function onThemeModeChange() {
-  setThemeMode(themeMode.value)
+function onThemeModeChange(mode: ThemeMode) {
+  themeMode.value = mode
+  setThemeMode(mode)
 }
 const storageMenuOpen = ref(false)
 const choosingWorkspace = ref(false)
@@ -94,6 +97,15 @@ const defaultMcpSourceId = computed(() => {
   return fileMcpSources.value[0]?.id ?? null
 })
 const selectedMcpSource = computed(() => fileMcpSources.value.find((source) => source.id === codexSourceId.value) ?? null)
+const codexSourceOptions = computed(() => {
+  if (!fileMcpSources.value.length) {
+    return [{ value: null as string | null, label: '暂无可用本地/SMB 源', disabled: true }]
+  }
+  return fileMcpSources.value.map((source) => ({
+    value: source.id as string | null,
+    label: source.id === defaultMcpSourceId.value ? `默认 · ${source.name}` : source.name,
+  }))
+})
 const codexStatusSummary = computed(() => {
   if (!isDesktop) return '仅桌面端可用'
   if (!codexStatus.value?.nodeAvailable) return '需要本机 Node.js'
@@ -459,15 +471,22 @@ function openConflictPage(pageId: string) {
         <button aria-label="关闭" @click="emit('close')">×</button>
       </header>
 
-      <label class="theme-mode-row">
+      <div class="theme-mode-row">
         <span>
           <strong>外观主题</strong>
           <small>{{ themeSummary }}</small>
         </span>
-        <select v-model="themeMode" aria-label="外观主题" @change="onThemeModeChange">
-          <option v-for="option in themeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-        </select>
-      </label>
+        <div class="theme-mode-switch" role="group" aria-label="外观主题">
+          <button
+            v-for="option in themeOptions"
+            :key="option.value"
+            type="button"
+            :class="{ active: themeMode === option.value }"
+            :aria-pressed="themeMode === option.value"
+            @click="onThemeModeChange(option.value)"
+          >{{ option.label }}</button>
+        </div>
+      </div>
 
       <div class="storage-settings-toolbar">
         <button :disabled="store.reloading" @click="reloadWorkspace">{{ store.reloading ? '载入中…' : '↻ 重新载入' }}</button>
@@ -487,7 +506,7 @@ function openConflictPage(pageId: string) {
           class="storage-conflict-item"
           @click="openConflictPage(item.pageId)"
         >
-          <span>{{ item.page.icon || '▱' }} {{ item.page.title || '无标题' }}</span>
+          <span>{{ DEFAULT_PAGE_ICON }} {{ item.page.title || '无标题' }}</span>
           <small>{{ item.source?.name ?? item.conflict.sourceId }} · 本地 {{ item.conflict.localUpdatedAt.slice(0, 16).replace('T', ' ') }} · 远程 {{ item.conflict.remoteUpdatedAt.slice(0, 16).replace('T', ' ') }}</small>
         </button>
       </div>
@@ -590,16 +609,12 @@ function openConflictPage(pageId: string) {
         <small>把本地/SMB 工作区接入 Codex MCP。Skill 在左侧「Agent Skills」特殊工作区管理；接入时会同步到 Codex。</small>
         <label>
           <span>工作区（存储源）</span>
-          <select v-model="codexSourceId" :disabled="!fileMcpSources.length || codexBusy" @change="onCodexSourceChange">
-            <option v-if="!fileMcpSources.length" :value="null">暂无可用本地/SMB 源</option>
-            <option
-              v-for="source in fileMcpSources"
-              :key="source.id"
-              :value="source.id"
-            >
-              {{ source.id === defaultMcpSourceId ? `默认 · ${source.name}` : source.name }}
-            </option>
-          </select>
+          <TieSelect
+            v-model="codexSourceId"
+            :options="codexSourceOptions"
+            :disabled="!fileMcpSources.length || codexBusy"
+            @change="onCodexSourceChange"
+          />
         </label>
         <small v-if="selectedMcpSource" class="codex-mcp-path">{{ selectedMcpSource.path }}</small>
         <small v-if="codexStatus && !codexStatus.nodeAvailable" class="backend-error">未检测到 Node.js，请先安装并确保可在终端运行 node。</small>

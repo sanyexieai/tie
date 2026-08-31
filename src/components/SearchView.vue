@@ -1,10 +1,18 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
+import TieSelect from '@/components/TieSelect.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 const store = useWorkspaceStore()
 const input = ref<HTMLInputElement | null>(null)
 const selectedIndex = ref(0)
+const sourceOptions = computed(() => [
+  { value: null as string | null, label: '全部存储源' },
+  ...(store.workspace?.sources ?? []).map((source) => ({
+    value: source.id as string | null,
+    label: `${source.kind === 'smb' ? 'SMB · ' : '本地 · '}${source.name}`,
+  })),
+])
 
 function resetSelection() { selectedIndex.value = 0 }
 function openResult(index: number) {
@@ -38,7 +46,7 @@ onMounted(() => void nextTick(() => input.value?.focus()))
     <section class="search-content">
       <p class="eyebrow">全局搜索</p>
       <h1>查找你的知识</h1>
-      <div class="search-controls"><input ref="input" v-model="store.searchQuery" class="search-input" placeholder="搜索标题、标签和正文…" @input="resetSelection" @keydown="onKeydown" /><select v-model="store.searchStorageSourceId" aria-label="筛选存储源" @change="resetSelection"><option :value="null">全部存储源</option><option v-for="source in store.workspace?.sources" :key="source.id" :value="source.id">{{ source.kind === 'smb' ? 'SMB · ' : '本地 · ' }}{{ source.name }}</option></select></div>
+      <div class="search-controls"><input ref="input" v-model="store.searchQuery" class="search-input" placeholder="搜索标题、标签和正文…" @input="resetSelection" @keydown="onKeydown" /><TieSelect v-model="store.searchStorageSourceId" :options="sourceOptions" aria-label="筛选存储源" @change="resetSelection" /></div>
       <p v-if="!store.searchQuery" class="search-hint">输入关键词开始搜索。标题匹配和标签匹配会优先显示。</p>
       <p v-else class="search-summary">找到 {{ store.searchResults.length }} 个页面</p>
       <div class="search-results">

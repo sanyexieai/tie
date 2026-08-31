@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { PageTreeNode, StorageSource } from '@/types'
+import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 const props = defineProps<{ node: PageTreeNode; activePageId: string | null; sourcesById: Record<string, StorageSource>; depth?: number }>()
@@ -128,7 +129,7 @@ onBeforeUnmount(() => document.removeEventListener('click', closeActionsOnOutsid
       <button class="disclosure" :class="{ invisible: !hasChildren }" @click.stop="toggleExpanded" :aria-label="expanded ? '收起子页面' : '展开子页面'">
         {{ expanded ? '⌄' : '›' }}
       </button>
-      <span class="page-glyph">{{ node.icon || '▱' }}</span>
+      <span class="page-glyph">{{ DEFAULT_PAGE_ICON }}</span>
       <span class="tree-title">{{ node.title || '无标题' }}</span>
       <span v-if="hasSyncConflict" class="page-sync-conflict-badge" title="同步冲突，打开页面后可查看差异">!</span>
       <span v-if="source" class="page-source-badge" :class="source.kind" :title="`${source.kind === 'smb' ? 'SMB 工作区' : '本地工作区'}：${source.name}\n${source.path}`">{{ source.name }}</span>

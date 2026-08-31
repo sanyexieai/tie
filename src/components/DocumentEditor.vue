@@ -14,7 +14,6 @@ import { revealItemInDir } from '@tauri-apps/plugin-opener'
 const store = useWorkspaceStore()
 const backend = useBackendStore()
 const isDesktop = '__TAURI_INTERNALS__' in window
-const icon = ref('')
 const title = ref('')
 const bodyMarkdown = ref('')
 const tags = ref<string[]>([])
@@ -23,6 +22,8 @@ const sourceMenuOpen = ref(false)
 const manualSaveNotice = ref(false)
 const copiedLinkNotice = ref(false)
 const exportedNotice = ref(false)
+const refreshedNotice = ref(false)
+const refreshing = ref(false)
 const hasUnsavedChanges = ref(false)
 const saveError = ref<string | null>(null)
 const conflictRemotePage = ref<Page | null>(null)
@@ -47,12 +48,29 @@ const richEditor = ref<{ undo: () => void; redo: () => void; findText: (query: s
 let manualSaveTimer: number | undefined
 let copiedLinkTimer: number | undefined
 let exportedTimer: number | undefined
+let refreshedTimer: number | undefined
 let autoSaveTimer: number | undefined
 let changeRevision = 0
 
 const status = computed(() => {
   const savedLabel = activeSource.value?.kind === 'backend' ? '已保存到后台' : '已保存到本地'
-  return store.saving ? '保存中…' : saveError.value ? '保存失败' : hasUnsavedChanges.value ? '未保存' : exportedNotice.value ? '已导出 Markdown' : copiedLinkNotice.value ? '已复制页面链接' : manualSaveNotice.value ? '已手动保存' : savedLabel
+  return store.saving
+    ? '保存中…'
+    : refreshing.value
+      ? '刷新中…'
+      : saveError.value
+        ? '保存失败'
+        : hasUnsavedChanges.value
+          ? '未保存'
+          : refreshedNotice.value
+            ? '已从存储刷新'
+            : exportedNotice.value
+              ? '已导出 Markdown'
+              : copiedLinkNotice.value
+                ? '已复制页面链接'
+                : manualSaveNotice.value
+                  ? '已手动保存'
+                  : savedLabel
 })
 const isFavorite = computed(() => Boolean(store.activePage && store.favoritePageIds.includes(store.activePage.id)))
 const activeSource = computed(() => store.allSources.find((source) => source.id === store.activePage?.storageSourceId) ?? null)
@@ -131,7 +149,6 @@ const wordCount = computed(() => bodyMarkdown.value
 
 function loadActivePage() {
   const page = store.activePage
-  icon.value = page?.icon ?? ''
   title.value = page?.title ?? ''
   bodyMarkdown.value = page?.markdown.replace(/^# .*\n?/, '') ?? ''
   tags.value = page?.tags ?? []
@@ -198,7 +215,7 @@ const emit = defineEmits<{ 'toggle-sidebar': []; 'toggle-focus': []; 'toggle-con
 function draft() {
   if (!store.activePage) return null
   const cleanTitle = title.value.trim() || '无标题'
-  return { ...store.activePage, icon: icon.value.trim().slice(0, 4), title: cleanTitle, markdown: `# ${cleanTitle}\n\n${bodyMarkdown.value}`, tags: tags.value }
+  return { ...store.activePage, icon: '', title: cleanTitle, markdown: `# ${cleanTitle}\n\n${bodyMarkdown.value}`, tags: tags.value }
 }
 
 function onInput() {
@@ -334,6 +351,30 @@ async function exportMarkdown() {
   exportedTimer = window.setTimeout(() => { exportedNotice.value = false }, 2400)
 }
 
+async function refreshCurrentPage() {
+  if (!store.activePage || refreshing.value) return
+  if (hasUnsavedChanges.value && !window.confirm('当前有未保存修改，从存储刷新将丢弃这些修改。是否继续？')) return
+  if (autoSaveTimer) {
+    window.clearTimeout(autoSaveTimer)
+    autoSaveTimer = undefined
+  }
+  refreshing.value = true
+  saveError.value = null
+  try {
+    await store.refreshPage(store.activePage.id)
+    loadActivePage()
+    conflictRemotePage.value = null
+    showingHistory.value = false
+    refreshedNotice.value = true
+    if (refreshedTimer) window.clearTimeout(refreshedTimer)
+    refreshedTimer = window.setTimeout(() => { refreshedNotice.value = false }, 2400)
+  } catch (reason) {
+    saveError.value = saveFailureMessage(reason)
+  } finally {
+    refreshing.value = false
+  }
+}
+
 async function openHistory() {
   if (!store.activePage) return
   showingHistory.value = true
@@ -375,7 +416,6 @@ function onBodyChange(markdown: string) {
 }
 
 function onTitleChange(value: string) { title.value = value; onInput() }
-function onIconChange(value: string) { icon.value = value; onInput() }
 function addTags(value: string) {
   const additions = value.split(',').map((tag) => tag.trim()).filter(Boolean)
   if (!additions.length) return
@@ -508,6 +548,11 @@ function onShortcut(event: KeyboardEvent) {
   if ((event.ctrlKey || event.metaKey) && event.key === '/') {
     event.preventDefault()
     toggleSourceMode()
+    return
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'r' && !event.shiftKey && !event.altKey) {
+    event.preventDefault()
+    void refreshCurrentPage()
   }
 }
 
@@ -520,6 +565,7 @@ function onWorkspaceCommand(event: Event) {
   if (event.type === 'tie:find-in-page') openFind()
   else if (event.type === 'tie:toggle-source-mode') toggleSourceMode()
   else if (event.type === 'tie:open-page-history') void openHistory()
+  else if (event.type === 'tie:refresh-page') void refreshCurrentPage()
 }
 
 function saveWhenHidden() {
@@ -533,6 +579,7 @@ onMounted(() => {
   window.addEventListener('tie:find-in-page', onWorkspaceCommand)
   window.addEventListener('tie:toggle-source-mode', onWorkspaceCommand)
   window.addEventListener('tie:open-page-history', onWorkspaceCommand)
+  window.addEventListener('tie:refresh-page', onWorkspaceCommand)
 })
 onBeforeUnmount(() => {
   if (hasUnsavedChanges.value) void saveNow()
@@ -542,9 +589,11 @@ onBeforeUnmount(() => {
   window.removeEventListener('tie:find-in-page', onWorkspaceCommand)
   window.removeEventListener('tie:toggle-source-mode', onWorkspaceCommand)
   window.removeEventListener('tie:open-page-history', onWorkspaceCommand)
+  window.removeEventListener('tie:refresh-page', onWorkspaceCommand)
   if (manualSaveTimer) window.clearTimeout(manualSaveTimer)
   if (copiedLinkTimer) window.clearTimeout(copiedLinkTimer)
   if (exportedTimer) window.clearTimeout(exportedTimer)
+  if (refreshedTimer) window.clearTimeout(refreshedTimer)
   if (autoSaveTimer) window.clearTimeout(autoSaveTimer)
 })
 
@@ -558,14 +607,14 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
   <main v-if="store.activePage" class="editor-pane">
     <header class="editor-header">
       <nav class="breadcrumbs" aria-label="页面层级"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><template v-for="(page, index) in breadcrumbs" :key="page.id"><span>›</span><button :class="{ current: index === breadcrumbs.length - 1 }" :title="page.title" @click="store.openPage(page.id)">{{ page.title }}</button></template></nav>
-      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span>{{ sourceBadgeLabel(activeSource.kind) }} ·</span><button class="source-select-trigger" :aria-expanded="sourceMenuOpen" aria-haspopup="menu" :title="activeSource.path" :disabled="!canSwitchStorageSource" @click.stop="canSwitchStorageSource && (sourceMenuOpen = !sourceMenuOpen)">{{ activeSource.name }}</button><div v-if="sourceMenuOpen && activeSource && canSwitchStorageSource" class="source-select-menu" role="menu"><button v-for="source in transferTargets" :key="source.id" :class="{ unavailable: source.available === false }" role="menuitem" :disabled="source.available === false" @click="transferStorage(source.id)"><span><i :class="source.kind"></i>{{ sourceBadgeLabel(source.kind) }} · {{ source.name }}</span><small>{{ source.available === false ? '当前不可访问' : source.path }}</small></button></div></div><span class="save-dot" :class="{ saving: store.saving, error: Boolean(saveError) }"></span><span :title="saveError ?? undefined">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" title="重新尝试保存当前页面" @click="saveNow">重试</button> <button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button class="copy-link-button" title="导出 Markdown" @click="exportMarkdown">⇩</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
+      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span>{{ sourceBadgeLabel(activeSource.kind) }} ·</span><button class="source-select-trigger" :aria-expanded="sourceMenuOpen" aria-haspopup="menu" :title="activeSource.path" :disabled="!canSwitchStorageSource" @click.stop="canSwitchStorageSource && (sourceMenuOpen = !sourceMenuOpen)">{{ activeSource.name }}</button><div v-if="sourceMenuOpen && activeSource && canSwitchStorageSource" class="source-select-menu" role="menu"><button v-for="source in transferTargets" :key="source.id" :class="{ unavailable: source.available === false }" role="menuitem" :disabled="source.available === false" @click="transferStorage(source.id)"><span><i :class="source.kind"></i>{{ sourceBadgeLabel(source.kind) }} · {{ source.name }}</span><small>{{ source.available === false ? '当前不可访问' : source.path }}</small></button></div></div><span class="save-dot" :class="{ saving: store.saving, error: Boolean(saveError) }"></span><span :title="saveError ?? undefined">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" title="重新尝试保存当前页面" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从存储源刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button class="copy-link-button" title="导出 Markdown" @click="exportMarkdown">⇩</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
     </header>
     <aside v-if="showingHistory" class="history-popover">
       <div class="history-popover-heading"><strong>页面历史</strong><button aria-label="关闭页面历史" @click="showingHistory = false">×</button></div>
       <p v-if="historyLoading" class="muted">正在读取历史版本…</p>
       <p v-else-if="!revisions.length" class="muted">尚无历史版本。页面内容发生保存变化后会自动生成。</p>
       <div v-for="revision in revisions" v-else :key="revision.id" class="history-revision" :class="{ selected: selectedRevisionId === revision.id }"><button @click="previewRevision(revision)"><span><strong>{{ revision.title }}</strong><small>{{ revision.savedAt.slice(0, 19).replace('T', ' ') }}</small></span><em>预览</em></button><button class="history-restore" @click="restoreRevision(revision)">恢复</button></div>
-      <section v-if="selectedRevision || revisionPreviewLoading || revisionPreviewError" class="revision-preview"><p v-if="revisionPreviewLoading" class="muted">正在读取版本内容…</p><p v-else-if="revisionPreviewError" class="revision-preview-error">{{ revisionPreviewError }}</p><template v-else-if="selectedRevision"><strong>{{ selectedRevision.icon }} {{ selectedRevision.title }}</strong><small>{{ selectedRevision.tags.length ? `# ${selectedRevision.tags.join('  # ')}` : '无标签' }}</small><pre>{{ selectedRevision.markdown }}</pre></template></section>
+      <section v-if="selectedRevision || revisionPreviewLoading || revisionPreviewError" class="revision-preview"><p v-if="revisionPreviewLoading" class="muted">正在读取版本内容…</p><p v-else-if="revisionPreviewError" class="revision-preview-error">{{ revisionPreviewError }}</p><template v-else-if="selectedRevision"><strong>{{ selectedRevision.title }}</strong><small>{{ selectedRevision.tags.length ? `# ${selectedRevision.tags.join('  # ')}` : '无标签' }}</small><pre>{{ selectedRevision.markdown }}</pre></template></section>
     </aside>
     <div v-if="conflictRemotePage" class="conflict-dialog-backdrop" @mousedown.self="conflictRemotePage = null">
       <section class="conflict-dialog" role="dialog" aria-modal="true" aria-label="页面同步冲突">
@@ -587,11 +636,11 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
           <small v-if="replaceNotice">{{ replaceNotice }}</small>
         </div>
         <div v-if="store.sourceMode" class="source-editor-panel">
-          <DocumentMeta :icon="icon" :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:icon="onIconChange" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" />
+          <DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" />
           <textarea ref="sourceEditor" v-model="bodyMarkdown" class="source-editor" aria-label="Markdown 源码" :spellcheck="store.spellcheckEnabled" @input="onInput"></textarea>
         </div>
         <TiptapEditor v-else ref="richEditor" :model-value="bodyMarkdown" :pages="store.pages" :sources="store.allSources" :page-id="store.activePage.id" :spellcheck="store.spellcheckEnabled" :create-linked-page="createLinkedPage" @update:model-value="onBodyChange" @navigate="navigateToPage" @create-child="createChild">
-          <template #meta><DocumentMeta :icon="icon" :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:icon="onIconChange" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" /></template>
+          <template #meta><DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" /></template>
         </TiptapEditor>
       </article>
     </div>

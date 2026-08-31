@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { TagSuggestion } from '@/services/tagging'
+import { DEFAULT_PAGE_ICON } from '@/constants/page'
 
-const props = defineProps<{ icon: string; title: string; tags: string[]; tagDraft: string; suggestions: TagSuggestion[]; knownTags: string[] }>()
+const props = defineProps<{ title: string; tags: string[]; tagDraft: string; suggestions: TagSuggestion[]; knownTags: string[] }>()
 const emit = defineEmits<{
-  'update:icon': [value: string]
   'update:title': [value: string]
   'update:tag-draft': [value: string]
   'add-tags': [value: string]
@@ -32,7 +32,10 @@ const matchingKnownTags = computed(() => {
 
 <template>
   <div class="editor-embedded-meta">
-    <div class="document-title-row"><input :value="icon" class="document-icon-input" maxlength="4" aria-label="页面图标" placeholder="▱" @input="emit('update:icon', ($event.target as HTMLInputElement).value)" /><input :value="title" class="document-title" aria-label="页面标题" placeholder="无标题" @input="emit('update:title', ($event.target as HTMLInputElement).value)" /></div>
+    <div class="document-title-row">
+      <span class="document-page-icon" aria-hidden="true">{{ DEFAULT_PAGE_ICON }}</span>
+      <input :value="title" class="document-title" aria-label="页面标题" placeholder="无标题" @input="emit('update:title', ($event.target as HTMLInputElement).value)" />
+    </div>
     <div class="tag-row">
       <span v-for="tag in tags" :key="tag" class="tag tag-selectable" @click="emit('select-tag', tag)"># {{ tag }} <button :aria-label="`移除标签 ${tag}`" @click.stop="emit('remove-tag', tag)">×</button></span>
       <input :value="tagDraft" class="tag-input" placeholder="添加标签，回车确认" @input="emit('update:tag-draft', ($event.target as HTMLInputElement).value)" @keydown="completeTag" />

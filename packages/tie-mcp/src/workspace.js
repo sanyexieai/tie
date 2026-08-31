@@ -162,6 +162,13 @@ export function createWorkspace(workspacePath) {
     fs.writeFileSync(path.join(dir, `${revisionId}.md`), frontmatter(page), 'utf8')
   }
 
+  function nextSortKey(parentId) {
+    if (!parentId) return Date.now() % 1_000_000
+    const siblings = loadAll().filter((page) => page.parentId === parentId)
+    if (!siblings.length) return 1
+    return Math.max(...siblings.map((page) => Number(page.sortKey) || 0)) + 1
+  }
+
   function writePage(input = {}) {
     const title = String(input.title || '').trim()
     if (!title && !input.pageId) throw new Error('创建页面需要 title')
@@ -207,7 +214,7 @@ export function createWorkspace(workspacePath) {
       title: title || existing?.title || '无标题',
       icon: input.icon ?? existing?.icon ?? '',
       parentId,
-      sortKey: existing?.sortKey ?? Date.now() % 1_000_000,
+      sortKey: existing?.sortKey ?? nextSortKey(parentId),
       markdown,
       tags,
       createdAt: existing?.createdAt ?? now,
@@ -224,6 +231,7 @@ export function createWorkspace(workspacePath) {
 
     const file = path.join(pagesDir, `${page.id}.md`)
     fs.writeFileSync(file, frontmatter(page), 'utf8')
+    // parent_id 是树真相源；父页末尾子链接由 Tie 桌面端按父子 id 补全，MCP 不写
     return { page: summarize(page), path: file, created: !existing }
   }
 

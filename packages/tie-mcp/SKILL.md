@@ -27,7 +27,8 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 
 ## 写入规则
 
-- 创建：提供 `title` + `markdown`/`body`，可选 `kind`、`tags`、`parentTitle`
+- 创建：提供 `title` + `markdown`/`body`，可选 `kind`、`tags`、`parentTitle` / `parentId`
 - 更新：必须带 `pageId`（或 `matchTitle: true` 且标题精确匹配）
-- 正文用 Markdown；可用 `[[页面标题]]` 做链接
+- **父子树**：相关文档用 `parentTitle`（或 `parentId`）挂到索引/父页；只写 `parent_id` 即可。侧栏树与父页子卡片由 Tie 按父子 id 补全，**不必**在父页正文手写 `[标题](tie://page/…)` 子链接
+- 正文用 Markdown；可用 `[[页面标题]]` 做普通双向链接（与树父子无关）
 - 禁止写入密钥、token、密码、私钥

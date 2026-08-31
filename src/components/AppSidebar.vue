@@ -27,6 +27,10 @@ watch(() => store.initialized, (ready) => {
 }, { immediate: true })
 
 async function createTopLevel() { await store.createPage(null) }
+async function reloadPages() {
+  if (store.reloading) return
+  await store.reloadWorkspace()
+}
 async function createChild(parentId: string) { await store.createChildPage(parentId) }
 async function duplicate(pageId: string) { await store.duplicatePage(pageId) }
 async function rename(pageId: string) {
@@ -79,7 +83,20 @@ function openFirstInbox() {
       <button :class="{ selected: store.showingTrash }" @click="store.openTrash()"><span>⌫</span> 回收站</button>
     </nav>
 
-    <div class="sidebar-section-title"><span>我的页面</span><small class="sidebar-page-count">{{ activePageCount }} 页</small><button @click="createTopLevel">+</button></div>
+    <div class="sidebar-section-title">
+      <span>我的页面</span>
+      <small class="sidebar-page-count">{{ activePageCount }} 页</small>
+      <div class="sidebar-section-actions">
+        <button
+          type="button"
+          title="从存储刷新页面树"
+          aria-label="从存储刷新页面树"
+          :disabled="store.reloading"
+          @click="reloadPages"
+        >{{ store.reloading ? '…' : '↻' }}</button>
+        <button type="button" title="新建顶层页面" aria-label="新建顶层页面" @click="createTopLevel">+</button>
+      </div>
+    </div>
     <div class="page-tree" role="tree" aria-label="我的页面">
       <div
         class="top-level-drop-zone"

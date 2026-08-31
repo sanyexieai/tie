@@ -89,6 +89,11 @@ export const fileStorageAdapter: StorageAdapter = {
       return emptySyncResult(sourceId, error instanceof Error ? error.message : '同步失败')
     }
   },
+  async readLatestPage(page) {
+    if (!(await isTauri())) return null
+    const loaded = await this.loadPages(page.storageSourceId)
+    return loaded.pages.find((item) => item.id === page.id) ?? null
+  },
   async renameSource(sourceId, name) {
     if (!(await isTauri())) throw new Error('文件存储仅支持桌面端')
     await invoke<StorageSource>('rename_storage_source', { sourceId, name })

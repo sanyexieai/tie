@@ -18,6 +18,7 @@ const actions = computed(() => [
   { id: 'find', label: '页面内查找', hint: '在当前页面查找或替换内容', requiresPage: true, run: () => emitWorkspaceCommand('tie:find-in-page') },
   { id: 'source', label: '切换源码模式', hint: '在富文本和 Markdown 源码间切换', requiresPage: true, run: () => emitWorkspaceCommand('tie:toggle-source-mode') },
   { id: 'history', label: '页面历史', hint: '预览或恢复当前页面版本', requiresPage: true, run: () => emitWorkspaceCommand('tie:open-page-history') },
+  { id: 'refresh', label: '刷新当前页面', hint: '从存储源重新读取，丢弃未保存修改', requiresPage: true, run: () => emitWorkspaceCommand('tie:refresh-page') },
   { id: 'focus', label: '切换专注模式', hint: '隐藏或恢复左右侧栏', run: () => emitWorkspaceCommand('tie:toggle-focus-mode') },
   { id: 'search', label: '全局搜索', hint: '搜索标题、标签和正文', run: () => store.openSearch() },
   { id: 'tags', label: '标签', hint: '浏览工作区标签', run: () => store.openTags() },
