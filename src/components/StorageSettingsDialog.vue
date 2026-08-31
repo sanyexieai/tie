@@ -35,6 +35,7 @@ const s3Notice = ref('')
 const aiConfig = ref<AiTaggingConfig>(loadAiTaggingConfig())
 const aiNotice = ref('')
 const aiModeOpen = ref(false)
+const aiFormOpen = ref(false)
 
 const aiModeOptions: { value: AiTaggingMode; label: string }[] = [
   { value: 'tie', label: 'Tie 后台（/api/v1/ai/suggest-tags）' },
@@ -42,6 +43,10 @@ const aiModeOptions: { value: AiTaggingMode; label: string }[] = [
 ]
 
 const aiModeLabel = computed(() => aiModeOptions.find((item) => item.value === aiConfig.value.mode)?.label ?? aiModeOptions[0].label)
+const aiStatusSummary = computed(() => {
+  if (!aiConfig.value.enabled) return '未启用 · 点击配置'
+  return aiConfig.value.mode === 'openai' ? '已启用 · OpenAI 兼容' : '已启用 · Tie 后台'
+})
 
 const localSources = computed(() => store.workspace?.sources ?? [])
 const orderedSources = computed(() => store.allSources)
@@ -191,6 +196,13 @@ function saveAiSettings() {
   saveAiTaggingConfig(aiConfig.value)
   aiNotice.value = 'AI 标签设置已保存'
   window.setTimeout(() => { aiNotice.value = '' }, 2400)
+  aiFormOpen.value = false
+  aiModeOpen.value = false
+}
+
+function toggleAiForm() {
+  aiFormOpen.value = !aiFormOpen.value
+  if (!aiFormOpen.value) aiModeOpen.value = false
 }
 
 function setAiMode(mode: AiTaggingMode) {
@@ -379,8 +391,20 @@ function openConflictPage(pageId: string) {
       </form>
       <p v-if="s3Notice" class="minio-config-notice">{{ s3Notice }}</p>
 
-      <form class="minio-config-form ai-tagging-form" @submit.prevent="saveAiSettings">
-        <strong>AI 标签提取</strong>
+      <button
+        type="button"
+        class="ai-tagging-toggle"
+        :aria-expanded="aiFormOpen"
+        @click="toggleAiForm"
+      >
+        <span>
+          <strong>AI 标签提取</strong>
+          <small>{{ aiStatusSummary }}</small>
+        </span>
+        <em>{{ aiFormOpen ? '收起' : '配置' }}</em>
+      </button>
+
+      <form v-if="aiFormOpen" class="minio-config-form ai-tagging-form" @submit.prevent="saveAiSettings">
         <small>可选。启用后会先请求外部服务，再与本地启发式结果合并。留空 endpoint 则仅使用本地提取。</small>
         <label class="minio-config-checkbox"><input v-model="aiConfig.enabled" type="checkbox" /><span>启用 AI 标签提取</span></label>
         <label>
@@ -414,9 +438,13 @@ function openConflictPage(pageId: string) {
         <label v-if="aiConfig.mode === 'openai'">模型<input v-model="aiConfig.model" placeholder="gpt-4o-mini" /></label>
         <label>API Key（可选）<input v-model="aiConfig.apiKey" type="password" autocomplete="off" :placeholder="aiConfig.mode === 'tie' ? '留空则尝试使用后台登录 token' : 'OpenAI 模式必填'" /></label>
         <small v-if="aiConfig.mode === 'tie'">后台服务可通过环境变量 OPENAI_API_KEY 启用真实 LLM；未配置时使用启发式提取。</small>
-        <div><button type="submit">保存 AI 设置</button></div>
+        <div>
+          <button type="button" @click="aiFormOpen = false; aiModeOpen = false">取消</button>
+          <button type="submit">保存 AI 设置</button>
+        </div>
         <p v-if="aiNotice" class="minio-config-notice">{{ aiNotice }}</p>
       </form>
+      <p v-if="!aiFormOpen && aiNotice" class="minio-config-notice">{{ aiNotice }}</p>
 
       <div v-if="orderedSources.length" class="storage-settings-list">
         <div

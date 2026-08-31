@@ -11,6 +11,7 @@ import LibraryView from '@/components/LibraryView.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 import BackendConnectionDialog from '@/components/BackendConnectionDialog.vue'
 import StorageSettingsDialog from '@/components/StorageSettingsDialog.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 
@@ -121,5 +122,5 @@ onBeforeUnmount(() => {
     <BackendConnectionDialog v-if="backendDialogOpen" @close="backendDialogOpen = false" />
     <StorageSettingsDialog v-if="storageSettingsOpen" @close="storageSettingsOpen = false" @connect-backend="backendDialogOpen = true; storageSettingsOpen = false" />
   </div>
-  <div v-else class="loading-screen"><div class="loading-mark">T</div><p>正在打开知识库…</p></div>
+  <div v-else class="loading-screen"><AppIcon class="loading-mark" :size="30" /><p>正在打开知识库…</p></div>
 </template>

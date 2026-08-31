@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import PageTreeItem from '@/components/PageTreeItem.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 
@@ -56,7 +57,7 @@ function openFirstInbox() {
 <template>
   <aside class="sidebar">
     <div class="workspace-heading">
-      <span class="workspace-mark">T</span>
+      <AppIcon class="workspace-mark" :size="21" />
       <span>{{ store.workspace?.name ?? '加载中…' }}</span>
       <button class="ghost-button" title="重命名工作区" @click="renameWorkspace">✎</button>
       <button class="mobile-sidebar-close" aria-label="关闭侧边栏" @click="emit('close')">×</button>

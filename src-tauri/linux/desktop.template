@@ -1,0 +1,10 @@
+[Desktop Entry]
+Categories={{categories}}
+Comment={{comment}}
+Exec={{exec}}
+Icon={{icon}}
+Name={{name}}
+StartupNotify=true
+StartupWMClass=tie
+Terminal=false
+Type=Application

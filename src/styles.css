@@ -24,6 +24,7 @@ button:disabled { cursor: not-allowed; opacity: .46; }
 .mobile-context-panel, .mobile-context-scrim { display: none; }
 .workspace-heading { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 7px; font-weight: 650; font-size: 14px; }
 .workspace-mark, .loading-mark { display: grid; place-items: center; width: 21px; height: 21px; border-radius: 6px; background: #32312e; color: #fff; font-size: 12px; font-family: Georgia, serif; }
+.app-icon, img.workspace-mark { display: block; object-fit: cover; background: transparent; border-radius: 6px; }
 .ghost-button { border: 0; background: none; color: #88837d; margin-left: auto; padding: 2px 4px; }
 .new-page-button { display: flex; align-items: center; gap: 9px; width: 100%; border: 0; border-radius: 7px; padding: 8px 9px; margin: 14px 0 10px; color: #5b5650; background: transparent; font-size: 13px; text-align: left; }
 .new-page-button:hover, .quick-nav button:hover, .tree-row:hover { background: #e9e7e3; }
@@ -122,6 +123,27 @@ button:disabled { cursor: not-allowed; opacity: .46; }
   accent-color: #647a63;
 }
 .minio-config-form label.minio-config-checkbox span { font-size: 11px; color: #534d45; }
+.ai-tagging-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  margin: 8px 0;
+  border: 1px solid #d9e1d5;
+  border-radius: 7px;
+  padding: 9px 10px;
+  color: #536953;
+  background: #f8fbf6;
+  text-align: left;
+  cursor: pointer;
+}
+.ai-tagging-toggle:hover { background: #f1f7ef; }
+.ai-tagging-toggle span { display: grid; gap: 2px; min-width: 0; }
+.ai-tagging-toggle strong { font-size: 12px; }
+.ai-tagging-toggle small { color: #899488; font-size: 10px; }
+.ai-tagging-toggle em { flex: 0 0 auto; color: #647a63; font-size: 11px; font-style: normal; }
+.ai-tagging-form { margin-top: 0; }
 .ai-mode-select { position: relative; }
 .ai-mode-select-trigger {
   display: flex;
@@ -402,6 +424,7 @@ button:disabled { cursor: not-allowed; opacity: .46; }
 .command-palette > input { width: 100%; border: 0; border-bottom: 1px solid #ebe5dc; outline: 0; padding: 15px 16px; color: #3f3932; background: transparent; font-size: 14px; }.command-palette > input::placeholder { color: #aaa197; }
 .command-group { display: grid; gap: 2px; padding: 9px; }.command-group p { margin: 0 7px 4px; color: #aaa197; font-size: 10px; }.command-group button { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 8px; border: 0; border-radius: 6px; padding: 8px; color: #5b544c; background: transparent; text-align: left; }.command-group button:hover, .command-group button.selected { background: #efebe4; }.command-group button > span { color: #948c81; }.command-group strong { overflow: hidden; color: #4a433b; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.command-group small { color: #9d948a; font-size: 10px; }.command-empty { padding: 24px; color: #9e968d; font-size: 12px; text-align: center; }.command-palette footer { display: flex; gap: 12px; border-top: 1px solid #eee9e1; padding: 8px 14px; color: #aaa197; font-size: 10px; }
 .loading-mark { justify-self: center; width: 30px; height: 30px; font-size: 16px; }
+.loading-mark.app-icon { border-radius: 8px; }
 .loading-screen p { margin: 0; }
 .empty-editor { display: grid; place-content: center; flex: 1; color: #766f67; text-align: center; gap: 10px; }
 .empty-editor-sidebar-toggle { justify-self: center; border: 1px solid #e1dbd1; border-radius: 7px; padding: 7px 12px; color: #625b52; background: #fffdfa; font-size: 12px; }
