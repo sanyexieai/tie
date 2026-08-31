@@ -6,7 +6,7 @@
 
 推送符合 `v*` 的 tag 后，`.github/workflows/release.yml` 会：
 
-1. 在 Ubuntu 构建 Linux 安装包（`.deb` / `.rpm`）
+1. 在 **Ubuntu 22.04** 构建 Linux 安装包（`.deb` / `.rpm`；固定 22.04 以兼容 WebKitGTK 4.1 与较低 glibc）
 2. 在 Windows 构建 Windows 安装包（`.msi` / `.exe` NSIS）
 3. 创建 GitHub Release，并附上上述产物
 
