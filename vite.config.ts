@@ -8,7 +8,8 @@ export default defineConfig({
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },
   clearScreen: false,
-  server: { port: 1420, strictPort: true },
+  server: { host: '127.0.0.1', port: 1420, strictPort: true },
+  preview: { host: '127.0.0.1', port: 4173, strictPort: true },
   envPrefix: ['VITE_', 'TAURI_'],
   build: {
     target: 'es2021',

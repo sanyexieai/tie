@@ -17,9 +17,12 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'npm run preview -- --port 4173 --strictPort',
+    // Bind IPv4 explicitly: on CI, `localhost` may resolve to ::1 and Playwright never becomes ready.
+    command: 'npx vite preview --host 127.0.0.1 --port 4173 --strictPort',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
+    timeout: 180_000,
+    stdout: 'pipe',
+    stderr: 'pipe',
   },
 })
