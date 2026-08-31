@@ -127,7 +127,7 @@ onBeforeUnmount(() => document.removeEventListener('click', closeActionsOnOutsid
       @drop.prevent="dropOnPage"
     >
       <button class="disclosure" :class="{ invisible: !hasChildren }" @click.stop="toggleExpanded" :aria-label="expanded ? '收起子页面' : '展开子页面'">
-        {{ expanded ? '⌄' : '›' }}
+        {{ expanded ? '▾' : '▸' }}
       </button>
       <span class="page-glyph">{{ DEFAULT_PAGE_ICON }}</span>
       <span class="tree-title">{{ node.title || '无标题' }}</span>

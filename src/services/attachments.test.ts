@@ -3,6 +3,7 @@ import {
   ASSET_URL_PREFIX,
   buildAssetUrl,
   collectAssetNamesFromMarkdown,
+  inlineImageSrcFromHtml,
   parseAssetUrl,
   preparePageExportBundle,
   rewriteMarkdownAssetsForExport,
@@ -31,6 +32,12 @@ describe('attachments', () => {
     expect(rewriteMarkdownAssetsForExport(markdown, 'pg_abc')).toBe(
       '![](assets/a1.png) text ![](/assets/b2.jpg)',
     )
+  })
+
+  it('extracts inline image src from html clipboard', () => {
+    expect(inlineImageSrcFromHtml('<img src="blob:http://localhost/abc">')).toBe('blob:http://localhost/abc')
+    expect(inlineImageSrcFromHtml('<img src="data:image/png;base64,abc">')).toBe('data:image/png;base64,abc')
+    expect(inlineImageSrcFromHtml('<img src="https://example.com/a.png">')).toBeNull()
   })
 
   it('prepares export bundle and rewrites markdown when assets are unavailable', async () => {

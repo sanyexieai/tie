@@ -2,6 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import type { Editor } from '@tiptap/core'
+import { Extension } from '@tiptap/core'
+import { Plugin } from '@tiptap/pm/state'
 import { TextSelection } from '@tiptap/pm/state'
 import StarterKit from '@tiptap/starter-kit'
 import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight'
@@ -18,7 +20,7 @@ import { common, createLowlight } from 'lowlight'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import type { Page, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
-import { canStorePageAssets, embedImageFile, parseAssetUrl, resolveAssetDisplayUrl } from '@/services/attachments'
+import { canStorePageAssets, embedImageFile, inlineImageSrcToFile, isImageFile, normalizeImageFile, parseAssetUrl, resolveAssetDisplayUrl, shouldHandleImagePaste, uploadPastedImage } from '@/services/attachments'
 
 const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page> }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
@@ -58,46 +60,214 @@ function activePage() {
 
 function createAssetImageExtension() {
   return Image.extend({
+    parseHTML() {
+      return [
+        {
+          tag: 'img[src]',
+          getAttrs: (element) => {
+            if (!(element instanceof HTMLElement)) return false
+            const src = element.getAttribute('src') ?? ''
+            if (!src || src.startsWith('blob:') || src.startsWith('data:')) return false
+            return {
+              src,
+              alt: element.getAttribute('alt'),
+              title: element.getAttribute('title'),
+            }
+          },
+        },
+      ]
+    },
     addNodeView() {
       return ({ node }) => {
         const wrap = document.createElement('span')
         wrap.className = 'tie-image-wrap'
         const img = document.createElement('img')
         img.className = 'tiptap-image'
+        img.draggable = false
         img.alt = String(node.attrs.alt ?? '')
         const src = String(node.attrs.src ?? '')
-        if (parseAssetUrl(src)) {
-          img.dataset.tieAsset = src
-          void resolveAssetDisplayUrl(props.pages, src).then((url) => { img.src = url })
-        } else {
-          img.src = src
+        let displayObjectUrl: string | null = null
+
+        const applySrc = (nextSrc: string) => {
+          if (displayObjectUrl) {
+            URL.revokeObjectURL(displayObjectUrl)
+            displayObjectUrl = null
+          }
+          if (parseAssetUrl(nextSrc)) {
+            img.dataset.tieAsset = nextSrc
+            img.removeAttribute('src')
+            void resolveAssetDisplayUrl(props.pages, nextSrc).then((url) => {
+              if (img.dataset.tieAsset !== nextSrc) return
+              displayObjectUrl = url.startsWith('blob:') ? url : null
+              img.src = url
+            })
+            return
+          }
+          delete img.dataset.tieAsset
+          img.src = nextSrc
         }
+
+        applySrc(src)
         wrap.appendChild(img)
-        return { dom: wrap }
+        return {
+          dom: wrap,
+          update: (updated) => {
+            if (updated.type.name !== 'image') return false
+            img.alt = String(updated.attrs.alt ?? '')
+            applySrc(String(updated.attrs.src ?? ''))
+            return true
+          },
+          // Display uses a temporary blob URL; never let that mutate node attrs.
+          ignoreMutation: (mutation) => {
+            if (mutation.type === 'attributes' && mutation.attributeName === 'src') return true
+            return mutation.target === img || img.contains(mutation.target as Node)
+          },
+          destroy: () => {
+            if (displayObjectUrl) URL.revokeObjectURL(displayObjectUrl)
+          },
+        }
       }
     },
   })
 }
 
 function canEmbedImage(file: File) {
-  if (!file.type.startsWith('image/')) return false
+  if (!isImageFile(file)) return false
   const page = activePage()
-  const maxSize = page && canStorePageAssets(page) ? 20 * 1024 * 1024 : 5 * 1024 * 1024
+  if (!page || !canStorePageAssets(page)) {
+    window.alert('当前存储源不支持图片附件。请切换到本地/S3/后台工作区后再粘贴图片。')
+    return false
+  }
+  const maxSize = 20 * 1024 * 1024
   if (file.size <= maxSize) return true
-  window.alert(page && canStorePageAssets(page)
-    ? '图片超过 20 MB，请压缩后重试或使用 /图片 插入 URL。'
-    : '图片超过 5 MB，内嵌到 Markdown 会造成页面过大。请使用 /图片 插入图片 URL。')
+  window.alert('图片超过 20 MB，请压缩后重试或使用 /图片 插入 URL。')
   return false
+}
+
+function rejectInlineImageUrl(src: string) {
+  return src.startsWith('blob:') || src.startsWith('data:')
 }
 
 async function insertImageFile(editor: Editor, file: File) {
   const page = activePage()
-  if (!page) return
+  if (!page || !canEmbedImage(file)) return
   try {
     const src = await embedImageFile(page, file)
     editor.chain().focus().setImage({ src }).run()
   } catch {
-    window.alert('无法上传图片。')
+    window.alert('无法上传图片到存储源。')
+  }
+}
+
+async function insertImageInView(
+  currentEditor: Editor,
+  file: File,
+  options: { mode: 'replace' } | { mode: 'insert'; position: number },
+) {
+  const normalized = normalizeImageFile(file)
+  const page = activePage()
+  if (!page || !canEmbedImage(normalized)) return
+  try {
+    const src = await embedImageFile(page, normalized)
+    if (options.mode === 'replace') {
+      currentEditor.chain().focus().setImage({ src }).run()
+      return
+    }
+    currentEditor.chain().focus().insertContentAt(options.position, { type: 'image', attrs: { src } }).run()
+  } catch (error) {
+    window.alert(`无法上传图片到存储源。${error instanceof Error ? error.message : ''}`)
+  }
+}
+
+function runImagePaste(event: ClipboardEvent, tiptapEditor: Editor) {
+  if (!shouldHandleImagePaste(event)) return false
+  event.preventDefault()
+  event.stopImmediatePropagation()
+  const page = activePage()
+  if (!page) {
+    window.alert('请先打开一个页面。')
+    return true
+  }
+  if (!canStorePageAssets(page)) {
+    window.alert('当前存储源不支持图片附件。请切换到本地/S3/后台工作区后再粘贴图片。')
+    return true
+  }
+  void uploadPastedImage(page, event).then((src) => {
+    tiptapEditor.chain().focus().setImage({ src }).run()
+  }).catch((error) => {
+    window.alert(error instanceof Error ? error.message : '无法上传图片到存储源。')
+  })
+  return true
+}
+
+function createTieImagePasteExtension() {
+  return Extension.create({
+    name: 'tieImagePaste',
+    priority: 1000,
+    addProseMirrorPlugins() {
+      const tiptapEditor = this.editor
+      return [
+        new Plugin({
+          props: {
+            handlePaste(_view, event) {
+              if (!(event instanceof ClipboardEvent)) return false
+              return runImagePaste(event, tiptapEditor)
+            },
+            handleDrop(view, event) {
+              if (!(event instanceof DragEvent)) return false
+              const image = [...(event.dataTransfer?.files ?? [])].find((file) => isImageFile(file))
+              if (!image) return false
+              event.preventDefault()
+              const dropPosition = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ?? view.state.selection.from
+              void insertImageInView(tiptapEditor, image, { mode: 'insert', position: dropPosition })
+              return true
+            },
+          },
+        }),
+      ]
+    },
+  })
+}
+
+function stripInlineImageHtml(html: string) {
+  return html.replace(/<img\b[^>]*\bsrc=["'](?:blob:|data:)[^"']*["'][^>]*>/gi, '')
+}
+
+let rewritingInlineImages = false
+async function rewriteInlineImageNodes(currentEditor: Editor) {
+  if (rewritingInlineImages || syncingExternalValue) return
+  const page = activePage()
+  if (!page || !canStorePageAssets(page)) return
+
+  type Pending = { from: number; to: number; src: string; alt: string }
+  const pending: Pending[] = []
+  currentEditor.state.doc.descendants((node, pos) => {
+    if (node.type.name !== 'image') return
+    const src = String(node.attrs.src ?? '')
+    if (!src.startsWith('blob:') && !src.startsWith('data:image/')) return
+    pending.push({ from: pos, to: pos + node.nodeSize, src, alt: String(node.attrs.alt ?? '') })
+  })
+  if (!pending.length) return
+
+  rewritingInlineImages = true
+  try {
+    let offset = 0
+    for (const item of pending) {
+      const file = await inlineImageSrcToFile(item.src)
+      if (!file || !isImageFile(file) || file.size > 20 * 1024 * 1024) continue
+      try {
+        const assetSrc = await embedImageFile(page, file)
+        const mappedFrom = item.from + offset
+        const mappedTo = item.to + offset
+        const node = currentEditor.state.schema.nodes.image.create({ src: assetSrc, alt: item.alt })
+        currentEditor.view.dispatch(currentEditor.state.tr.replaceWith(mappedFrom, mappedTo, node))
+        offset += node.nodeSize - (item.to - item.from)
+      } catch {
+        // keep original node if upload fails
+      }
+    }
+  } finally {
+    rewritingInlineImages = false
   }
 }
 
@@ -121,8 +291,12 @@ const slashCommands: SlashCommand[] = [
   { id: 'task-list', label: '待办事项', hint: '可勾选的任务', keywords: ['task', 'todo', '待办', '任务'], run: (editor) => editor.chain().focus().toggleTaskList().run() },
   { id: 'quote', label: '引用', hint: '突出一段内容', keywords: ['quote', '引用'], run: (editor) => editor.chain().focus().toggleBlockquote().run() },
   { id: 'code', label: '代码块', hint: '带语法标记的代码', keywords: ['code', '代码'], run: (editor) => editor.chain().focus().toggleCodeBlock().run() },
-  { id: 'image', label: '图片', hint: '插入图片 URL 或 data URL', keywords: ['image', '图片', 'photo', '图像'], run: (editor) => {
-    const src = window.prompt('图片 URL 或 data URL')?.trim()
+  { id: 'image', label: '图片', hint: '插入网络图片 URL', keywords: ['image', '图片', 'photo', '图像'], run: (editor) => {
+    const src = window.prompt('图片 URL')?.trim()
+    if (!src || rejectInlineImageUrl(src)) {
+      if (src) window.alert('请使用网络图片 URL，或使用 /上传图片 保存到存储源。')
+      return
+    }
     if (src) editor.chain().focus().setImage({ src }).run()
   } },
   { id: 'image-upload', label: '上传图片', hint: '保存到存储源附件目录', keywords: ['image', '图片', 'upload', '上传', '本地图片'], run: (editor) => pickLocalImage(editor) },
@@ -193,35 +367,6 @@ function handleSurfaceClick(event: MouseEvent) {
   focusNextWritingLine(event)
 }
 
-function handleImagePaste(view: Editor['view'], event: ClipboardEvent) {
-  const image = [...(event.clipboardData?.files ?? [])].find((file) => file.type.startsWith('image/'))
-  if (!image) return false
-  event.preventDefault()
-  if (!canEmbedImage(image)) return true
-  const page = activePage()
-  if (!page) return true
-  void embedImageFile(page, image).then((src) => {
-    const transaction = view.state.tr.replaceSelectionWith(view.state.schema.nodes.image.create({ src }))
-    view.dispatch(transaction.scrollIntoView())
-  }).catch(() => window.alert('无法读取剪贴板图片。'))
-  return true
-}
-
-function handleImageDrop(view: Editor['view'], event: DragEvent) {
-  const image = [...(event.dataTransfer?.files ?? [])].find((file) => file.type.startsWith('image/'))
-  if (!image) return false
-  event.preventDefault()
-  if (!canEmbedImage(image)) return true
-  const page = activePage()
-  if (!page) return true
-  const dropPosition = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ?? view.state.selection.from
-  void embedImageFile(page, image).then((src) => {
-    const transaction = view.state.tr.insert(dropPosition, view.state.schema.nodes.image.create({ src }))
-    view.dispatch(transaction.scrollIntoView())
-  }).catch(() => window.alert('无法读取拖入的图片。'))
-  return true
-}
-
 let syncingExternalValue = false
 const editor = useEditor({
   content: props.modelValue,
@@ -239,7 +384,8 @@ const editor = useEditor({
     }),
     Markdown,
     CodeBlockLowlight.configure({ lowlight }),
-    createAssetImageExtension().configure({ allowBase64: true }),
+    createAssetImageExtension().configure({ allowBase64: false }),
+    createTieImagePasteExtension(),
     Placeholder.configure({ placeholder: '开始写作，支持 Markdown 快捷输入…' }),
     TaskList,
     TaskItem.configure({ nested: true }),
@@ -250,6 +396,8 @@ const editor = useEditor({
   ],
   editorProps: {
     attributes: { class: 'tiptap-content', spellcheck: String(props.spellcheck) },
+    transformPastedHTML: (html) => stripInlineImageHtml(html),
+    transformPastedText: (text) => text.replace(/!\[[^\]]*\]\((blob:[^)\s]+|data:image\/[^)\s]+)\)/g, ''),
     handleDOMEvents: {
       // Child cards: navigate on mousedown so contenteditable selection doesn't swallow the click.
       mousedown: (_view, event) => {
@@ -261,8 +409,6 @@ const editor = useEditor({
       },
       click: (_view, event) => handleEditorClick(event),
     },
-    handlePaste: (view, event) => handleImagePaste(view, event),
-    handleDrop: (view, event) => handleImageDrop(view, event),
     handleKeyDown: (_view, event) => {
       if (showPagePicker.value && pagePickerMode.value === 'wiki') {
         if (!matchingPages.value.length && ['ArrowDown', 'ArrowUp'].includes(event.key)) {
@@ -328,6 +474,7 @@ const editor = useEditor({
     if (!syncingExternalValue) emit('update:modelValue', currentEditor.getMarkdown())
     updateMenus(currentEditor)
     scheduleDecorateChildPageLinks()
+    void rewriteInlineImageNodes(currentEditor)
   },
   onSelectionUpdate: ({ editor: currentEditor }) => updateMenus(currentEditor),
 })
@@ -446,6 +593,11 @@ function executeSlashCommand(index: number) {
 function undo() { editor.value?.chain().focus().undo().run() }
 function redo() { editor.value?.chain().focus().redo().run() }
 
+function onPasteCapture(event: ClipboardEvent) {
+  if (!editor.value || !shouldHandleImagePaste(event)) return
+  runImagePaste(event, editor.value)
+}
+
 function findText(query: string, direction = 1) {
   const current = editor.value
   const cleanQuery = query.trim()
@@ -479,7 +631,7 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
 </script>
 
 <template>
-  <div class="tiptap-editor" v-if="editor" @click="handleSurfaceClick">
+  <div class="tiptap-editor" v-if="editor" @click="handleSurfaceClick" @paste.capture="onPasteCapture">
     <slot name="meta"></slot>
     <div v-if="showPagePicker" class="page-picker">
       <input v-if="pagePickerMode === 'slash'" v-model="pageQuery" autofocus placeholder="搜索并关联页面…" />

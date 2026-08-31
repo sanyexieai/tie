@@ -74,12 +74,40 @@ export async function preparePageExportBundle(page: Page): Promise<PageExportBun
 function extensionFromFile(file: File) {
   const fromName = file.name.split('.').pop()?.toLowerCase()
   if (fromName && /^[a-z0-9]+$/.test(fromName)) return fromName
-  if (file.type === 'image/png') return 'png'
-  if (file.type === 'image/jpeg') return 'jpg'
-  if (file.type === 'image/gif') return 'gif'
-  if (file.type === 'image/webp') return 'webp'
-  if (file.type === 'image/svg+xml') return 'svg'
-  return 'bin'
+  if (file.type) return extensionFromMime(file.type)
+  return 'png'
+}
+
+function extensionFromMime(mime: string) {
+  if (mime === 'image/png') return 'png'
+  if (mime === 'image/jpeg') return 'jpg'
+  if (mime === 'image/gif') return 'gif'
+  if (mime === 'image/webp') return 'webp'
+  if (mime === 'image/svg+xml') return 'svg'
+  return 'png'
+}
+
+export function isImageFile(file: File) {
+  return file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(file.name)
+}
+
+export function normalizeImageFile(file: File, mimeHint?: string) {
+  if (file.type.startsWith('image/')) return file
+  if (mimeHint?.startsWith('image/')) {
+    const ext = extensionFromMime(mimeHint)
+    const name = file.name && file.name.includes('.') ? file.name : `paste-${Date.now()}.${ext}`
+    return new File([file], name, { type: mimeHint })
+  }
+  const name = file.name && file.name.includes('.') ? file.name : `paste-${Date.now()}.png`
+  const ext = name.split('.').pop()?.toLowerCase()
+  const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg'
+    : ext === 'gif' ? 'image/gif'
+    : ext === 'webp' ? 'image/webp'
+    : ext === 'svg' ? 'image/svg+xml'
+    : ext === 'bmp' ? 'image/bmp'
+    : ext === 'ico' ? 'image/x-icon'
+    : 'image/png'
+  return new File([file], name, { type: mime })
 }
 
 function mimeFromAssetName(assetName: string) {
@@ -231,10 +259,178 @@ export async function copyPageAssets(page: Page, fromSourceId: string, toSourceI
 }
 
 export async function uploadPageImage(page: Page, file: File) {
-  const assetName = `${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}.${extensionFromFile(file)}`
-  const data = new Uint8Array(await file.arrayBuffer())
+  if (!canStorePageAssets(page)) throw new Error('该存储源不支持附件上传')
+  const normalized = normalizeImageFile(file)
+  const assetName = `${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}.${extensionFromFile(normalized)}`
+  const data = new Uint8Array(await normalized.arrayBuffer())
   await writePageAsset(page, assetName, data)
   return buildAssetUrl(page.id, assetName)
+}
+
+export async function embedImageFile(page: Page, file: File) {
+  return uploadPageImage(page, file)
+}
+
+export function clipboardImageFile(event: ClipboardEvent) {
+  const types = [...(event.clipboardData?.types ?? [])]
+  const imageType = types.find((type) => type.startsWith('image/')) ?? null
+  const fromFiles = [...(event.clipboardData?.files ?? [])]
+  if (fromFiles.length) {
+    const matched = fromFiles.find(isImageFile)
+    if (matched) return matched
+    if (imageType) {
+      const first = fromFiles.find((file) => file.size > 0)
+      if (first) return first
+    }
+  }
+  for (const item of event.clipboardData?.items ?? []) {
+    const candidate = item.getAsFile()
+    if (!candidate || candidate.size <= 0) continue
+    if (item.type.startsWith('image/') || item.kind === 'file') return candidate
+  }
+  return null
+}
+
+export function capturePastedImagePayload(event: ClipboardEvent) {
+  const html = event.clipboardData?.getData('text/html') ?? ''
+  const plain = event.clipboardData?.getData('text/plain') ?? ''
+  const markdownMatch = plain.match(/!\[[^\]]*\]\((blob:[^)\s]+|data:image\/[^)\s]+)\)/)
+  const types = [...(event.clipboardData?.types ?? [])]
+  const mimeHint = types.find((type) => type.startsWith('image/')) ?? null
+  const hasImageType = Boolean(mimeHint)
+  let file = clipboardImageFile(event)
+  if (!file && hasImageType) {
+    for (const item of event.clipboardData?.items ?? []) {
+      const candidate = item.getAsFile()
+      if (candidate && candidate.size > 0) {
+        file = candidate
+        break
+      }
+    }
+  }
+  return {
+    file,
+    mimeHint,
+    hasImageType,
+    inlineSrc: inlineImageSrcFromHtml(html) ?? markdownMatch?.[1] ?? null,
+  }
+}
+
+export async function resolvePastedImagePayload(payload: {
+  file: File | null
+  inlineSrc: string | null
+  mimeHint?: string | null
+}) {
+  if (payload.file) return normalizeImageFile(payload.file, payload.mimeHint ?? undefined)
+  if (!payload.inlineSrc) return null
+  if (payload.inlineSrc.startsWith('data:image/')) {
+    return dataUrlToFile(payload.inlineSrc) ?? inlineImageSrcToFile(payload.inlineSrc)
+  }
+  return inlineImageSrcToFile(payload.inlineSrc)
+}
+
+export function dataUrlToFile(src: string) {
+  const match = src.match(/^data:(image\/[a-z+.-]+);base64,(.+)$/i)
+  if (!match) return null
+  const mime = match[1]
+  const binary = atob(match[2])
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return new File([bytes], `paste-${Date.now()}.${extensionFromMime(mime)}`, { type: mime })
+}
+
+export function isTauriDesktop() {
+  return '__TAURI_INTERNALS__' in window
+}
+
+function clipboardHasText(event: ClipboardEvent) {
+  const plain = event.clipboardData?.getData('text/plain')?.trim() ?? ''
+  const html = event.clipboardData?.getData('text/html')?.trim() ?? ''
+  return Boolean(plain || html)
+}
+
+export async function readNativeClipboardImageFile() {
+  if (!isTauriDesktop()) return null
+  try {
+    const { readImage } = await import('@tauri-apps/plugin-clipboard-manager')
+    const image = await readImage()
+    const { width, height } = await image.size()
+    if (!width || !height) return null
+    const rgba = await image.rgba()
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d')
+    if (!context) return null
+    const imageData = context.createImageData(width, height)
+    imageData.data.set(rgba)
+    context.putImageData(imageData, 0, 0)
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((value) => resolve(value), 'image/png')
+    })
+    if (!blob) return null
+    return new File([blob], `paste-${Date.now()}.png`, { type: 'image/png' })
+  } catch {
+    return null
+  }
+}
+
+export function shouldHandleImagePaste(event: ClipboardEvent) {
+  if (clipboardHasPastedImage(event)) return true
+  // WebKitGTK (Tauri on Linux) often omits image items from paste events.
+  if (isTauriDesktop() && !clipboardHasText(event)) return true
+  return false
+}
+
+export function clipboardHasPastedImage(event: ClipboardEvent) {
+  const payload = capturePastedImagePayload(event)
+  if (payload.file || payload.inlineSrc || payload.hasImageType) return true
+  return [...(event.clipboardData?.items ?? [])].some((item) => item.kind === 'file' || item.type.startsWith('image/'))
+}
+
+export async function resolvePastedImageFromEvent(event: ClipboardEvent) {
+  const payload = capturePastedImagePayload(event)
+  const image = await resolvePastedImagePayload(payload)
+  if (image) return image
+  if (isTauriDesktop() && !clipboardHasText(event)) return readNativeClipboardImageFile()
+  return null
+}
+
+export async function uploadPastedImage(page: Page, event: ClipboardEvent) {
+  const image = await resolvePastedImageFromEvent(event)
+  if (!image) throw new Error('无法读取剪贴板图片')
+  if (!canStorePageAssets(page)) throw new Error('当前存储源不支持图片附件')
+  if (image.size > 20 * 1024 * 1024) throw new Error('图片超过 20 MB')
+  return embedImageFile(page, image)
+}
+
+function inlineImageExtension(mime: string) {
+  if (mime === 'image/png') return 'png'
+  if (mime === 'image/jpeg') return 'jpg'
+  if (mime === 'image/gif') return 'gif'
+  if (mime === 'image/webp') return 'webp'
+  if (mime === 'image/svg+xml') return 'svg'
+  return 'png'
+}
+
+export async function inlineImageSrcToFile(src: string) {
+  if (!src.startsWith('blob:') && !src.startsWith('data:image/')) return null
+  try {
+    const response = await fetch(src)
+    const blob = await response.blob()
+    if (!blob.type.startsWith('image/')) return null
+    const extension = inlineImageExtension(blob.type)
+    return new File([blob], `paste-${Date.now()}.${extension}`, { type: blob.type })
+  } catch {
+    return null
+  }
+}
+
+export function inlineImageSrcFromHtml(html: string) {
+  const match = html.match(/<img\b[^>]*\bsrc=["']([^"']+)["']/i)
+  const src = match?.[1]
+  if (!src || (!src.startsWith('blob:') && !src.startsWith('data:image/'))) return null
+  return src
 }
 
 export async function resolveAssetDisplayUrl(pages: Page[], src: string) {
@@ -248,14 +444,4 @@ export async function resolveAssetDisplayUrl(pages: Page[], src: string) {
   } catch {
     return src
   }
-}
-
-export async function embedImageFile(page: Page, file: File) {
-  if (canStorePageAssets(page)) return uploadPageImage(page, file)
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.addEventListener('load', () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('无法读取图片')))
-    reader.addEventListener('error', () => reject(reader.error))
-    reader.readAsDataURL(file)
-  })
 }

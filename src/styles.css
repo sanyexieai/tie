@@ -259,7 +259,20 @@ select option {
 .tree-row.drag-over { outline: 1px solid var(--accent); outline-offset: -1px; background: var(--accent-soft); }
 .tree-row.drop-before { box-shadow: inset 0 2px var(--accent); }
 .tree-row.drop-after { box-shadow: inset 0 -2px var(--accent); }
-.disclosure { flex: 0 0 18px; border: 0; padding: 0; background: transparent; color: var(--text-subtle); font-size: 17px; line-height: 1; }
+.disclosure {
+  display: inline-flex;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: 10px;
+  line-height: 1;
+}
 .disclosure.invisible { visibility: hidden; }
 .page-glyph { width: 17px; color: var(--text-faint); font-size: 13px; }
 .tree-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
