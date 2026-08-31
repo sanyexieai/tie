@@ -280,11 +280,11 @@ select option {
 .storage-status.offline { background: #c27b72; }.storage-status.backend { background: #7a8fbf; }.storage-status.syncing { background: #7a8fbf; animation: storage-pulse 1.2s ease-in-out infinite; }.storage-status.queued { background: #c9a45c; }@keyframes storage-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }.storage-source-entry.unavailable .storage-source-button, .storage-source-entry.unavailable .storage-source-info { color: #8c7772; }.storage-source-entry.unavailable .storage-source-button small, .storage-source-entry.unavailable .storage-source-info small { color: #b18c85; }
 .skills-workspace-row {
   cursor: pointer;
-  border-color: #d5e0cb;
-  background: #f4f8f1;
+  border-color: var(--border);
+  background: var(--accent-soft);
 }
-.skills-workspace-row:hover { background: #ebf2e7; }
-.skills-workspace-mark { color: #7a8f6a; font-size: 12px; letter-spacing: 0; }
+.skills-workspace-row:hover { background: var(--bg-hover); }
+.skills-workspace-mark { color: var(--accent-strong); font-size: 12px; letter-spacing: 0; }
 .backend-source-heading { padding-top: 6px; }.backend-source-heading button { border: 0; border-radius: 4px; padding: 2px 6px; color: var(--text-subtle); background: transparent; font-size: 10px; }.backend-source-heading button:hover { color: var(--text-secondary); background: var(--bg-hover); }.backend-source-row { cursor: default; }.backend-source-empty { margin: 2px 8px 0; color: var(--text-faint); font-size: 10px; line-height: 1.45; }
 .storage-footer p { margin: 5px 8px 0; color: var(--text-faint); font-size: 10px; line-height: 1.45; }
 .sidebar-storage-trigger { display: grid; gap: 2px; flex: 0 0 auto; margin: 8px 8px 10px; border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; color: var(--text-muted); background: var(--bg-muted); text-align: left; }
@@ -376,7 +376,7 @@ select option {
   font-size: 12px;
 }
 .skills-tree-item:hover { background: var(--bg-hover); }
-.skills-tree-item.selected { background: #e7eee3; }
+.skills-tree-item.selected { color: var(--text); background: var(--bg-selected); font-weight: 560; }
 .skills-tree-item strong { font-size: 12px; font-weight: 560; }
 .skills-tree-empty {
   width: 100%;
