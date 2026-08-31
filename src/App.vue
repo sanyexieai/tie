@@ -8,6 +8,7 @@ import SearchView from '@/components/SearchView.vue'
 import TagView from '@/components/TagView.vue'
 import GraphView from '@/components/GraphView.vue'
 import LibraryView from '@/components/LibraryView.vue'
+import SkillsView from '@/components/SkillsView.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 import BackendConnectionDialog from '@/components/BackendConnectionDialog.vue'
 import StorageSettingsDialog from '@/components/StorageSettingsDialog.vue'
@@ -112,6 +113,7 @@ onBeforeUnmount(() => {
     <GraphView v-else-if="store.showingGraph" />
     <LibraryView v-else-if="store.showingRecent" mode="recent" />
     <LibraryView v-else-if="store.showingFavorites" mode="favorites" />
+    <SkillsView v-else-if="store.showingSkills" />
     <TagView v-else-if="store.showingTags" />
     <TrashView v-else-if="store.showingTrash" />
     <DocumentEditor v-else @toggle-sidebar="toggleSidebar" @toggle-focus="toggleFocusMode" @toggle-context="toggleContextPanel" />

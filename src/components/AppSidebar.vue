@@ -22,6 +22,10 @@ watch(() => backend.workspaces.map((workspace) => workspace.id).join('\n'), () =
   if (backend.connected && store.initialized) void store.reloadWorkspace()
 })
 
+watch(() => store.initialized, (ready) => {
+  if (ready && '__TAURI_INTERNALS__' in window) void store.refreshSkills()
+}, { immediate: true })
+
 async function createTopLevel() { await store.createPage(null) }
 async function createChild(parentId: string) { await store.createChildPage(parentId) }
 async function duplicate(pageId: string) { await store.duplicatePage(pageId) }
@@ -101,8 +105,48 @@ function openFirstInbox() {
       />
     </div>
 
-    <button class="sidebar-storage-trigger" type="button" title="管理存储源与优先级" @click="emit('open-storage-settings')">
-      <span>⚙ 存储设置<span v-if="store.syncConflictsCount > 0" class="sidebar-sync-conflicts">{{ store.syncConflictsCount }}</span></span>
+    <div class="sidebar-section-title skills-section-title">
+      <button
+        type="button"
+        class="skills-section-toggle"
+        :aria-expanded="!store.skillsSectionCollapsed"
+        :title="store.skillsSectionCollapsed ? '展开 Agent Skills' : '收起 Agent Skills'"
+        @click="store.toggleSkillsSectionCollapsed()"
+      >
+        <span class="skills-section-chevron" aria-hidden="true">{{ store.skillsSectionCollapsed ? '▸' : '▾' }}</span>
+        <span>Agent Skills</span>
+        <small class="sidebar-page-count">{{ store.skillConnections.length }}</small>
+      </button>
+      <button type="button" title="扫描并接入" @click="store.openSkillManager()">+</button>
+    </div>
+    <div
+      v-show="!store.skillsSectionCollapsed"
+      class="page-tree skills-tree"
+      role="list"
+      aria-label="Agent Skills"
+    >
+      <button
+        v-for="skill in store.skillConnections"
+        :key="skill.id"
+        type="button"
+        class="skills-tree-item"
+        :class="{ selected: store.showingSkills && !store.showingSkillManager && store.activeSkillId === skill.id }"
+        :title="skill.skillPath"
+        @click="store.openSkills(skill.id)"
+      >
+        <strong>{{ skill.name }}</strong>
+      </button>
+      <button
+        type="button"
+        class="skills-tree-empty"
+        @click="store.openSkillManager()"
+      >
+        {{ store.skillsLoading ? '载入中…' : '接入 Skill…' }}
+      </button>
+    </div>
+
+    <button class="sidebar-storage-trigger" type="button" title="打开设置：外观、存储源与优先级" @click="emit('open-storage-settings')">
+      <span>⚙ 设置<span v-if="store.syncConflictsCount > 0" class="sidebar-sync-conflicts">{{ store.syncConflictsCount }}</span></span>
       <small>{{ store.syncConflictsCount > 0 ? `${store.syncConflictsCount} 个同步冲突 · ` : '' }}默认 · {{ defaultSourceName }}</small>
     </button>
   </aside>

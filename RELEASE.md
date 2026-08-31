@@ -9,7 +9,8 @@
 - [ ] `npm run test:backend`（后台 API 集成测试）
 - [ ] `npm run build && npm run test:e2e`（浏览器冒烟）
 - [ ] `cargo check --manifest-path src-tauri/Cargo.toml`
-- [ ] `npm run tauri:build`（Linux；发布平台需各自再构建）
+- [ ] `npm run tauri:build`（当前平台；发布 Linux 用 `tauri:build:linux`，Windows 用 `tauri:build:windows`）
+- [ ] CI `build-linux` / `build-windows` 产物可下载
 
 ## 桌面端手工冒烟
 
@@ -32,7 +33,7 @@
 
 - [ ] `CHANGELOG.md` 已更新 1.0.0 条目
 - [ ] README 安装说明与「已知限制」准确
-- [ ] GitHub Release 附 `.deb` / `.AppImage` / `.msi` 等对应平台产物
+- [ ] GitHub Release 附 `.deb` / `.rpm` / `.msi` / `.exe`（NSIS）等对应平台产物
 - [ ] 版本号一致：`package.json`、`src-tauri/tauri.conf.json`、`backend/package.json`
 
 ## 已知限制（1.0 可接受，需在 Release Notes 写明）

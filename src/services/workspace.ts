@@ -56,7 +56,7 @@ function localSnapshot(): WorkspaceSnapshot {
 function preferencesKey(workspaceId: string) { return `${preferencesPrefix}${workspaceId}` }
 
 function defaultPreferences(): WorkspacePreferences {
-  return { favoritePageIds: [], recentPageIds: [], collapsedPageIds: [], spellcheckEnabled: true, sourceMode: false, storageSourceOrder: [] }
+  return { favoritePageIds: [], recentPageIds: [], collapsedPageIds: [], spellcheckEnabled: true, sourceMode: false, storageSourceOrder: [], skillsSectionCollapsed: true }
 }
 
 async function isTauri() { return '__TAURI_INTERNALS__' in window }
@@ -251,6 +251,7 @@ export const workspaceService = {
         spellcheckEnabled: typeof parsed.spellcheckEnabled === 'boolean' ? parsed.spellcheckEnabled : true,
         sourceMode: typeof parsed.sourceMode === 'boolean' ? parsed.sourceMode : false,
         storageSourceOrder: Array.isArray(parsed.storageSourceOrder) ? parsed.storageSourceOrder.filter((id): id is string => typeof id === 'string') : [],
+        skillsSectionCollapsed: typeof parsed.skillsSectionCollapsed === 'boolean' ? parsed.skillsSectionCollapsed : true,
       }
     } catch { return defaultPreferences() }
   },

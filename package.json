@@ -13,9 +13,14 @@
     "test:e2e": "playwright test",
     "backend:dev": "npm --prefix backend run dev",
     "backend:start": "npm --prefix backend run start",
-    "tauri": "bash scripts/tauri-dev.sh",
-    "tauri:dev": "bash scripts/tauri-dev.sh",
-    "tauri:build": "tauri build --bundles deb,rpm"
+    "tauri": "node scripts/tauri-dev.mjs",
+    "tauri:dev": "node scripts/tauri-dev.mjs",
+    "tauri:build": "node scripts/tauri-build.mjs",
+    "tauri:build:linux": "tauri build --bundles deb,rpm",
+    "tauri:build:windows": "tauri build --bundles msi,nsis",
+    "mcp": "node packages/tie-mcp/src/server.js",
+    "mcp:setup": "node scripts/setup-codex-mcp.mjs",
+    "test:mcp": "npm --prefix packages/tie-mcp test"
   },
   "dependencies": {
     "@lucide/vue": "^1.34.0",

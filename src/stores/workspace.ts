@@ -7,6 +7,12 @@ import { transferPreservesHistory } from '@/services/transfer-policy'
 import { workspaceService } from '@/services/workspace'
 import { useBackendStore } from '@/stores/backend'
 import type { SyncConflict, SyncResult } from '@/services/storage/types'
+import {
+  connectSkill,
+  disconnectSkill,
+  listSkillConnections,
+  type SkillConnection,
+} from '@/services/codex-mcp'
 import type { Page, PageId, PageLink, PageRevision, PageTreeNode, SearchResult, StorageKind, StorageSource, TagSummary, Workspace } from '@/types'
 
 function sortSourcesByOrder(sources: StorageSource[], order: string[]) {
@@ -30,6 +36,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const showingGraph = ref(false)
   const showingRecent = ref(false)
   const showingFavorites = ref(false)
+  const showingSkills = ref(false)
+  const showingSkillManager = ref(false)
+  const activeSkillId = ref<string | null>(null)
+  const skillConnections = ref<SkillConnection[]>([])
+  const skillsLoading = ref(false)
   const showingCommandPalette = ref(false)
   const selectedTag = ref<string | null>(null)
   const tagStorageSourceId = ref<string | null>(null)
@@ -46,6 +57,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const collapsedPageIds = ref<PageId[]>([])
   const spellcheckEnabled = ref(true)
   const sourceMode = ref(false)
+  const skillsSectionCollapsed = ref(true)
   const s3ProvidersVersion = ref(0)
   const syncQueueVersion = ref(0)
   const syncConflicts = ref<Map<PageId, SyncConflict & { sourceId: string }>>(new Map())
@@ -77,6 +89,20 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
   const defaultStorageSourceId = computed(() => allSources.value.find((source) => source.available !== false)?.id ?? allSources.value[0]?.id ?? null)
   const activeStorageSourceId = defaultStorageSourceId
+  const activeSkill = computed(() => skillConnections.value.find((item) => item.id === activeSkillId.value) ?? null)
+  const skillsWorkspaceSource = computed(() => {
+    const preferred = defaultStorageSourceId.value
+      ? allSources.value.find((source) => source.id === defaultStorageSourceId.value)
+      : null
+    if (preferred && (preferred.kind === 'local' || preferred.kind === 'smb') && preferred.available !== false && preferred.path) {
+      return preferred
+    }
+    return allSources.value.find((source) => (
+      (source.kind === 'local' || source.kind === 'smb')
+      && source.available !== false
+      && Boolean(source.path)
+    )) ?? null
+  })
 
   const activePage = computed(() => pages.value.find((page) => page.id === activePageId.value && !page.deletedAt) ?? null)
   const trashedPages = computed(() => pages.value
@@ -193,6 +219,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       collapsedPageIds.value = preferences.collapsedPageIds
       spellcheckEnabled.value = preferences.spellcheckEnabled
       sourceMode.value = preferences.sourceMode
+      skillsSectionCollapsed.value = preferences.skillsSectionCollapsed
       storageSourceOrder.value = preferences.storageSourceOrder
       activePageId.value = preferences.recentPageIds
         .map((pageId) => snapshot.pages.find((page) => page.id === pageId && !page.deletedAt)?.id)
@@ -322,6 +349,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     collapsedPageIds.value = preferences.collapsedPageIds
     spellcheckEnabled.value = preferences.spellcheckEnabled
     sourceMode.value = preferences.sourceMode
+    skillsSectionCollapsed.value = preferences.skillsSectionCollapsed
     persistPreferences()
     showingTrash.value = false
     showingSearch.value = false
@@ -329,6 +357,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     showingGraph.value = false
     showingRecent.value = false
     showingFavorites.value = false
+    showingSkills.value = false
     return true
   }
 
@@ -379,6 +408,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       spellcheckEnabled: spellcheckEnabled.value,
       sourceMode: sourceMode.value,
       storageSourceOrder: storageSourceOrder.value,
+      skillsSectionCollapsed: skillsSectionCollapsed.value,
     })
   }
 
@@ -401,6 +431,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   function toggleSourceMode() {
     sourceMode.value = !sourceMode.value
+    persistPreferences()
+  }
+
+  function toggleSkillsSectionCollapsed() {
+    skillsSectionCollapsed.value = !skillsSectionCollapsed.value
     persistPreferences()
   }
 
@@ -886,16 +921,96 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return true
   }
 
-  function openPage(pageId: PageId) { activePageId.value = pageId; expandPageAncestors(pageId); markRecentlyOpened(pageId); showingTrash.value = false; showingSearch.value = false; showingTags.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
+  function clearSpecialViews() {
+    showingTrash.value = false
+    showingSearch.value = false
+    showingTags.value = false
+    showingGraph.value = false
+    showingRecent.value = false
+    showingFavorites.value = false
+    showingSkills.value = false
+    showingSkillManager.value = false
+  }
+
+  function openPage(pageId: PageId) {
+    activePageId.value = pageId
+    expandPageAncestors(pageId)
+    markRecentlyOpened(pageId)
+    clearSpecialViews()
+  }
   function openCommandPalette() { commandQuery.value = ''; showingCommandPalette.value = true }
   function closeCommandPalette() { showingCommandPalette.value = false }
   function scrollToOutlineHeading(index: number) { outlineScrollTarget.value = index; outlineScrollRequest.value += 1 }
-  function openTrash() { showingTrash.value = true; showingSearch.value = false; showingTags.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
-  function openSearch() { showingSearch.value = true; showingTrash.value = false; showingTags.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
-  function openTags(tag: string | null = null) { selectedTag.value = tag; showingTags.value = true; showingTrash.value = false; showingSearch.value = false; showingGraph.value = false; showingRecent.value = false; showingFavorites.value = false }
-  function openGraph() { showingGraph.value = true; showingTrash.value = false; showingSearch.value = false; showingTags.value = false; showingRecent.value = false; showingFavorites.value = false }
-  function openRecent() { showingRecent.value = true; showingFavorites.value = false; showingTrash.value = false; showingSearch.value = false; showingTags.value = false; showingGraph.value = false }
-  function openFavorites() { showingFavorites.value = true; showingRecent.value = false; showingTrash.value = false; showingSearch.value = false; showingTags.value = false; showingGraph.value = false }
+  function openTrash() { clearSpecialViews(); showingTrash.value = true }
+  function openSearch() { clearSpecialViews(); showingSearch.value = true }
+  function openTags(tag: string | null = null) { selectedTag.value = tag; clearSpecialViews(); showingTags.value = true }
+  function openGraph() { clearSpecialViews(); showingGraph.value = true }
+  function openRecent() { clearSpecialViews(); showingRecent.value = true }
+  function openFavorites() { clearSpecialViews(); showingFavorites.value = true }
+
+  async function refreshSkills() {
+    if (!('__TAURI_INTERNALS__' in window)) {
+      skillConnections.value = []
+      return skillConnections.value
+    }
+    skillsLoading.value = true
+    try {
+      skillConnections.value = await listSkillConnections()
+      if (activeSkillId.value && !skillConnections.value.some((item) => item.id === activeSkillId.value)) {
+        activeSkillId.value = skillConnections.value[0]?.id ?? null
+      }
+      return skillConnections.value
+    } finally {
+      skillsLoading.value = false
+    }
+  }
+
+  async function openSkills(skillId: string | null = null) {
+    clearSpecialViews()
+    showingSkills.value = true
+    showingSkillManager.value = false
+    activeSkillId.value = skillId
+    const connections = await refreshSkills()
+    if (skillId) activeSkillId.value = skillId
+    else if (!activeSkillId.value) activeSkillId.value = connections[0]?.id ?? null
+  }
+
+  async function openSkillManager() {
+    clearSpecialViews()
+    showingSkills.value = true
+    showingSkillManager.value = true
+    activeSkillId.value = null
+    await refreshSkills()
+  }
+
+  function selectSkill(skillId: string) {
+    activeSkillId.value = skillId
+    showingSkills.value = true
+    showingSkillManager.value = false
+    showingTrash.value = false
+    showingSearch.value = false
+    showingTags.value = false
+    showingGraph.value = false
+    showingRecent.value = false
+    showingFavorites.value = false
+  }
+
+  async function connectScannedSkill(skillPath: string) {
+    const connection = await connectSkill(skillPath)
+    await refreshSkills()
+    selectSkill(connection.id)
+    return connection
+  }
+
+  async function disconnectManagedSkill(connectionId: string) {
+    skillConnections.value = await disconnectSkill(connectionId)
+    if (activeSkillId.value === connectionId) {
+      activeSkillId.value = skillConnections.value[0]?.id ?? null
+      if (!activeSkillId.value) showingSkillManager.value = true
+    }
+    return skillConnections.value
+  }
+
   function pageById(pageId: PageId) { return pages.value.find((page) => page.id === pageId) ?? null }
   function outgoingLinks(pageId: PageId) { return links.value.filter((link) => link.fromPageId === pageId).map((link) => pageById(link.toPageId)).filter((page): page is Page => Boolean(page && !page.deletedAt)) }
   function backlinks(pageId: PageId) { return links.value.filter((link) => link.toPageId === pageId).map((link) => pageById(link.fromPageId)).filter((page): page is Page => Boolean(page && !page.deletedAt)) }
@@ -917,5 +1032,5 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, initialize, reloadWorkspace, syncBackendSources, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, importMarkdownFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, clearSyncConflict, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, importMarkdownFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, clearSyncConflict, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })

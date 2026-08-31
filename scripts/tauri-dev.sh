@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
+# 兼容旧入口；跨平台请用: npm run tauri
 set -euo pipefail
-
-if [[ "$(uname -s)" == Linux ]]; then
-  "$(dirname "$0")/setup-linux-dev-icon.sh"
-fi
-
-exec npx tauri dev
+exec node "$(dirname "$0")/tauri-dev.mjs" "$@"

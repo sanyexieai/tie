@@ -69,4 +69,5 @@ export interface WorkspacePreferences {
   spellcheckEnabled: boolean
   sourceMode: boolean
   storageSourceOrder: string[]
+  skillsSectionCollapsed: boolean
 }

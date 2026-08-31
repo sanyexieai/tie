@@ -146,8 +146,9 @@ Tie 内的页面 ID 与跨源链接写在 Markdown Frontmatter 中；迁移目�
 - 不支持后台工作区 ↔ backend-s3 Provider 互迁，也不支持两个 backend-s3 Provider 互迁
 - 涉及后台源的页面迁移**不保留**历史版本（file ↔ S3 迁移会保留）
 - 浏览器模式不支持 `tie://asset/` 真实附件存储
-- Linux AppImage 安装包尚未提供（当前 Release 为 deb/rpm）
+- Linux AppImage 安装包尚未提供（当前 Release 为 deb/rpm；Windows 为 msi/nsis）
 - 无应用内自动更新；升级需手动下载新版本
+- Codex / Agent 外接知识库为可选本地包 `@tie/mcp`（`packages/tie-mcp`），不依赖自定义后台
 
 ## 运行
 
@@ -162,13 +163,35 @@ npm run dev
 npm run build
 ```
 
-启动桌面端：
+启动桌面端（Linux / Windows / macOS）：
 
 ```bash
 npm run tauri
 ```
 
-Linux 桌面端构建需要系统已安装 WebKitGTK、libsoup 和相关 GTK 开发库；缺少这些依赖时，前端的浏览器开发模式仍可使用。
+Windows 需已安装 [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/)（多数 Win10/11 已自带）；安装包默认会引导下载 Bootstrapper。
+
+桌面端构建（按当前 OS 自动选择包格式）：
+
+```bash
+npm run tauri:build
+# 或显式指定：
+npm run tauri:build:linux    # deb + rpm
+npm run tauri:build:windows  # msi + nsis
+```
+
+Linux 构建需要 WebKitGTK、libsoup 和相关 GTK 开发库；缺少这些依赖时，前端的浏览器开发模式仍可使用。
+
+### 可选：Codex / Agent 知识库
+
+- **桌面端**：存储设置 →「Codex / Agent 知识库」→ 选择工作区（默认选中默认本地/SMB 源）→「接入 Codex」
+- **命令行**：
+
+```bash
+npm run mcp:setup -- --workspace /path/to/workspace
+```
+
+配置与 Skill 见 [`packages/tie-mcp/README.md`](packages/tie-mcp/README.md)。
 
 ## 开发检查
 
@@ -176,9 +199,10 @@ Linux 桌面端构建需要系统已安装 WebKitGTK、libsoup 和相关 GTK 开
 npm run check
 npm test
 npm run test:backend
+npm run test:mcp
 npm run build && npm run test:e2e
 cargo check --manifest-path src-tauri/Cargo.toml
-npm run tauri:build   # Linux 桌面包，需 WebKitGTK 等系统依赖
+npm run tauri:build
 ```
 
-CI 在 push / PR 时自动运行上述检查（含后台 API 测试、浏览器 E2E 与 Linux 桌面构建）。发布前请对照 [`RELEASE.md`](RELEASE.md)。
+CI 在 push / PR 时自动运行上述检查（含后台 API 测试、浏览器 E2E，以及 Linux / Windows 桌面构建）。发布前请对照 [`RELEASE.md`](RELEASE.md)。

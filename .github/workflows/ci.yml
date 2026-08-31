@@ -39,6 +39,11 @@ jobs:
       - name: Run backend API tests
         run: npm run test:backend
 
+      - name: Install and test local Tie MCP
+        run: |
+          npm install --prefix packages/tie-mcp
+          npm run test:mcp
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Check Tauri backend
@@ -71,7 +76,7 @@ jobs:
             libssl-dev
 
       - name: Build Tauri app (Linux)
-        run: npm run tauri:build
+        run: npm run tauri:build:linux
         env:
           CI: true
 
@@ -82,4 +87,34 @@ jobs:
           path: |
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/rpm/*.rpm
+          if-no-files-found: warn
+
+  build-windows:
+    runs-on: windows-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Tauri app (Windows)
+        run: npm run tauri:build:windows
+        env:
+          CI: true
+
+      - name: Upload Windows bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tie-windows-bundle
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: warn

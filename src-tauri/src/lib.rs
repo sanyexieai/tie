@@ -11,6 +11,9 @@ use futures_util::StreamExt;
 use minio::s3::{builders::ObjectContent, creds::StaticProvider, response::BucketExistsResponse, types::{BucketName, S3Api, ToStream}, MinioClient, MinioClientBuilder};
 use tauri::Manager;
 
+mod codex_mcp;
+mod skills;
+
 const S3_CREDENTIAL_SERVICE: &str = "com.tie.knowledge.s3";
 
 #[derive(Deserialize, Serialize)]
@@ -1677,7 +1680,19 @@ pub fn run() {
             restore_page_revision,
             export_page_markdown,
             export_page_markdown_bundle,
-            permanently_delete_pages
+            permanently_delete_pages,
+            codex_mcp::codex_mcp_status,
+            codex_mcp::configure_codex_mcp,
+            skills::list_skill_connections,
+            skills::list_skill_scan_roots,
+            skills::list_extra_skill_scan_roots,
+            skills::add_skill_scan_root,
+            skills::remove_skill_scan_root,
+            skills::scan_skills,
+            skills::connect_skill,
+            skills::disconnect_skill,
+            skills::read_skill_file,
+            skills::write_skill_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tie desktop app");

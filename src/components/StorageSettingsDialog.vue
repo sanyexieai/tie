@@ -5,14 +5,39 @@ import type { StorageKind, StorageSource } from '@/types'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 import { loadAiTaggingConfig, saveAiTaggingConfig, type AiTaggingConfig, type AiTaggingMode } from '@/services/ai-tagging'
+import {
+  configureCodexMcp,
+  fetchCodexMcpStatus,
+  loadCodexMcpPreference,
+  saveCodexMcpPreference,
+  type CodexMcpStatus,
+} from '@/services/codex-mcp'
 import { isBackendSourceId, isBackendManagedS3SourceId, defaultBackendEndpoint } from '@/services/backend'
 import { isS3SourceId, providerForS3Source } from '@/services/s3'
 import { storageRegistry } from '@/services/storage/registry'
 import type { S3ConnectionInput } from '@/services/storage/types'
+import { loadThemeMode, resolveTheme, setThemeMode, type ThemeMode } from '@/services/theme'
 
 const emit = defineEmits<{ close: []; 'connect-backend': [] }>()
 const store = useWorkspaceStore()
 const backend = useBackendStore()
+const themeMode = ref<ThemeMode>(loadThemeMode())
+const themeOptions: { value: ThemeMode; label: string }[] = [
+  { value: 'system', label: '跟随系统' },
+  { value: 'light', label: '浅色' },
+  { value: 'dark', label: '深色' },
+]
+const themeSummary = computed(() => {
+  const option = themeOptions.find((item) => item.value === themeMode.value)
+  if (themeMode.value === 'system') {
+    return `跟随系统 · 当前${resolveTheme('system') === 'dark' ? '深色' : '浅色'}`
+  }
+  return option?.label ?? '跟随系统'
+})
+
+function onThemeModeChange() {
+  setThemeMode(themeMode.value)
+}
 const storageMenuOpen = ref(false)
 const choosingWorkspace = ref(false)
 const importingMarkdown = ref(false)
@@ -36,6 +61,12 @@ const aiConfig = ref<AiTaggingConfig>(loadAiTaggingConfig())
 const aiNotice = ref('')
 const aiModeOpen = ref(false)
 const aiFormOpen = ref(false)
+const codexFormOpen = ref(false)
+const codexStatus = ref<CodexMcpStatus | null>(null)
+const codexSourceId = ref<string | null>(loadCodexMcpPreference().sourceId)
+const codexBusy = ref(false)
+const codexError = ref('')
+const codexNotice = ref('')
 
 const aiModeOptions: { value: AiTaggingMode; label: string }[] = [
   { value: 'tie', label: 'Tie 后台（/api/v1/ai/suggest-tags）' },
@@ -51,6 +82,87 @@ const aiStatusSummary = computed(() => {
 const localSources = computed(() => store.workspace?.sources ?? [])
 const orderedSources = computed(() => store.allSources)
 const defaultSourceId = computed(() => store.defaultStorageSourceId)
+const fileMcpSources = computed(() => orderedSources.value.filter((source) => (
+  (source.kind === 'local' || source.kind === 'smb')
+  && source.available !== false
+  && Boolean(source.path)
+)))
+const defaultMcpSourceId = computed(() => {
+  if (defaultSourceId.value && fileMcpSources.value.some((source) => source.id === defaultSourceId.value)) {
+    return defaultSourceId.value
+  }
+  return fileMcpSources.value[0]?.id ?? null
+})
+const selectedMcpSource = computed(() => fileMcpSources.value.find((source) => source.id === codexSourceId.value) ?? null)
+const codexStatusSummary = computed(() => {
+  if (!isDesktop) return '仅桌面端可用'
+  if (!codexStatus.value?.nodeAvailable) return '需要本机 Node.js'
+  if (codexStatus.value?.configured) {
+    const path = codexStatus.value.workspacePath
+    const matched = path ? fileMcpSources.value.find((source) => source.path === path) : null
+    return matched ? `已接入 · ${matched.name}` : (path ? `已接入 · ${path}` : '已接入')
+  }
+  return '未接入 · 点击配置'
+})
+
+function ensureCodexSourceSelection() {
+  if (codexSourceId.value && fileMcpSources.value.some((source) => source.id === codexSourceId.value)) return
+  codexSourceId.value = defaultMcpSourceId.value
+  saveCodexMcpPreference({ sourceId: codexSourceId.value })
+}
+
+async function refreshCodexStatus() {
+  if (!isDesktop) return
+  try {
+    codexStatus.value = await fetchCodexMcpStatus()
+  } catch {
+    codexStatus.value = null
+  }
+}
+
+function toggleCodexForm() {
+  codexFormOpen.value = !codexFormOpen.value
+  if (codexFormOpen.value) {
+    ensureCodexSourceSelection()
+    void refreshCodexStatus()
+  }
+}
+
+function onCodexSourceChange() {
+  saveCodexMcpPreference({ sourceId: codexSourceId.value })
+  codexError.value = ''
+  codexNotice.value = ''
+}
+
+function openSkillsWorkspace() {
+  emit('close')
+  void store.openSkillManager()
+}
+
+async function applyCodexMcp() {
+  ensureCodexSourceSelection()
+  const source = selectedMcpSource.value
+  if (!source?.path) {
+    codexError.value = '请选择可用的本地或 SMB 存储源'
+    return
+  }
+  codexBusy.value = true
+  codexError.value = ''
+  codexNotice.value = ''
+  try {
+    saveCodexMcpPreference({ sourceId: source.id })
+    codexStatus.value = await configureCodexMcp(source.path)
+    await store.refreshSkills()
+    codexNotice.value = source.id === defaultMcpSourceId.value
+      ? `已接入 Codex（默认工作区：${source.name}）`
+      : `已接入 Codex（工作区：${source.name}）`
+    window.setTimeout(() => { codexNotice.value = '' }, 3200)
+  } catch (error) {
+    codexError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    codexBusy.value = false
+  }
+}
 
 const sourcePageStats = computed(() => new Map(orderedSources.value.map((source) => {
   const pages = store.pages.filter((page) => page.storageSourceId === source.id)
@@ -215,7 +327,11 @@ function closeAiModeMenu(event: MouseEvent) {
   if (!(target instanceof Element) || !target.closest('.ai-mode-select')) aiModeOpen.value = false
 }
 
-onMounted(() => document.addEventListener('click', closeAiModeMenu))
+onMounted(() => {
+  document.addEventListener('click', closeAiModeMenu)
+  ensureCodexSourceSelection()
+  void refreshCodexStatus()
+})
 onBeforeUnmount(() => document.removeEventListener('click', closeAiModeMenu))
 
 async function syncSource(sourceId: string) {
@@ -334,14 +450,24 @@ function openConflictPage(pageId: string) {
 
 <template>
   <div class="backend-dialog-backdrop" @mousedown.self="emit('close')">
-    <section class="backend-dialog storage-settings-dialog" role="dialog" aria-modal="true" aria-label="存储设置">
+    <section class="backend-dialog storage-settings-dialog" role="dialog" aria-modal="true" aria-label="设置">
       <header>
         <div>
-          <strong>存储设置</strong>
-          <small>拖拽调整优先级，越靠前越优先；新建顶层页默认保存到第一个可用存储源</small>
+          <strong>设置</strong>
+          <small>外观主题、存储源优先级与连接管理</small>
         </div>
         <button aria-label="关闭" @click="emit('close')">×</button>
       </header>
+
+      <label class="theme-mode-row">
+        <span>
+          <strong>外观主题</strong>
+          <small>{{ themeSummary }}</small>
+        </span>
+        <select v-model="themeMode" aria-label="外观主题" @change="onThemeModeChange">
+          <option v-for="option in themeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+        </select>
+      </label>
 
       <div class="storage-settings-toolbar">
         <button :disabled="store.reloading" @click="reloadWorkspace">{{ store.reloading ? '载入中…' : '↻ 重新载入' }}</button>
@@ -446,7 +572,67 @@ function openConflictPage(pageId: string) {
       </form>
       <p v-if="!aiFormOpen && aiNotice" class="minio-config-notice">{{ aiNotice }}</p>
 
-      <div v-if="orderedSources.length" class="storage-settings-list">
+      <button
+        v-if="isDesktop"
+        type="button"
+        class="ai-tagging-toggle"
+        :aria-expanded="codexFormOpen"
+        @click="toggleCodexForm"
+      >
+        <span>
+          <strong>Codex / Agent 知识库</strong>
+          <small>{{ codexStatusSummary }}</small>
+        </span>
+        <em>{{ codexFormOpen ? '收起' : '配置' }}</em>
+      </button>
+
+      <form v-if="isDesktop && codexFormOpen" class="minio-config-form codex-mcp-form" @submit.prevent="applyCodexMcp">
+        <small>把本地/SMB 工作区接入 Codex MCP。Skill 在左侧「Agent Skills」特殊工作区管理；接入时会同步到 Codex。</small>
+        <label>
+          <span>工作区（存储源）</span>
+          <select v-model="codexSourceId" :disabled="!fileMcpSources.length || codexBusy" @change="onCodexSourceChange">
+            <option v-if="!fileMcpSources.length" :value="null">暂无可用本地/SMB 源</option>
+            <option
+              v-for="source in fileMcpSources"
+              :key="source.id"
+              :value="source.id"
+            >
+              {{ source.id === defaultMcpSourceId ? `默认 · ${source.name}` : source.name }}
+            </option>
+          </select>
+        </label>
+        <small v-if="selectedMcpSource" class="codex-mcp-path">{{ selectedMcpSource.path }}</small>
+        <small v-if="codexStatus && !codexStatus.nodeAvailable" class="backend-error">未检测到 Node.js，请先安装并确保可在终端运行 node。</small>
+        <p v-if="codexError" class="backend-error">{{ codexError }}</p>
+        <div>
+          <button type="button" :disabled="codexBusy" @click="codexFormOpen = false">取消</button>
+          <button type="button" :disabled="!selectedMcpSource" @click="openSkillsWorkspace">管理 Skills</button>
+          <button type="submit" :disabled="codexBusy || !selectedMcpSource || (codexStatus !== null && !codexStatus.nodeAvailable)">
+            {{ codexBusy ? '正在接入…' : (codexStatus?.configured ? '更新接入' : '接入 Codex') }}
+          </button>
+        </div>
+        <p v-if="codexNotice" class="minio-config-notice">{{ codexNotice }}</p>
+      </form>
+
+      <div v-if="orderedSources.length || isDesktop" class="storage-settings-list">
+        <div
+          v-if="isDesktop"
+          class="storage-settings-row skills-workspace-row"
+          role="button"
+          tabindex="0"
+          @click="openSkillsWorkspace"
+          @keydown.enter.prevent="openSkillsWorkspace"
+        >
+          <span class="storage-drag-handle skills-workspace-mark" aria-hidden="true">◇</span>
+          <div class="storage-settings-main">
+            <div class="storage-settings-title">
+              <span class="storage-status skills"></span>
+              <strong>Agent Skills</strong>
+              <span class="storage-default-badge">特殊工作区</span>
+            </div>
+            <small>{{ store.skillConnections.length ? `${store.skillConnections.length} 个已接入 · 点击打开` : '扫描接入 Codex Skills · 点击打开' }}</small>
+          </div>
+        </div>
         <div
           v-for="source in orderedSources"
           :key="source.id"
@@ -486,7 +672,7 @@ function openConflictPage(pageId: string) {
       </div>
       <p v-else class="storage-settings-empty">还没有连接存储源，点击「添加存储源」开始。</p>
 
-      <p class="storage-settings-note">所有存储源的页面都在左侧同一棵树里；这里只调整优先级和管理连接。</p>
+      <p class="storage-settings-note">所有存储源的页面都在左侧同一棵树里；Agent Skills 是并列的特殊工作区。这里只调整优先级和管理连接。</p>
     </section>
   </div>
 </template>
