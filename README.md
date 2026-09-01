@@ -2,6 +2,26 @@
 
 Tie 是一个本地优先的知识编辑器原型：用页面树组织内容，以 Markdown 保存页面，并为后续的标签、链接、图谱与多存储 Provider 预留边界。
 
+## 界面预览
+
+### 写作与页面树
+
+Typora 风格编辑区、侧栏页面树，以及右侧大纲 / 链接 / 局部图谱：
+
+![Tie 写作界面：页面树、Markdown 编辑区与右侧大纲](docs/screenshot-editor.png)
+
+### 设置与多存储源
+
+外观主题、应用更新、本地目录 / S3 等存储源管理：
+
+![Tie 设置：主题、应用更新与存储源](docs/screenshot-settings.png)
+
+### 全局知识图谱
+
+从侧栏进入图谱视图，按页面、标签与链接关系浏览全工作区：
+
+![Tie 全局知识图谱](docs/screenshot-graph.png)
+
 ## 当前完成的纵向切片
 
 - Notion 风格的无限层级页面树。
@@ -150,7 +170,7 @@ Tie 内的页面 ID 与跨源链接写在 Markdown Frontmatter 中；迁移目�
 - 涉及后台源的页面迁移**不保留**历史版本（file ↔ S3 迁移会保留）
 - 浏览器模式不支持 `tie://asset/` 真实附件存储
 - Linux AppImage 安装包尚未提供（当前 Release 为 deb/rpm；Windows 为 msi/nsis）
-- 无应用内自动更新；升级需手动下载新版本
+- 桌面版支持应用内自动更新（需 Release 已签名并上传 `latest.json`）；浏览器演示模式不支持
 - Codex / Agent 外接知识库为可选本地包 `@tie/mcp`（`packages/tie-mcp`），不依赖自定义后台
 
 ## 运行

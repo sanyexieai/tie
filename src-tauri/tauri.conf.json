@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Tie",
-  "version": "0.1.0",
+  "version": "1.0.2",
   "identifier": "com.tie.knowledge",
   "build": {
     "frontendDist": "../dist",
@@ -11,14 +11,29 @@
   },
   "app": {
     "enableGTKAppId": true,
-    "windows": [{ "label": "main", "title": "Tie", "width": 1280, "height": 820, "minWidth": 900, "minHeight": 640 }],
+    "windows": [
+      {
+        "label": "main",
+        "title": "Tie",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 640
+      }
+    ],
     "security": {
       "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* https:; img-src 'self' data: blob: asset: http://asset.localhost; media-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     }
   },
-    "bundle": {
+  "bundle": {
     "active": true,
-    "targets": ["deb", "rpm", "msi", "nsis"],
+    "createUpdaterArtifacts": true,
+    "targets": [
+      "deb",
+      "rpm",
+      "msi",
+      "nsis"
+    ],
     "resources": [
       "../packages/tie-mcp"
     ],
@@ -35,5 +50,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI5NDc3MjgzODIyOUU2QTkKUldTcDVpbUNnM0pIdVNjU3M2U0hUbGEzcWxnRWRRSStYQXRwV2ljKzRPRHNaTlVQYThlY3pwYTYK",
+      "endpoints": [
+        "https://github.com/sanyexieai/tie/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "tie",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -20,7 +20,8 @@
     "tauri:build:windows": "tauri build --bundles msi,nsis",
     "mcp": "node packages/tie-mcp/src/server.js",
     "mcp:setup": "node scripts/setup-codex-mcp.mjs",
-    "test:mcp": "npm --prefix packages/tie-mcp test"
+    "test:mcp": "npm --prefix packages/tie-mcp test",
+    "release": "node scripts/release-version.mjs"
   },
   "dependencies": {
     "@lucide/vue": "^1.34.0",
@@ -28,7 +29,9 @@
     "@tauri-apps/plugin-clipboard-manager": "^2.3.3",
     "@tauri-apps/plugin-dialog": "^2.4.0",
     "@tauri-apps/plugin-opener": "^2.5.0",
+    "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-store": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.11.0",
     "@tiptap/core": "^3.30.5",
     "@tiptap/extension-code-block-lowlight": "^3.30.5",
     "@tiptap/extension-image": "^3.30.5",

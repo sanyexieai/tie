@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { openPath } from '@tauri-apps/plugin-opener'
+import { getVersion } from '@tauri-apps/api/app'
 import TieSelect from '@/components/TieSelect.vue'
 import type { StorageKind, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
@@ -32,6 +33,14 @@ import { isS3SourceId, providerForS3Source } from '@/services/s3'
 import { storageRegistry } from '@/services/storage/registry'
 import type { S3ConnectionInput } from '@/services/storage/types'
 import { loadThemeMode, resolveTheme, setThemeMode, type ThemeMode } from '@/services/theme'
+import {
+  appUpdateState,
+  appUpdaterUnavailableReason,
+  canUseAppUpdater,
+  checkForAppUpdate,
+  downloadAndInstallAppUpdate,
+} from '@/services/app-updater'
+import { isTauriDesktop, tieRuntimeKind, tieRuntimeLabel } from '@/services/platform'
 
 const emit = defineEmits<{ close: []; 'connect-backend': [] }>()
 const store = useWorkspaceStore()
@@ -59,7 +68,7 @@ const choosingWorkspace = ref(false)
 const importingMarkdown = ref(false)
 const openingFromFiles = ref(false)
 const syncingRemote = ref(false)
-const isDesktop = '__TAURI_INTERNALS__' in window
+const isDesktop = isTauriDesktop()
 const storageListEl = ref<HTMLElement | null>(null)
 const draggingSourceId = ref<string | null>(null)
 const dropTargetId = ref<string | null>(null)
@@ -92,6 +101,24 @@ const codexBusy = ref(false)
 const codexError = ref('')
 const codexNotice = ref('')
 const agentClientOptions = AGENT_CLIENT_OPTIONS
+const appVersion = ref('—')
+const checkingAppUpdate = ref(false)
+
+const appUpdateSummary = computed(() => {
+  const unavailableReason = appUpdaterUnavailableReason()
+  if (unavailableReason) return unavailableReason
+  if (appUpdateState.phase === 'available') {
+    return `发现新版本 ${appUpdateState.availableVersion}`
+  }
+  if (appUpdateState.phase === 'uptodate') return '已是最新版本'
+  if (appUpdateState.phase === 'downloading' || appUpdateState.phase === 'installing') {
+    return appUpdateState.progress == null
+      ? '正在下载更新…'
+      : `正在下载更新… ${appUpdateState.progress}%`
+  }
+  if (appUpdateState.phase === 'error') return appUpdateState.error ?? '检查更新失败'
+  return `当前版本 ${appVersion.value} · ${tieRuntimeLabel()}`
+})
 
 const aiModeOptions: { value: AiTaggingMode; label: string }[] = [
   { value: 'cli', label: '本地 CLI（Claude / Codex / Cursor）' },
@@ -483,6 +510,7 @@ onMounted(() => {
   document.addEventListener('click', closeAiModeMenu)
   ensureCodexSourceSelection()
   void refreshCodexStatus()
+  void refreshAppVersion()
 })
 onBeforeUnmount(() => {
   document.removeEventListener('click', closeAiModeMenu)
@@ -658,6 +686,32 @@ function openConflictPage(pageId: string) {
   store.openPage(pageId)
   emit('close')
 }
+
+async function refreshAppVersion() {
+  if (!isDesktop) {
+    appVersion.value = tieRuntimeLabel('browser')
+    return
+  }
+  try {
+    appVersion.value = await getVersion()
+  } catch {
+    appVersion.value = tieRuntimeLabel(tieRuntimeKind())
+  }
+}
+
+async function checkAppUpdate() {
+  if (!canUseAppUpdater()) return
+  checkingAppUpdate.value = true
+  try {
+    await checkForAppUpdate()
+  } finally {
+    checkingAppUpdate.value = false
+  }
+}
+
+async function installAppUpdate() {
+  await downloadAndInstallAppUpdate()
+}
 </script>
 
 <template>
@@ -685,6 +739,30 @@ function openConflictPage(pageId: string) {
             :aria-pressed="themeMode === option.value"
             @click="onThemeModeChange(option.value)"
           >{{ option.label }}</button>
+        </div>
+      </div>
+
+      <div class="theme-mode-row app-update-row">
+        <span>
+          <strong>应用更新</strong>
+          <small>{{ appUpdateSummary }}</small>
+        </span>
+        <div v-if="canUseAppUpdater()" class="app-update-actions-inline">
+          <button
+            type="button"
+            :disabled="checkingAppUpdate || appUpdateState.phase === 'downloading' || appUpdateState.phase === 'installing'"
+            @click="checkAppUpdate"
+          >
+            {{ checkingAppUpdate ? '检查中…' : '检查更新' }}
+          </button>
+          <button
+            v-if="appUpdateState.phase === 'available'"
+            type="button"
+            class="primary"
+            @click="installAppUpdate"
+          >
+            立即更新
+          </button>
         </div>
       </div>
 

@@ -56,6 +56,8 @@ jobs:
         run: npm run tauri:build:linux
         env:
           CI: true
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Collect Linux artifacts
         shell: bash
@@ -65,7 +67,10 @@ jobs:
           shopt -s nullglob
           files=(
             src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/deb/*.deb.sig
             src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/rpm/*.rpm.sig
+            src-tauri/target/release/bundle/latest.json
           )
           if [ ${#files[@]} -eq 0 ]; then
             echo "No Linux bundles found under src-tauri/target/release/bundle/"
@@ -105,6 +110,8 @@ jobs:
         run: npm run tauri:build:windows
         env:
           CI: true
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Collect Windows artifacts
         shell: bash
@@ -114,7 +121,10 @@ jobs:
           shopt -s nullglob
           files=(
             src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/msi/*.msi.sig
             src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.exe.sig
+            src-tauri/target/release/bundle/latest.json
           )
           if [ ${#files[@]} -eq 0 ]; then
             echo "No Windows bundles found under src-tauri/target/release/bundle/"
@@ -141,19 +151,25 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: tie-linux
-          path: dist
+          path: dist/linux
 
       - name: Download Windows artifacts
         uses: actions/download-artifact@v4
         with:
           name: tie-windows
-          path: dist
+          path: dist/windows
 
-      - name: List release files
+      - name: Merge updater manifest
+        shell: bash
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          mkdir -p dist
+          cp dist/linux/* dist/ 2>/dev/null || true
+          cp dist/windows/* dist/ 2>/dev/null || true
+          python3 scripts/merge-updater-manifest.py dist/linux/latest.json dist/windows/latest.json dist/latest.json
           ls -la dist
-          test -n "$(find dist -maxdepth 1 -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \) | head -1)"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -165,8 +181,13 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/*.deb
+            dist/*.deb.sig
             dist/*.rpm
+            dist/*.rpm.sig
             dist/*.msi
+            dist/*.msi.sig
             dist/*.exe
+            dist/*.exe.sig
+            dist/latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

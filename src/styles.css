@@ -399,6 +399,59 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   background: var(--accent-soft);
   font-weight: 600;
 }
+.app-update-row .app-update-actions-inline {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+.app-update-row .app-update-actions-inline button {
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.app-update-row .app-update-actions-inline button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.app-update-row .app-update-actions-inline button.primary {
+  color: #fff;
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.app-update-dialog .app-update-notes {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.app-update-dialog .app-update-progress {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 11px;
+}
+.app-update-dialog .app-update-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.app-update-dialog .app-update-actions button {
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 7px 12px;
+  color: var(--text-muted);
+  background: var(--bg-muted);
+  font-size: 12px;
+}
+.app-update-dialog .app-update-actions button.primary {
+  color: #fff;
+  border-color: var(--accent);
+  background: var(--accent);
+}
 .sidebar-storage-trigger:hover { color: var(--text); background: var(--bg-hover); }
 .sidebar-storage-trigger > span { font-size: 12px; font-weight: 560; }
 .sidebar-storage-trigger > small { color: var(--text-faint); font-size: 10px; }

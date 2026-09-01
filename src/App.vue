@@ -12,9 +12,11 @@ import SkillsView from '@/components/SkillsView.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 import BackendConnectionDialog from '@/components/BackendConnectionDialog.vue'
 import StorageSettingsDialog from '@/components/StorageSettingsDialog.vue'
+import AppUpdateDialog from '@/components/AppUpdateDialog.vue'
 import AppIcon from '@/components/AppIcon.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
+import { checkForAppUpdateOnStartup } from '@/services/app-updater'
 
 const PANEL_WIDTHS_KEY = 'tie:panel-widths'
 const SIDEBAR_DEFAULT = 256
@@ -34,6 +36,7 @@ const focusMode = ref(false)
 const mobileContextOpen = ref(false)
 const backendDialogOpen = ref(false)
 const storageSettingsOpen = ref(false)
+const updateDialogOpen = ref(false)
 const sidebarWidth = ref(SIDEBAR_DEFAULT)
 const contextWidth = ref(CONTEXT_DEFAULT)
 const resizingPanel = ref<'sidebar' | 'context' | null>(null)
@@ -177,6 +180,8 @@ onMounted(async () => {
   window.addEventListener('tie:toggle-focus-mode', toggleFocusMode)
   await backend.initialize()
   await store.initialize()
+  const update = await checkForAppUpdateOnStartup()
+  if (update) updateDialogOpen.value = true
 })
 onBeforeUnmount(() => {
   document.body.classList.remove('panel-resizing')
@@ -241,6 +246,7 @@ onBeforeUnmount(() => {
     <CommandPalette v-if="store.showingCommandPalette" />
     <BackendConnectionDialog v-if="backendDialogOpen" @close="backendDialogOpen = false" />
     <StorageSettingsDialog v-if="storageSettingsOpen" @close="storageSettingsOpen = false" @connect-backend="backendDialogOpen = true; storageSettingsOpen = false" />
+    <AppUpdateDialog v-if="updateDialogOpen" @close="updateDialogOpen = false" />
   </div>
   <div v-else class="loading-screen"><AppIcon class="loading-mark" :size="30" /><p>正在打开知识库…</p></div>
 </template>

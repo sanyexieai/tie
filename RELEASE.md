@@ -8,15 +8,48 @@
 
 1. 在 **Ubuntu 22.04** 构建 Linux 安装包（`.deb` / `.rpm`；固定 22.04 以兼容 WebKitGTK 4.1 与较低 glibc）
 2. 在 Windows 构建 Windows 安装包（`.msi` / `.exe` NSIS）
-3. 创建 GitHub Release，并附上上述产物
+3. 创建 GitHub Release，并附上上述产物与 `latest.json`（供桌面端自动更新）
+
+### 自动更新签名
+
+Release 构建会读取 GitHub Secrets 中的 updater 私钥，为安装包生成 `.sig` 并合并 `latest.json`：
+
+| Secret | 说明 |
+|--------|------|
+| `TAURI_SIGNING_PRIVATE_KEY` | `tauri signer generate` 生成的私钥**全文**（或 `TAURI_SIGNING_PRIVATE_KEY_PATH` 指向的文件内容） |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 私钥密码；无密码时可留空 |
+
+本地生成密钥（公钥已写入 `src-tauri/tauri.conf.json`）：
+
+```bash
+CI=true npx tauri signer generate -w ~/.tauri/tie.key -f --ci
+cat ~/.tauri/tie.key   # 复制到 GitHub Secret，勿提交仓库
+```
+
+**私钥丢失后，已安装用户将无法再验证你发布的新版本。**
+
+桌面端启动时会静默检查 `https://github.com/sanyexieai/tie/releases/latest/download/latest.json`；发现新版本会提示，也可在「设置 → 应用更新」手动检查。
 
 示例：
+
+```bash
+# 仅 bump 版本并推送 tag（工作区需干净）
+npm run release -- patch
+
+# 连同当前所有改动一起发布（常用）
+npm run release -- patch --all -m "桌面端自动更新"
+
+# 指定版本号
+npm run release -- 1.0.2 --all
+```
 
 ```bash
 # 确认 package.json / src-tauri/tauri.conf.json / backend/package.json 版本号一致
 git tag v1.0.0
 git push origin v1.0.0
 ```
+
+也可使用 `npm run release -- patch --all` 自动完成版本号同步、提交与 tag 推送。
 
 完成后在仓库 Releases 页下载安装包。CI（`ci.yml`）仍会在普通 push / PR 上跑检查与构建产物。
 
@@ -51,7 +84,7 @@ git push origin v1.0.0
 
 - [ ] `CHANGELOG.md` 已更新 1.0.0 条目
 - [ ] README 安装说明与「已知限制」准确
-- [ ] GitHub Release 附 `.deb` / `.rpm` / `.msi` / `.exe`（NSIS）等对应平台产物
+- [ ] GitHub Release 附 `.deb` / `.rpm` / `.msi` / `.exe`（NSIS）、对应 `.sig` 与 `latest.json`
 - [ ] 版本号一致：`package.json`、`src-tauri/tauri.conf.json`、`backend/package.json`
 
 ## 已知限制（1.0 可接受，需在 Release Notes 写明）
@@ -61,3 +94,4 @@ git push origin v1.0.0
 - 涉及后台源的页面迁移不保留历史版本
 - 浏览器演示模式不支持真实附件存储（需桌面端或连后台）
 - 无多用户协作与细粒度权限
+- 自动更新需 Release 已配置 updater 签名 Secret；开发模式（`tauri:dev`）不会检查更新
