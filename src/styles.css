@@ -615,6 +615,11 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .storage-settings-toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
 .storage-settings-toolbar button { border: 1px solid var(--border-strong); border-radius: 6px; padding: 7px 10px; color: var(--text-muted); background: var(--bg-elevated); font-size: 12px; }
 .storage-settings-toolbar button:hover:not(:disabled) { background: var(--bg-hover); }
+.storage-settings-toolbar button.active {
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+  background: var(--accent-soft);
+}
 .storage-settings-menu { margin: 0; }
 .storage-settings-list { display: grid; gap: 8px; }
 .storage-settings-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: var(--bg-elevated); transition: background .12s ease, box-shadow .12s ease; }
@@ -655,26 +660,6 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   accent-color: var(--accent-strong);
 }
 .minio-config-form label.minio-config-checkbox span { font-size: 11px; color: var(--text-secondary); }
-.ai-tagging-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  width: 100%;
-  margin: 8px 0;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 9px 10px;
-  color: var(--text);
-  background: var(--bg-muted);
-  text-align: left;
-  cursor: pointer;
-}
-.ai-tagging-toggle:hover { background: var(--bg-hover); }
-.ai-tagging-toggle span { display: grid; gap: 2px; min-width: 0; }
-.ai-tagging-toggle strong { font-size: 12px; color: var(--text); }
-.ai-tagging-toggle small { color: var(--text-muted); font-size: 10px; }
-.ai-tagging-toggle em { flex: 0 0 auto; color: var(--accent-strong); font-size: 11px; font-style: normal; }
 .ai-tagging-form { margin-top: 0; }
 .codex-mcp-form .codex-mcp-path {
   display: block;
@@ -685,6 +670,71 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   white-space: nowrap;
 }
 .codex-mcp-form .backend-error { margin: 0; }
+.codex-mcp-clients {
+  display: grid;
+  gap: 6px;
+}
+.codex-mcp-clients .minio-config-checkbox span {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+.codex-mcp-clients .minio-config-checkbox em {
+  margin-left: 6px;
+  color: var(--accent-strong);
+  font-style: normal;
+  font-size: 10px;
+}
+.codex-mcp-clients .minio-config-checkbox em.warn {
+  color: var(--text-muted);
+}
+.codex-mcp-clients .minio-config-checkbox small {
+  color: var(--text-muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.ai-cli-scan-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ai-cli-scan-row small {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.ai-cli-scan-row button {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 5px;
+  padding: 5px 8px;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  font-size: 10px;
+}
+.ai-cli-path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  align-items: center;
+}
+.ai-cli-path-row button {
+  border: 0;
+  border-radius: 5px;
+  padding: 6px 8px;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.ai-cli-path-row button:last-child {
+  color: var(--text-muted);
+  background: transparent;
+}
+.ai-cli-path-row button:last-child:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
 .ai-mode-select { position: relative; }
 .ai-mode-select-trigger {
   display: flex;

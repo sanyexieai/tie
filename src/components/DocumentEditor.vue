@@ -5,7 +5,7 @@ import { useBackendStore } from '@/stores/backend'
 import type { Page, PageRevision } from '@/types'
 import TiptapEditor from '@/components/TiptapEditor.vue'
 import DocumentMeta from '@/components/DocumentMeta.vue'
-import { loadAiTaggingConfig, suggestTagsWithAi } from '@/services/ai-tagging'
+import { aiTaggingReady, loadAiTaggingConfig, suggestTagsWithAi } from '@/services/ai-tagging'
 import { isBackendRemoteSourceId } from '@/services/backend'
 import { isS3SourceId } from '@/services/s3'
 import { suggestTags, type TagSuggestion } from '@/services/tagging'
@@ -437,8 +437,11 @@ async function generateTagSuggestions() {
       workspaceTags: store.tagIndex.map((tag) => tag.name),
     }
     const aiConfig = loadAiTaggingConfig()
-    const aiSuggestions = aiConfig.enabled && aiConfig.endpoint
-      ? await suggestTagsWithAi(aiConfig, input, backend.profile).catch(() => [])
+    const aiSuggestions = aiTaggingReady(aiConfig)
+      ? await suggestTagsWithAi(aiConfig, input, backend.profile).catch((error) => {
+        console.warn('AI 标签提取失败', error)
+        return []
+      })
       : []
     const localSuggestions = suggestTags(input)
     const merged = new Map<string, TagSuggestion>()

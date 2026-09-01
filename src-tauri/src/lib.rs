@@ -11,6 +11,7 @@ use futures_util::StreamExt;
 use minio::s3::{builders::ObjectContent, creds::StaticProvider, response::BucketExistsResponse, types::{BucketName, S3Api, ToStream}, MinioClient, MinioClientBuilder};
 use tauri::Manager;
 
+mod ai_cli;
 mod codex_mcp;
 mod skills;
 
@@ -1682,6 +1683,10 @@ pub fn run() {
             export_page_markdown,
             export_page_markdown_bundle,
             permanently_delete_pages,
+            ai_cli::ai_cli_status,
+            ai_cli::ai_cli_suggest_tags,
+            codex_mcp::agent_mcp_status,
+            codex_mcp::configure_agent_mcp,
             codex_mcp::codex_mcp_status,
             codex_mcp::configure_codex_mcp,
             skills::list_skill_connections,

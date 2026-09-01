@@ -1,6 +1,11 @@
+import { invoke } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
 import type { TagSuggestion } from '@/services/tagging'
 
-export type AiTaggingMode = 'tie' | 'openai'
+export type AiTaggingMode = 'tie' | 'openai' | 'cli'
+export type AiCliClientId = 'claude' | 'codex' | 'cursor'
+
+export type AiCliPathMap = Record<AiCliClientId, string>
 
 export interface AiTaggingConfig {
   enabled: boolean
@@ -8,26 +13,80 @@ export interface AiTaggingConfig {
   endpoint: string
   apiKey?: string
   model?: string
+  cliClient: AiCliClientId
+  cliPaths: AiCliPathMap
+}
+
+export interface AiCliClientStatus {
+  id: AiCliClientId | string
+  label: string
+  available: boolean
+  connected: boolean
+  path: string | null
+  version: string | null
+  detail: string | null
+  custom: boolean
+}
+
+export interface AiCliStatus {
+  clients: AiCliClientStatus[]
+  searchedAt: string
 }
 
 const storageKey = 'tie-ai-tagging-v1'
+
+export const AI_CLI_CLIENT_OPTIONS: { id: AiCliClientId; label: string; bin: string }[] = [
+  { id: 'claude', label: 'Claude Code', bin: 'claude' },
+  { id: 'codex', label: 'Codex', bin: 'codex' },
+  { id: 'cursor', label: 'Cursor', bin: 'agent' },
+]
 
 function normalizeEndpoint(value: string) {
   return value.trim().replace(/\/+$/, '')
 }
 
+function normalizeCliClient(value: unknown): AiCliClientId {
+  if (value === 'codex' || value === 'cursor' || value === 'claude') return value
+  return 'claude'
+}
+
+function emptyCliPaths(): AiCliPathMap {
+  return { claude: '', codex: '', cursor: '' }
+}
+
+function normalizeCliPaths(value: unknown): AiCliPathMap {
+  const out = emptyCliPaths()
+  if (!value || typeof value !== 'object') return out
+  const record = value as Record<string, unknown>
+  for (const id of ['claude', 'codex', 'cursor'] as const) {
+    if (typeof record[id] === 'string') out[id] = record[id].trim()
+  }
+  return out
+}
+
 export function loadAiTaggingConfig(): AiTaggingConfig {
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey) ?? '') as Partial<AiTaggingConfig>
+    const mode: AiTaggingMode = saved.mode === 'openai' || saved.mode === 'cli' ? saved.mode : 'tie'
     return {
       enabled: Boolean(saved.enabled),
-      mode: saved.mode === 'openai' ? 'openai' : 'tie',
+      mode,
       endpoint: normalizeEndpoint(typeof saved.endpoint === 'string' ? saved.endpoint : ''),
       apiKey: typeof saved.apiKey === 'string' ? saved.apiKey : undefined,
-      model: typeof saved.model === 'string' ? saved.model : 'gpt-4o-mini',
+      model: typeof saved.model === 'string' ? saved.model : (mode === 'cli' ? '' : 'gpt-4o-mini'),
+      cliClient: normalizeCliClient(saved.cliClient),
+      cliPaths: normalizeCliPaths(saved.cliPaths),
     }
   } catch {
-    return { enabled: false, mode: 'tie', endpoint: '', apiKey: undefined, model: 'gpt-4o-mini' }
+    return {
+      enabled: false,
+      mode: 'tie',
+      endpoint: '',
+      apiKey: undefined,
+      model: 'gpt-4o-mini',
+      cliClient: 'claude',
+      cliPaths: emptyCliPaths(),
+    }
   }
 }
 
@@ -37,14 +96,27 @@ export function saveAiTaggingConfig(config: AiTaggingConfig) {
     mode: config.mode,
     endpoint: normalizeEndpoint(config.endpoint),
     apiKey: config.apiKey?.trim() || undefined,
-    model: config.model?.trim() || 'gpt-4o-mini',
+    model: config.model?.trim() || undefined,
+    cliClient: normalizeCliClient(config.cliClient),
+    cliPaths: normalizeCliPaths(config.cliPaths),
   }))
+}
+
+export function aiTaggingReady(config: AiTaggingConfig) {
+  if (!config.enabled) return false
+  if (config.mode === 'cli') return true
+  return Boolean(config.endpoint.trim())
 }
 
 function normalizeSuggestions(raw: unknown): TagSuggestion[] {
   if (!raw || typeof raw !== 'object') return []
   const tags = (raw as { tags?: unknown }).tags
-  if (!Array.isArray(tags)) return []
+  if (!Array.isArray(tags)) {
+    if (Array.isArray(raw)) {
+      return normalizeSuggestions({ tags: raw })
+    }
+    return []
+  }
   return tags
     .map((item) => {
       if (!item || typeof item !== 'object') return null
@@ -121,12 +193,57 @@ async function suggestTagsViaOpenAI(
   }
 }
 
+export async function fetchAiCliStatus(paths?: Partial<AiCliPathMap>): Promise<AiCliStatus | null> {
+  if (!('__TAURI_INTERNALS__' in window)) return null
+  const normalized = normalizeCliPaths(paths)
+  return invoke<AiCliStatus>('ai_cli_status', {
+    paths: {
+      claude: normalized.claude || null,
+      codex: normalized.codex || null,
+      cursor: normalized.cursor || null,
+    },
+  })
+}
+
+export async function pickAiCliBinary(title = '选择 CLI 可执行文件'): Promise<string | null> {
+  if (!('__TAURI_INTERNALS__' in window)) return null
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    title,
+  })
+  return typeof selected === 'string' ? selected : null
+}
+
+async function suggestTagsViaCli(
+  config: AiTaggingConfig,
+  input: { title: string; markdown: string; existingTags: string[]; workspaceTags: string[] },
+) {
+  if (!('__TAURI_INTERNALS__' in window)) {
+    throw new Error('本地 CLI 模式仅支持桌面端')
+  }
+  const client = config.cliClient || 'claude'
+  const tags = await invoke<TagSuggestion[]>('ai_cli_suggest_tags', {
+    client,
+    input: {
+      title: input.title,
+      markdown: input.markdown,
+      existingTags: input.existingTags,
+      workspaceTags: input.workspaceTags,
+    },
+    model: config.model?.trim() || null,
+    customPath: config.cliPaths?.[client]?.trim() || null,
+  })
+  return normalizeSuggestions({ tags })
+}
+
 export async function suggestTagsWithAi(
   config: AiTaggingConfig,
   input: { title: string; markdown: string; existingTags: string[]; workspaceTags: string[] },
   profile?: { endpoint: string; accessToken: string | null },
 ): Promise<TagSuggestion[]> {
-  if (!config.enabled || !config.endpoint) return []
+  if (!aiTaggingReady(config)) return []
+  if (config.mode === 'cli') return suggestTagsViaCli(config, input)
   if (config.mode === 'openai') return suggestTagsViaOpenAI(config, input)
   return suggestTagsViaTieBackend(config, input, profile)
 }

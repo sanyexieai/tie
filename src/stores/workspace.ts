@@ -280,25 +280,29 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
+  async function applyWorkspaceReload() {
+    const { snapshot, syncResults } = await workspaceService.loadWithSync(pages.value)
+    workspace.value = snapshot.workspace
+    pages.value = snapshot.pages
+    applySyncResults(syncResults)
+    const availablePageIds = new Set(snapshot.pages.filter((page) => !page.deletedAt).map((page) => page.id))
+    favoritePageIds.value = favoritePageIds.value.filter((pageId) => availablePageIds.has(pageId))
+    recentPageIds.value = recentPageIds.value.filter((pageId) => availablePageIds.has(pageId))
+    collapsedPageIds.value = collapsedPageIds.value.filter((pageId) => availablePageIds.has(pageId))
+    if (!activePageId.value || !availablePageIds.has(activePageId.value)) {
+      activePageId.value = snapshot.pages.find((page) => !page.deletedAt)?.id ?? null
+    }
+    syncStorageSourceOrder()
+    await reconcileChildPageLinksFromParentIds()
+    persistPreferences()
+    return true
+  }
+
   async function reloadWorkspace() {
     if (reloading.value) return false
     reloading.value = true
     try {
-      const { snapshot, syncResults } = await workspaceService.loadWithSync(pages.value)
-      workspace.value = snapshot.workspace
-      pages.value = snapshot.pages
-      applySyncResults(syncResults)
-      const availablePageIds = new Set(snapshot.pages.filter((page) => !page.deletedAt).map((page) => page.id))
-      favoritePageIds.value = favoritePageIds.value.filter((pageId) => availablePageIds.has(pageId))
-      recentPageIds.value = recentPageIds.value.filter((pageId) => availablePageIds.has(pageId))
-      collapsedPageIds.value = collapsedPageIds.value.filter((pageId) => availablePageIds.has(pageId))
-      if (!activePageId.value || !availablePageIds.has(activePageId.value)) {
-        activePageId.value = snapshot.pages.find((page) => !page.deletedAt)?.id ?? null
-      }
-      syncStorageSourceOrder()
-      await reconcileChildPageLinksFromParentIds()
-      persistPreferences()
-      return true
+      return await applyWorkspaceReload()
     } finally { reloading.value = false }
   }
 
@@ -320,13 +324,20 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function syncRemoteSources() {
-    await workspaceService.flushSyncQueue()
-    if (backend.connected) {
-      const connected = await backend.sync()
-      if (!connected) throw new Error(backend.error || '后台同步失败')
+    if (reloading.value) return false
+    reloading.value = true
+    try {
+      await workspaceService.flushSyncQueue()
+      if (backend.connected) {
+        const connected = await backend.sync()
+        if (!connected) throw new Error(backend.error || '后台同步失败')
+      }
+      const ok = await applyWorkspaceReload()
+      syncQueueVersion.value += 1
+      return ok
+    } finally {
+      reloading.value = false
     }
-    await reloadWorkspace()
-    syncQueueVersion.value += 1
   }
 
   async function flushOfflineQueue() {

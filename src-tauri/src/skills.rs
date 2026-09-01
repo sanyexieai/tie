@@ -231,6 +231,8 @@ fn common_scan_roots(app: &AppHandle, workspace_hint: Option<&str>) -> Vec<PathB
     if let Ok(home) = home_dir(app) {
         roots.push(home.join(".agents").join("skills"));
         roots.push(home.join(".codex").join("skills"));
+        roots.push(home.join(".claude").join("skills"));
+        roots.push(home.join(".cursor").join("skills"));
         roots.push(home.join(".cursor").join("skills-cursor"));
     }
     if let Some(workspace) = workspace_hint {
@@ -253,48 +255,97 @@ fn same_path(left: &str, right: &str) -> bool {
     left_path == right_path
 }
 
+fn mirror_skill_roots(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
+    let home = home_dir(app)?;
+    Ok(vec![
+        user_skills_root(app)?,
+        home.join(".claude").join("skills"),
+        home.join(".cursor").join("skills"),
+    ])
+}
+
+fn ensure_skill_mirror(skill_dir: &Path, skill_path: &Path, target: &Path) -> Result<(), String> {
+    if canonicalize_path(skill_dir) == canonicalize_path(target) {
+        return Ok(());
+    }
+
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    if target.exists() || target.is_symlink() {
+        let existing_skill = target.join("SKILL.md");
+        if existing_skill.is_file() && same_path(&existing_skill.to_string_lossy(), &skill_path.to_string_lossy()) {
+            return Ok(());
+        }
+        // Best-effort: refresh copied SKILL.md when the folder already exists.
+        if existing_skill.is_file() && skill_path.is_file() && !target.is_symlink() {
+            let _ = fs::copy(skill_path, &existing_skill);
+        }
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(skill_dir, target).map_err(|error| {
+            format!(
+                "无法创建技能符号链接（{} → {}）：{error}",
+                skill_dir.display(),
+                target.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(target).map_err(|error| error.to_string())?;
+        let dest = target.join("SKILL.md");
+        fs::copy(skill_path, &dest).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
+
 fn ensure_codex_link(app: &AppHandle, name: &str, skill_path: &Path) -> Result<Option<PathBuf>, String> {
     let skill_dir = skill_path
         .parent()
         .ok_or_else(|| "无效的 Skill 路径".to_owned())?;
     let agents_root = user_skills_root(app)?;
-    let target = agents_root.join(name);
+    let primary = agents_root.join(name);
 
     // Already living under ~/.agents/skills/<name>
-    if canonicalize_path(skill_dir) == canonicalize_path(&target) {
+    if canonicalize_path(skill_dir) == canonicalize_path(&primary) {
+        for root in mirror_skill_roots(app)? {
+            if root == agents_root {
+                continue;
+            }
+            let _ = ensure_skill_mirror(skill_dir, skill_path, &root.join(name));
+        }
         return Ok(None);
     }
 
     fs::create_dir_all(&agents_root).map_err(|error| error.to_string())?;
 
-    if target.exists() || target.is_symlink() {
-        // If existing link/file already points at this skill, reuse it.
-        let existing_skill = target.join("SKILL.md");
-        if existing_skill.is_file() && same_path(&existing_skill.to_string_lossy(), &skill_path.to_string_lossy()) {
-            return Ok(Some(target));
+    if primary.exists() || primary.is_symlink() {
+        let existing_skill = primary.join("SKILL.md");
+        if !(existing_skill.is_file() && same_path(&existing_skill.to_string_lossy(), &skill_path.to_string_lossy())) {
+            return Err(format!(
+                "技能目录已存在且指向其他内容：{}。请先断开或改名。",
+                primary.display()
+            ));
         }
-        return Err(format!(
-            "Codex 技能目录已存在且指向其他内容：{}。请先断开或改名。",
-            target.display()
-        ));
+    } else {
+        ensure_skill_mirror(skill_dir, skill_path, &primary)?;
     }
 
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(skill_dir, &target).map_err(|error| {
-            format!("无法创建 Codex 符号链接（{} → {}）：{error}", skill_dir.display(), target.display())
-        })?;
-        return Ok(Some(target));
+    for root in mirror_skill_roots(app)? {
+        if root == agents_root {
+            continue;
+        }
+        let _ = ensure_skill_mirror(skill_dir, skill_path, &root.join(name));
     }
 
-    #[cfg(not(unix))]
-    {
-        // Windows / others: copy SKILL.md into ~/.agents/skills/<name>/
-        fs::create_dir_all(&target).map_err(|error| error.to_string())?;
-        let dest = target.join("SKILL.md");
-        fs::copy(skill_path, &dest).map_err(|error| error.to_string())?;
-        Ok(Some(target))
-    }
+    Ok(Some(primary))
 }
 
 fn remove_codex_link(path: &Path) -> Result<(), String> {
@@ -475,13 +526,24 @@ pub fn disconnect_skill(app: AppHandle, connection_id: String) -> Result<Vec<Ski
         return Ok(registry.connections);
     };
     let removed = registry.connections.remove(index);
-    // Only remove the Codex link Tie created. Never delete the original skill_path.
+    // Only remove mirrors Tie created. Never delete the original skill_path.
+    let original_dir = Path::new(&removed.skill_path).parent().map(canonicalize_path);
+    let mut candidates = Vec::new();
     if let Some(link) = removed.codex_link_path.as_deref() {
-        let link_path = Path::new(link);
-        let original_dir = Path::new(&removed.skill_path).parent().map(canonicalize_path);
-        if original_dir != Some(canonicalize_path(link_path)) {
-            let _ = remove_codex_link(link_path);
+        candidates.push(PathBuf::from(link));
+    }
+    if let Ok(roots) = mirror_skill_roots(&app) {
+        for root in roots {
+            candidates.push(root.join(&removed.name));
         }
+    }
+    candidates.sort();
+    candidates.dedup();
+    for link_path in candidates {
+        if original_dir == Some(canonicalize_path(&link_path)) {
+            continue;
+        }
+        let _ = remove_codex_link(&link_path);
     }
     save_registry(&app, &registry)?;
     Ok(registry.connections)

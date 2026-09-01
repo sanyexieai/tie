@@ -29,7 +29,7 @@ watch(() => store.initialized, (ready) => {
 async function createTopLevel() { await store.createPage(null) }
 async function reloadPages() {
   if (store.reloading) return
-  await store.reloadWorkspace()
+  await store.syncRemoteSources()
 }
 async function createChild(parentId: string) { await store.createChildPage(parentId) }
 async function duplicate(pageId: string) { await store.duplicatePage(pageId) }
@@ -89,8 +89,8 @@ function openFirstInbox() {
       <div class="sidebar-section-actions">
         <button
           type="button"
-          title="从存储刷新页面树"
-          aria-label="从存储刷新页面树"
+          title="同步并载入全部存储源"
+          aria-label="同步并载入全部存储源"
           :disabled="store.reloading"
           @click="reloadPages"
         >{{ store.reloading ? '…' : '↻' }}</button>

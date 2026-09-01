@@ -6,13 +6,25 @@ import type { StorageKind, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
-import { loadAiTaggingConfig, saveAiTaggingConfig, type AiTaggingConfig, type AiTaggingMode } from '@/services/ai-tagging'
 import {
-  configureCodexMcp,
-  fetchCodexMcpStatus,
+  AI_CLI_CLIENT_OPTIONS,
+  fetchAiCliStatus,
+  loadAiTaggingConfig,
+  pickAiCliBinary,
+  saveAiTaggingConfig,
+  type AiCliClientId,
+  type AiCliStatus,
+  type AiTaggingConfig,
+  type AiTaggingMode,
+} from '@/services/ai-tagging'
+import {
+  AGENT_CLIENT_OPTIONS,
+  configureAgentMcp,
+  fetchAgentMcpStatus,
   loadCodexMcpPreference,
   saveCodexMcpPreference,
-  type CodexMcpStatus,
+  type AgentClientId,
+  type AgentMcpStatus,
 } from '@/services/codex-mcp'
 import { isBackendSourceId, isBackendManagedS3SourceId, defaultBackendEndpoint } from '@/services/backend'
 import { isS3SourceId, providerForS3Source } from '@/services/s3'
@@ -64,23 +76,102 @@ const aiConfig = ref<AiTaggingConfig>(loadAiTaggingConfig())
 const aiNotice = ref('')
 const aiModeOpen = ref(false)
 const aiFormOpen = ref(false)
+const aiCliStatus = ref<AiCliStatus | null>(null)
+const aiCliScanning = ref(false)
+const aiCliClientOptions = AI_CLI_CLIENT_OPTIONS
 const codexFormOpen = ref(false)
-const codexStatus = ref<CodexMcpStatus | null>(null)
-const codexSourceId = ref<string | null>(loadCodexMcpPreference().sourceId)
+const agentMcpStatus = ref<AgentMcpStatus | null>(null)
+const initialPref = loadCodexMcpPreference()
+const codexSourceId = ref<string | null>(initialPref.sourceId)
+const selectedClients = ref<AgentClientId[]>(initialPref.clients ?? ['codex', 'cursor', 'claude'])
 const codexBusy = ref(false)
 const codexError = ref('')
 const codexNotice = ref('')
+const agentClientOptions = AGENT_CLIENT_OPTIONS
 
 const aiModeOptions: { value: AiTaggingMode; label: string }[] = [
+  { value: 'cli', label: '本地 CLI（Claude / Codex / Cursor）' },
   { value: 'tie', label: 'Tie 后台（/api/v1/ai/suggest-tags）' },
   { value: 'openai', label: 'OpenAI 兼容 API' },
 ]
 
 const aiModeLabel = computed(() => aiModeOptions.find((item) => item.value === aiConfig.value.mode)?.label ?? aiModeOptions[0].label)
+const selectedAiCliLabel = computed(() => (
+  AI_CLI_CLIENT_OPTIONS.find((item) => item.id === aiConfig.value.cliClient)?.label ?? 'Claude Code'
+))
 const aiStatusSummary = computed(() => {
   if (!aiConfig.value.enabled) return '未启用 · 点击配置'
-  return aiConfig.value.mode === 'openai' ? '已启用 · OpenAI 兼容' : '已启用 · Tie 后台'
+  if (aiConfig.value.mode === 'cli') return `已启用 · ${selectedAiCliLabel.value}`
+  if (aiConfig.value.mode === 'openai') return '已启用 · OpenAI 兼容'
+  return '已启用 · Tie 后台'
 })
+
+function aiCliClientStatus(id: AiCliClientId) {
+  return aiCliStatus.value?.clients.find((item) => item.id === id) ?? null
+}
+
+function aiCliConnected(id: AiCliClientId) {
+  return aiCliClientStatus(id)?.connected ?? false
+}
+
+function aiCliBadge(id: AiCliClientId) {
+  if (aiCliScanning.value) return '检测中…'
+  const status = aiCliClientStatus(id)
+  if (!aiCliStatus.value || !status) return '待检测'
+  const prefix = status.custom ? '自定义 · ' : ''
+  if (status.connected) return `${prefix}${status.version ? `已连通 · ${status.version}` : '已连通'}`
+  if (status.available) return `${prefix}已找到 · 未连通`
+  return status.custom ? '自定义路径无效' : `未找到 ${AI_CLI_CLIENT_OPTIONS.find((item) => item.id === id)?.bin ?? id}`
+}
+
+const selectedAiCliPath = computed({
+  get: () => aiConfig.value.cliPaths[aiConfig.value.cliClient] ?? '',
+  set: (value: string) => {
+    aiConfig.value.cliPaths = {
+      ...aiConfig.value.cliPaths,
+      [aiConfig.value.cliClient]: value,
+    }
+  },
+})
+
+async function refreshAiCliStatus() {
+  if (!isDesktop) {
+    aiCliStatus.value = null
+    return
+  }
+  aiCliScanning.value = true
+  try {
+    aiCliStatus.value = await fetchAiCliStatus(aiConfig.value.cliPaths)
+    const currentCustom = Boolean(aiConfig.value.cliPaths[aiConfig.value.cliClient]?.trim())
+    if (!currentCustom && !aiCliConnected(aiConfig.value.cliClient)) {
+      const preferred = aiCliStatus.value?.clients.find((item) => item.connected)
+        ?? aiCliStatus.value?.clients.find((item) => item.available)
+      if (preferred && (preferred.id === 'claude' || preferred.id === 'codex' || preferred.id === 'cursor')) {
+        aiConfig.value.cliClient = preferred.id
+      }
+    }
+  } catch {
+    aiCliStatus.value = null
+  } finally {
+    aiCliScanning.value = false
+  }
+}
+
+async function browseAiCliPath() {
+  const selected = await pickAiCliBinary(`选择 ${selectedAiCliLabel.value} 可执行文件`)
+  if (!selected) return
+  selectedAiCliPath.value = selected
+  await refreshAiCliStatus()
+}
+
+function clearAiCliPath() {
+  selectedAiCliPath.value = ''
+  void refreshAiCliStatus()
+}
+
+function onAiCliPathChange() {
+  void refreshAiCliStatus()
+}
 
 const localSources = computed(() => store.workspace?.sources ?? [])
 const orderedSources = computed(() => store.allSources)
@@ -108,27 +199,38 @@ const codexSourceOptions = computed(() => {
 })
 const codexStatusSummary = computed(() => {
   if (!isDesktop) return '仅桌面端可用'
-  if (!codexStatus.value?.nodeAvailable) return '需要本机 Node.js'
-  if (codexStatus.value?.configured) {
-    const path = codexStatus.value.workspacePath
+  if (agentMcpStatus.value && !agentMcpStatus.value.nodeAvailable) return '需要本机 Node.js'
+  const configured = agentMcpStatus.value?.clients.filter((item) => item.configured) ?? []
+  if (configured.length) {
+    const labels = configured.map((item) => item.label).join(' · ')
+    const path = configured.find((item) => item.workspacePath)?.workspacePath
     const matched = path ? fileMcpSources.value.find((source) => source.path === path) : null
-    return matched ? `已接入 · ${matched.name}` : (path ? `已接入 · ${path}` : '已接入')
+    return matched ? `已接入 ${labels} · ${matched.name}` : `已接入 ${labels}`
   }
   return '未接入 · 点击配置'
 })
 
+const anySelectedConfigured = computed(() => {
+  const selected = new Set(selectedClients.value)
+  return (agentMcpStatus.value?.clients ?? []).some((item) => selected.has(item.id as AgentClientId) && item.configured)
+})
+
+function persistAgentPreference() {
+  saveCodexMcpPreference({ sourceId: codexSourceId.value, clients: selectedClients.value })
+}
+
 function ensureCodexSourceSelection() {
   if (codexSourceId.value && fileMcpSources.value.some((source) => source.id === codexSourceId.value)) return
   codexSourceId.value = defaultMcpSourceId.value
-  saveCodexMcpPreference({ sourceId: codexSourceId.value })
+  persistAgentPreference()
 }
 
 async function refreshCodexStatus() {
   if (!isDesktop) return
   try {
-    codexStatus.value = await fetchCodexMcpStatus()
+    agentMcpStatus.value = await fetchAgentMcpStatus()
   } catch {
-    codexStatus.value = null
+    agentMcpStatus.value = null
   }
 }
 
@@ -141,9 +243,27 @@ function toggleCodexForm() {
 }
 
 function onCodexSourceChange() {
-  saveCodexMcpPreference({ sourceId: codexSourceId.value })
+  persistAgentPreference()
   codexError.value = ''
   codexNotice.value = ''
+}
+
+function toggleAgentClient(id: AgentClientId) {
+  const set = new Set(selectedClients.value)
+  if (set.has(id)) {
+    if (set.size === 1) return
+    set.delete(id)
+  } else {
+    set.add(id)
+  }
+  selectedClients.value = AGENT_CLIENT_OPTIONS.map((item) => item.id).filter((item) => set.has(item))
+  persistAgentPreference()
+  codexError.value = ''
+  codexNotice.value = ''
+}
+
+function clientConfigured(id: AgentClientId) {
+  return agentMcpStatus.value?.clients.some((item) => item.id === id && item.configured) ?? false
 }
 
 function openSkillsWorkspace() {
@@ -158,16 +278,21 @@ async function applyCodexMcp() {
     codexError.value = '请选择可用的本地或 SMB 存储源'
     return
   }
+  if (!selectedClients.value.length) {
+    codexError.value = '请至少选择一个客户端'
+    return
+  }
   codexBusy.value = true
   codexError.value = ''
   codexNotice.value = ''
   try {
-    saveCodexMcpPreference({ sourceId: source.id })
-    codexStatus.value = await configureCodexMcp(source.path)
+    persistAgentPreference()
+    agentMcpStatus.value = await configureAgentMcp(source.path, selectedClients.value)
     await store.refreshSkills()
-    codexNotice.value = source.id === defaultMcpSourceId.value
-      ? `已接入 Codex（默认工作区：${source.name}）`
-      : `已接入 Codex（工作区：${source.name}）`
+    const labels = selectedClients.value
+      .map((id) => AGENT_CLIENT_OPTIONS.find((item) => item.id === id)?.label ?? id)
+      .join('、')
+    codexNotice.value = `已接入 ${labels}（工作区：${source.name}）`
     window.setTimeout(() => { codexNotice.value = '' }, 3200)
   } catch (error) {
     codexError.value = error instanceof Error ? error.message : String(error)
@@ -240,7 +365,7 @@ function sourceTitle(source: StorageSource) {
   if (source.kind === 's3' && isBackendManagedS3SourceId(source.id)) return `${source.path}\n后台托管 S3，凭据保存在服务端`
   if (source.kind === 's3') return `${source.path}\nS3 页面以 tie/pages/*.md 保存`
   if (source.kind === 'backend') return `${source.path}\n自定义后台存储源`
-  return `${source.path}\n${source.available === false ? '当前不可访问，请检查挂载后重新载入' : '可用'}`
+  return `${source.path}\n${source.available === false ? '当前不可访问，请检查挂载后同步并载入' : '可用'}`
 }
 
 function canRename(source: StorageSource) {
@@ -300,20 +425,16 @@ async function importMarkdown() {
   try { await store.importMarkdownFiles(); storageMenuOpen.value = false } finally { importingMarkdown.value = false }
 }
 
-async function reloadWorkspace() {
-  if (!window.confirm('从磁盘重新载入全部存储源？尚未保存的编辑内容可能丢失。')) return
-  await store.reloadWorkspace()
-}
-
-async function syncRemoteSources() {
+async function syncAndReload() {
+  if (!window.confirm('同步全部存储源并重新载入？尚未保存的编辑内容可能丢失。')) return
   syncingRemote.value = true
-  try { await store.syncRemoteSources() } catch { /* store / backend 会保留错误 */ }
-  finally { syncingRemote.value = false }
-}
-
-async function flushOfflineQueue() {
-  syncingRemote.value = true
-  try { await store.flushOfflineQueue() } finally { syncingRemote.value = false }
+  try {
+    await store.syncRemoteSources()
+  } catch {
+    /* store / backend 会保留错误 */
+  } finally {
+    syncingRemote.value = false
+  }
 }
 
 function saveAiSettings() {
@@ -326,12 +447,22 @@ function saveAiSettings() {
 
 function toggleAiForm() {
   aiFormOpen.value = !aiFormOpen.value
-  if (!aiFormOpen.value) aiModeOpen.value = false
+  if (!aiFormOpen.value) {
+    aiModeOpen.value = false
+    return
+  }
+  if (aiConfig.value.mode === 'cli') void refreshAiCliStatus()
 }
 
 function setAiMode(mode: AiTaggingMode) {
   aiConfig.value.mode = mode
   aiModeOpen.value = false
+  if (mode === 'cli') void refreshAiCliStatus()
+}
+
+function selectAiCliClient(id: AiCliClientId) {
+  aiConfig.value.cliClient = id
+  void refreshAiCliStatus()
 }
 
 function closeAiModeMenu(event: MouseEvent) {
@@ -348,7 +479,7 @@ onBeforeUnmount(() => document.removeEventListener('click', closeAiModeMenu))
 
 async function syncSource(sourceId: string) {
   if (isBackendSourceId(sourceId)) {
-    await syncRemoteSources()
+    await syncAndReload()
     return
   }
   syncingRemote.value = true
@@ -489,11 +620,34 @@ function openConflictPage(pageId: string) {
       </div>
 
       <div class="storage-settings-toolbar">
-        <button :disabled="store.reloading" @click="reloadWorkspace">{{ store.reloading ? '载入中…' : '↻ 重新载入' }}</button>
-        <button :disabled="syncingRemote || store.reloading" @click="syncRemoteSources">{{ syncingRemote || store.reloading ? '同步中…' : '↻ 同步远程源' }}</button>
-        <button v-if="store.pendingSyncCount > 0" :disabled="syncingRemote" @click="flushOfflineQueue">{{ syncingRemote ? '重试中…' : `↻ 重试离线队列 (${store.pendingSyncCount})` }}</button>
+        <button
+          :disabled="syncingRemote || store.reloading"
+          :title="store.pendingSyncCount > 0 ? `含 ${store.pendingSyncCount} 条待推送的离线变更` : '冲掉离线队列、同步远程并重新载入本地/SMB'"
+          @click="syncAndReload"
+        >
+          {{ syncingRemote || store.reloading
+            ? '同步中…'
+            : (store.pendingSyncCount > 0
+              ? `↻ 同步并载入 (${store.pendingSyncCount})`
+              : '↻ 同步并载入') }}
+        </button>
+        <button
+          type="button"
+          :class="{ active: aiFormOpen }"
+          :aria-expanded="aiFormOpen"
+          :title="aiStatusSummary"
+          @click="toggleAiForm"
+        >AI 标签提取</button>
+        <button
+          v-if="isDesktop"
+          type="button"
+          :class="{ active: codexFormOpen }"
+          :aria-expanded="codexFormOpen"
+          :title="codexStatusSummary"
+          @click="toggleCodexForm"
+        >Agent 知识库</button>
         <button v-if="store.syncConflictsCount > 0" class="storage-conflict-notice" type="button" disabled>{{ store.syncConflictsCount }} 个同步冲突 · 见下方列表</button>
-        <button @click="storageMenuOpen = !storageMenuOpen">+ 添加存储源</button>
+        <button :class="{ active: storageMenuOpen }" @click="storageMenuOpen = !storageMenuOpen">+ 添加存储源</button>
       </div>
 
       <div v-if="store.syncConflictPages.length" class="storage-conflict-list">
@@ -536,21 +690,9 @@ function openConflictPage(pageId: string) {
       </form>
       <p v-if="s3Notice" class="minio-config-notice">{{ s3Notice }}</p>
 
-      <button
-        type="button"
-        class="ai-tagging-toggle"
-        :aria-expanded="aiFormOpen"
-        @click="toggleAiForm"
-      >
-        <span>
-          <strong>AI 标签提取</strong>
-          <small>{{ aiStatusSummary }}</small>
-        </span>
-        <em>{{ aiFormOpen ? '收起' : '配置' }}</em>
-      </button>
-
       <form v-if="aiFormOpen" class="minio-config-form ai-tagging-form" @submit.prevent="saveAiSettings">
-        <small>可选。启用后会先请求外部服务，再与本地启发式结果合并。留空 endpoint 则仅使用本地提取。</small>
+        <strong>AI 标签提取</strong>
+        <small>{{ aiStatusSummary }} · 启用后与本地启发式结果合并。本地 CLI 较慢，但可复用本机已登录的 Agent 订阅。</small>
         <label class="minio-config-checkbox"><input v-model="aiConfig.enabled" type="checkbox" /><span>启用 AI 标签提取</span></label>
         <label>
           <span>模式</span>
@@ -579,10 +721,64 @@ function openConflictPage(pageId: string) {
             </div>
           </div>
         </label>
-        <label>服务地址<input v-model="aiConfig.endpoint" :placeholder="aiConfig.mode === 'openai' ? 'https://api.openai.com/v1' : defaultBackendEndpoint" /></label>
-        <label v-if="aiConfig.mode === 'openai'">模型<input v-model="aiConfig.model" placeholder="gpt-4o-mini" /></label>
-        <label>API Key（可选）<input v-model="aiConfig.apiKey" type="password" autocomplete="off" :placeholder="aiConfig.mode === 'tie' ? '留空则尝试使用后台登录 token' : 'OpenAI 模式必填'" /></label>
-        <small v-if="aiConfig.mode === 'tie'">后台服务可通过环境变量 OPENAI_API_KEY 启用真实 LLM；未配置时使用启发式提取。</small>
+
+        <template v-if="aiConfig.mode === 'cli'">
+          <div class="ai-cli-scan-row">
+            <small>{{ aiCliScanning ? '正在搜索本机 CLI 并检测连通性…' : (aiCliStatus ? '已按自定义路径 / 自动搜索结果检测连通性' : '打开后将自动搜索并检测') }}</small>
+            <button type="button" :disabled="!isDesktop || aiCliScanning" @click="refreshAiCliStatus">
+              {{ aiCliScanning ? '检测中…' : '重新检测' }}
+            </button>
+          </div>
+          <div class="codex-mcp-clients" role="radiogroup" aria-label="本地 CLI">
+            <label
+              v-for="client in aiCliClientOptions"
+              :key="client.id"
+              class="minio-config-checkbox"
+            >
+              <input
+                type="radio"
+                name="ai-cli-client"
+                :checked="aiConfig.cliClient === client.id"
+                :disabled="!isDesktop || aiCliScanning"
+                @change="selectAiCliClient(client.id)"
+              />
+              <span>
+                {{ client.label }}
+                <em :class="{ warn: aiCliStatus && !aiCliConnected(client.id) }">{{ aiCliBadge(client.id) }}</em>
+                <small>
+                  {{ aiCliClientStatus(client.id)?.detail || `${client.bin} · 无头调用` }}
+                  <template v-if="aiCliClientStatus(client.id)?.path"> · {{ aiCliClientStatus(client.id)?.path }}</template>
+                </small>
+              </span>
+            </label>
+          </div>
+          <label>
+            <span>{{ selectedAiCliLabel }} 路径（可选）</span>
+            <div class="ai-cli-path-row">
+              <input
+                v-model="selectedAiCliPath"
+                :placeholder="`留空则自动搜索 ${aiCliClientOptions.find((item) => item.id === aiConfig.cliClient)?.bin}`"
+                :disabled="!isDesktop || aiCliScanning"
+                @change="onAiCliPathChange"
+              />
+              <button type="button" :disabled="!isDesktop || aiCliScanning" @click="browseAiCliPath">浏览</button>
+              <button type="button" :disabled="!isDesktop || aiCliScanning || !selectedAiCliPath" @click="clearAiCliPath">清除</button>
+            </div>
+          </label>
+          <label>模型（可选）<input v-model="aiConfig.model" placeholder="留空则用 CLI 默认模型" /></label>
+          <small v-if="!isDesktop" class="backend-error">本地 CLI 仅桌面端可用。</small>
+          <small v-else-if="aiCliStatus && !aiCliConnected(aiConfig.cliClient)" class="backend-error">
+            {{ aiCliClientStatus(aiConfig.cliClient)?.detail || `当前 ${selectedAiCliLabel} 未连通，请安装/登录或填写自定义路径后重新检测。` }}
+          </small>
+        </template>
+
+        <template v-else>
+          <label>服务地址<input v-model="aiConfig.endpoint" :placeholder="aiConfig.mode === 'openai' ? 'https://api.openai.com/v1' : defaultBackendEndpoint" /></label>
+          <label v-if="aiConfig.mode === 'openai'">模型<input v-model="aiConfig.model" placeholder="gpt-4o-mini" /></label>
+          <label>API Key（可选）<input v-model="aiConfig.apiKey" type="password" autocomplete="off" :placeholder="aiConfig.mode === 'tie' ? '留空则尝试使用后台登录 token' : 'OpenAI 模式必填'" /></label>
+          <small v-if="aiConfig.mode === 'tie'">后台服务可通过环境变量 OPENAI_API_KEY 启用真实 LLM；未配置时使用启发式提取。</small>
+        </template>
+
         <div>
           <button type="button" @click="aiFormOpen = false; aiModeOpen = false">取消</button>
           <button type="submit">保存 AI 设置</button>
@@ -591,22 +787,9 @@ function openConflictPage(pageId: string) {
       </form>
       <p v-if="!aiFormOpen && aiNotice" class="minio-config-notice">{{ aiNotice }}</p>
 
-      <button
-        v-if="isDesktop"
-        type="button"
-        class="ai-tagging-toggle"
-        :aria-expanded="codexFormOpen"
-        @click="toggleCodexForm"
-      >
-        <span>
-          <strong>Codex / Agent 知识库</strong>
-          <small>{{ codexStatusSummary }}</small>
-        </span>
-        <em>{{ codexFormOpen ? '收起' : '配置' }}</em>
-      </button>
-
       <form v-if="isDesktop && codexFormOpen" class="minio-config-form codex-mcp-form" @submit.prevent="applyCodexMcp">
-        <small>把本地/SMB 工作区接入 Codex MCP。Skill 在左侧「Agent Skills」特殊工作区管理；接入时会同步到 Codex。</small>
+        <strong>Agent 知识库</strong>
+        <small>{{ codexStatusSummary }} · 把本地/SMB 工作区接入 Codex / Cursor / Claude Code 的 MCP。Skill 在「Agent Skills」管理；接入时会同步到对应客户端目录。</small>
         <label>
           <span>工作区（存储源）</span>
           <TieSelect
@@ -617,13 +800,32 @@ function openConflictPage(pageId: string) {
           />
         </label>
         <small v-if="selectedMcpSource" class="codex-mcp-path">{{ selectedMcpSource.path }}</small>
-        <small v-if="codexStatus && !codexStatus.nodeAvailable" class="backend-error">未检测到 Node.js，请先安装并确保可在终端运行 node。</small>
+        <div class="codex-mcp-clients" role="group" aria-label="接入客户端">
+          <label
+            v-for="client in agentClientOptions"
+            :key="client.id"
+            class="minio-config-checkbox"
+          >
+            <input
+              type="checkbox"
+              :checked="selectedClients.includes(client.id)"
+              :disabled="codexBusy"
+              @change="toggleAgentClient(client.id)"
+            />
+            <span>
+              {{ client.label }}
+              <em v-if="clientConfigured(client.id)">已接入</em>
+              <small>{{ client.hint }}</small>
+            </span>
+          </label>
+        </div>
+        <small v-if="agentMcpStatus && !agentMcpStatus.nodeAvailable" class="backend-error">未检测到 Node.js，请先安装并确保可在终端运行 node。</small>
         <p v-if="codexError" class="backend-error">{{ codexError }}</p>
         <div>
           <button type="button" :disabled="codexBusy" @click="codexFormOpen = false">取消</button>
           <button type="button" :disabled="!selectedMcpSource" @click="openSkillsWorkspace">管理 Skills</button>
-          <button type="submit" :disabled="codexBusy || !selectedMcpSource || (codexStatus !== null && !codexStatus.nodeAvailable)">
-            {{ codexBusy ? '正在接入…' : (codexStatus?.configured ? '更新接入' : '接入 Codex') }}
+          <button type="submit" :disabled="codexBusy || !selectedMcpSource || !selectedClients.length || (agentMcpStatus !== null && !agentMcpStatus.nodeAvailable)">
+            {{ codexBusy ? '正在接入…' : (anySelectedConfigured ? '更新接入' : '接入所选客户端') }}
           </button>
         </div>
         <p v-if="codexNotice" class="minio-config-notice">{{ codexNotice }}</p>
@@ -645,7 +847,7 @@ function openConflictPage(pageId: string) {
               <strong>Agent Skills</strong>
               <span class="storage-default-badge">特殊工作区</span>
             </div>
-            <small>{{ store.skillConnections.length ? `${store.skillConnections.length} 个已接入 · 点击打开` : '扫描接入 Codex Skills · 点击打开' }}</small>
+            <small>{{ store.skillConnections.length ? `${store.skillConnections.length} 个已接入 · 点击打开` : '扫描接入 Agent Skills · 点击打开' }}</small>
           </div>
         </div>
         <div

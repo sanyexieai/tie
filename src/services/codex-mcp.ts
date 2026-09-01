@@ -1,6 +1,23 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 
+export type AgentClientId = 'codex' | 'cursor' | 'claude'
+
+export interface AgentClientStatus {
+  id: AgentClientId | string
+  label: string
+  configured: boolean
+  workspacePath: string | null
+  configPath: string
+}
+
+export interface AgentMcpStatus {
+  nodeAvailable: boolean
+  serverPath: string | null
+  clients: AgentClientStatus[]
+}
+
+/** @deprecated Prefer AgentMcpStatus */
 export interface CodexMcpStatus {
   configured: boolean
   workspacePath: string | null
@@ -35,29 +52,59 @@ export interface SkillFile {
 }
 
 const prefKey = 'tie-codex-mcp-v1'
+export const AGENT_CLIENT_OPTIONS: { id: AgentClientId; label: string; hint: string }[] = [
+  { id: 'codex', label: 'Codex', hint: '~/.codex/config.toml' },
+  { id: 'cursor', label: 'Cursor', hint: '~/.cursor/mcp.json' },
+  { id: 'claude', label: 'Claude Code', hint: '~/.claude.json' },
+]
 
 export interface CodexMcpPreference {
   sourceId: string | null
+  clients?: AgentClientId[]
+}
+
+function normalizeClients(value: unknown): AgentClientId[] {
+  const allowed = new Set(AGENT_CLIENT_OPTIONS.map((item) => item.id))
+  if (!Array.isArray(value)) return ['codex', 'cursor', 'claude']
+  const selected = value.filter((item): item is AgentClientId => typeof item === 'string' && allowed.has(item as AgentClientId))
+  return selected.length ? Array.from(new Set(selected)) : ['codex', 'cursor', 'claude']
 }
 
 export function loadCodexMcpPreference(): CodexMcpPreference {
   try {
     const saved = JSON.parse(localStorage.getItem(prefKey) ?? '') as Partial<CodexMcpPreference>
-    return { sourceId: typeof saved.sourceId === 'string' ? saved.sourceId : null }
+    return {
+      sourceId: typeof saved.sourceId === 'string' ? saved.sourceId : null,
+      clients: normalizeClients(saved.clients),
+    }
   } catch {
-    return { sourceId: null }
+    return { sourceId: null, clients: ['codex', 'cursor', 'claude'] }
   }
 }
 
 export function saveCodexMcpPreference(pref: CodexMcpPreference) {
-  localStorage.setItem(prefKey, JSON.stringify({ sourceId: pref.sourceId }))
+  localStorage.setItem(prefKey, JSON.stringify({
+    sourceId: pref.sourceId,
+    clients: normalizeClients(pref.clients),
+  }))
 }
 
+export async function fetchAgentMcpStatus(): Promise<AgentMcpStatus | null> {
+  if (!('__TAURI_INTERNALS__' in window)) return null
+  return invoke<AgentMcpStatus>('agent_mcp_status')
+}
+
+export async function configureAgentMcp(workspacePath: string, clients: AgentClientId[]): Promise<AgentMcpStatus> {
+  return invoke<AgentMcpStatus>('configure_agent_mcp', { workspacePath, clients })
+}
+
+/** @deprecated Prefer fetchAgentMcpStatus */
 export async function fetchCodexMcpStatus(): Promise<CodexMcpStatus | null> {
   if (!('__TAURI_INTERNALS__' in window)) return null
   return invoke<CodexMcpStatus>('codex_mcp_status')
 }
 
+/** @deprecated Prefer configureAgentMcp */
 export async function configureCodexMcp(workspacePath: string): Promise<CodexMcpStatus> {
   return invoke<CodexMcpStatus>('configure_codex_mcp', { workspacePath })
 }

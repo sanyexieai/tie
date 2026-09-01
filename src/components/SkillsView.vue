@@ -328,7 +328,7 @@ onBeforeUnmount(() => {
     </header>
 
     <section v-if="store.showingSkillManager || !active" class="skills-manager library-content">
-      <p class="eyebrow">Codex 连接</p>
+      <p class="eyebrow">Agent 连接</p>
       <h1>Agent Skills</h1>
       <p class="library-description">侧栏只显示已接入的 Skill。扫描本地路径后接入；断开不会删除文件。</p>
 

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use serde_json::{json, Map, Value};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -6,6 +7,65 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
+const SERVER_NAME: &str = "tie";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentClient {
+    Codex,
+    Cursor,
+    Claude,
+}
+
+impl AgentClient {
+    fn parse(id: &str) -> Option<Self> {
+        match id.trim().to_ascii_lowercase().as_str() {
+            "codex" => Some(Self::Codex),
+            "cursor" => Some(Self::Cursor),
+            "claude" | "claude-code" | "claudecode" => Some(Self::Claude),
+            _ => None,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Cursor => "cursor",
+            Self::Claude => "claude",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Cursor => "Cursor",
+            Self::Claude => "Claude Code",
+        }
+    }
+
+    fn all() -> [Self; 3] {
+        [Self::Codex, Self::Cursor, Self::Claude]
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentClientStatus {
+    pub id: String,
+    pub label: String,
+    pub configured: bool,
+    pub workspace_path: Option<String>,
+    pub config_path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMcpStatus {
+    pub node_available: bool,
+    pub server_path: Option<String>,
+    pub clients: Vec<AgentClientStatus>,
+}
+
+/// Backward-compatible shape used by older frontend callers.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexMcpStatus {
@@ -24,6 +84,22 @@ fn home_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn codex_config_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(home_dir(app)?.join(".codex").join("config.toml"))
+}
+
+fn cursor_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(home_dir(app)?.join(".cursor").join("mcp.json"))
+}
+
+fn claude_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(home_dir(app)?.join(".claude.json"))
+}
+
+fn config_path_for(app: &AppHandle, client: AgentClient) -> Result<PathBuf, String> {
+    match client {
+        AgentClient::Codex => codex_config_path(app),
+        AgentClient::Cursor => cursor_config_path(app),
+        AgentClient::Claude => claude_config_path(app),
+    }
 }
 
 fn installed_mcp_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -48,7 +124,7 @@ fn escape_toml_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| format!("\"{value}\""))
 }
 
-fn parse_configured_workspace(config: &str) -> Option<String> {
+fn parse_configured_workspace_toml(config: &str) -> Option<String> {
     let mut in_env = false;
     for line in config.lines() {
         let trimmed = line.trim();
@@ -70,6 +146,18 @@ fn parse_configured_workspace(config: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn parse_configured_workspace_json(config: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(config).ok()?;
+    let env = value
+        .get("mcpServers")?
+        .get(SERVER_NAME)?
+        .get("env")?;
+    env.get("TIE_WORKSPACE")
+        .and_then(|item| item.as_str())
+        .filter(|item| !item.is_empty())
+        .map(|item| item.to_owned())
 }
 
 fn strip_mcp_server_block(config: &str) -> String {
@@ -113,6 +201,113 @@ fn build_mcp_block(server_path: &Path, workspace_path: &Path) -> String {
         escape_toml_string(&server_path.to_string_lossy()),
         escape_toml_string(&workspace_path.to_string_lossy())
     )
+}
+
+fn mcp_server_json(server_path: &Path, workspace_path: &Path, with_type: bool) -> Value {
+    let mut entry = Map::new();
+    if with_type {
+        entry.insert("type".into(), json!("stdio"));
+    }
+    entry.insert("command".into(), json!("node"));
+    entry.insert(
+        "args".into(),
+        json!([server_path.to_string_lossy().to_string()]),
+    );
+    entry.insert(
+        "env".into(),
+        json!({ "TIE_WORKSPACE": workspace_path.to_string_lossy().to_string() }),
+    );
+    Value::Object(entry)
+}
+
+fn backup_file(path: &Path) -> Result<(), String> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let stamp = chrono_like_stamp();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let backup = path.with_file_name(format!("{file_name}.bak-tie-{stamp}"));
+    fs::copy(path, backup).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn write_codex_config(
+    app: &AppHandle,
+    server_path: &Path,
+    workspace: &Path,
+) -> Result<(), String> {
+    let config_path = codex_config_path(app)?;
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let existing = if config_path.is_file() {
+        fs::read_to_string(&config_path).map_err(|error| error.to_string())?
+    } else {
+        String::new()
+    };
+    backup_file(&config_path)?;
+    let cleaned = strip_mcp_server_block(&existing);
+    let block = build_mcp_block(server_path, workspace);
+    let next = if cleaned.is_empty() {
+        block
+    } else {
+        format!("{}\n\n{}", cleaned, block)
+    };
+    fs::write(&config_path, format!("{}\n", next.trim_end())).map_err(|error| error.to_string())
+}
+
+fn upsert_json_mcp_config(
+    config_path: &Path,
+    server_path: &Path,
+    workspace: &Path,
+    with_type: bool,
+) -> Result<(), String> {
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let mut root = if config_path.is_file() {
+        let existing = fs::read_to_string(config_path).map_err(|error| error.to_string())?;
+        if existing.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&existing).map_err(|error| {
+                format!("无法解析 {}: {error}", config_path.display())
+            })?
+        }
+    } else {
+        json!({})
+    };
+
+    if !root.is_object() {
+        return Err(format!(
+            "{} 根节点必须是 JSON 对象，无法安全写入 MCP 配置。",
+            config_path.display()
+        ));
+    }
+
+    backup_file(config_path)?;
+
+    let servers = root
+        .as_object_mut()
+        .ok_or_else(|| "无效的 MCP JSON 根对象".to_owned())?
+        .entry("mcpServers")
+        .or_insert_with(|| json!({}));
+
+    if !servers.is_object() {
+        *servers = json!({});
+    }
+
+    servers.as_object_mut().unwrap().insert(
+        SERVER_NAME.to_owned(),
+        mcp_server_json(server_path, workspace, with_type),
+    );
+
+    let pretty = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
+    fs::write(config_path, format!("{pretty}\n")).map_err(|error| error.to_string())
 }
 
 fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
@@ -162,7 +357,7 @@ fn resolve_mcp_package_source(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn ensure_mcp_runtime(app: &AppHandle) -> Result<PathBuf, String> {
     if !node_available() {
-        return Err("未检测到 Node.js。接入 Codex MCP 需要本机已安装 node，并在 PATH 中可用。".into());
+        return Err("未检测到 Node.js。接入 Agent MCP 需要本机已安装 node，并在 PATH 中可用。".into());
     }
     let source = resolve_mcp_package_source(app)?;
     let target = installed_mcp_dir(app)?;
@@ -211,67 +406,219 @@ fn validate_workspace(path: &Path) -> Result<PathBuf, String> {
     Ok(root)
 }
 
-fn status_for(app: &AppHandle) -> Result<CodexMcpStatus, String> {
-    let config_path = codex_config_path(app)?;
-    let server = installed_mcp_dir(app)
-        .ok()
-        .map(|dir| dir.join("src").join("server.js"))
-        .filter(|path| path.is_file());
-
+fn client_status(app: &AppHandle, client: AgentClient) -> Result<AgentClientStatus, String> {
+    let config_path = config_path_for(app, client)?;
     let (configured, workspace_path) = if config_path.is_file() {
         let content = fs::read_to_string(&config_path).unwrap_or_default();
-        let workspace = parse_configured_workspace(&content);
+        let workspace = match client {
+            AgentClient::Codex => parse_configured_workspace_toml(&content),
+            AgentClient::Cursor | AgentClient::Claude => parse_configured_workspace_json(&content),
+        };
         (workspace.is_some(), workspace)
     } else {
         (false, None)
     };
 
-    Ok(CodexMcpStatus {
+    Ok(AgentClientStatus {
+        id: client.id().to_owned(),
+        label: client.label().to_owned(),
         configured,
         workspace_path,
-        server_path: server.map(|path| path.to_string_lossy().into_owned()),
         config_path: config_path.to_string_lossy().into_owned(),
-        node_available: node_available(),
     })
+}
+
+fn status_for(app: &AppHandle) -> Result<AgentMcpStatus, String> {
+    let server = installed_mcp_dir(app)
+        .ok()
+        .map(|dir| dir.join("src").join("server.js"))
+        .filter(|path| path.is_file());
+
+    let mut clients = Vec::new();
+    for client in AgentClient::all() {
+        clients.push(client_status(app, client)?);
+    }
+
+    Ok(AgentMcpStatus {
+        node_available: node_available(),
+        server_path: server.map(|path| path.to_string_lossy().into_owned()),
+        clients,
+    })
+}
+
+fn to_codex_status(status: AgentMcpStatus) -> CodexMcpStatus {
+    let codex = status
+        .clients
+        .iter()
+        .find(|item| item.id == "codex");
+    CodexMcpStatus {
+        configured: codex.map(|item| item.configured).unwrap_or(false),
+        workspace_path: codex.and_then(|item| item.workspace_path.clone()),
+        server_path: status.server_path,
+        config_path: codex
+            .map(|item| item.config_path.clone())
+            .unwrap_or_default(),
+        node_available: status.node_available,
+    }
+}
+
+fn parse_clients(clients: &[String]) -> Result<Vec<AgentClient>, String> {
+    if clients.is_empty() {
+        return Err("请至少选择一个客户端（Codex / Cursor / Claude Code）。".into());
+    }
+    let mut selected = Vec::new();
+    for raw in clients {
+        let Some(client) = AgentClient::parse(raw) else {
+            return Err(format!("未知客户端：{raw}"));
+        };
+        if !selected.contains(&client) {
+            selected.push(client);
+        }
+    }
+    Ok(selected)
+}
+
+fn skill_sync_roots(app: &AppHandle, clients: &[AgentClient]) -> Result<Vec<PathBuf>, String> {
+    let home = home_dir(app)?;
+    let mut roots = vec![home.join(".agents").join("skills")];
+    for client in clients {
+        let extra = match client {
+            AgentClient::Codex => None,
+            AgentClient::Claude => Some(home.join(".claude").join("skills")),
+            AgentClient::Cursor => Some(home.join(".cursor").join("skills")),
+        };
+        if let Some(path) = extra {
+            if !roots.iter().any(|item| item == &path) {
+                roots.push(path);
+            }
+        }
+    }
+    Ok(roots)
+}
+
+fn link_or_copy_skill(skill_dir: &Path, target: &Path) -> Result<(), String> {
+    if target.exists() || target.is_symlink() {
+        let existing = target.join("SKILL.md");
+        let source = skill_dir.join("SKILL.md");
+        if existing.is_file() && source.is_file() {
+            #[cfg(unix)]
+            {
+                if target.is_symlink() {
+                    return Ok(());
+                }
+            }
+            let _ = fs::copy(&source, &existing);
+            return Ok(());
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(skill_dir, target).map_err(|error| {
+            format!(
+                "无法创建技能链接（{} → {}）：{error}",
+                skill_dir.display(),
+                target.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(target).map_err(|error| error.to_string())?;
+        let source = skill_dir.join("SKILL.md");
+        if source.is_file() {
+            fs::copy(&source, target.join("SKILL.md")).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+fn sync_workspace_skills(
+    app: &AppHandle,
+    workspace: &Path,
+    clients: &[AgentClient],
+) -> Result<(), String> {
+    let skills_root = workspace.join(".agents").join("skills");
+    if !skills_root.is_dir() {
+        return Ok(());
+    }
+    let roots = skill_sync_roots(app, clients)?;
+    for entry in fs::read_dir(&skills_root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry.file_type().map(|item| item.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let skill_dir = entry.path();
+        if !skill_dir.join("SKILL.md").is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        for root in &roots {
+            let target = root.join(&name);
+            let _ = link_or_copy_skill(&skill_dir, &target);
+        }
+    }
+    Ok(())
+}
+
+fn configure_for_clients(
+    app: &AppHandle,
+    workspace_path: &str,
+    clients: &[String],
+) -> Result<AgentMcpStatus, String> {
+    let selected = parse_clients(clients)?;
+    let workspace = validate_workspace(Path::new(workspace_path.trim()))?;
+    let server_path = ensure_mcp_runtime(app)?;
+
+    for client in &selected {
+        match client {
+            AgentClient::Codex => write_codex_config(app, &server_path, &workspace)?,
+            AgentClient::Cursor => {
+                upsert_json_mcp_config(&cursor_config_path(app)?, &server_path, &workspace, false)?
+            }
+            AgentClient::Claude => {
+                upsert_json_mcp_config(&claude_config_path(app)?, &server_path, &workspace, true)?
+            }
+        }
+    }
+
+    let _ = sync_workspace_skills(app, &workspace, &selected);
+    status_for(app)
+}
+
+#[tauri::command]
+pub fn agent_mcp_status(app: AppHandle) -> Result<AgentMcpStatus, String> {
+    status_for(&app)
+}
+
+#[tauri::command]
+pub fn configure_agent_mcp(
+    app: AppHandle,
+    workspace_path: String,
+    clients: Vec<String>,
+) -> Result<AgentMcpStatus, String> {
+    configure_for_clients(&app, &workspace_path, &clients)
 }
 
 #[tauri::command]
 pub fn codex_mcp_status(app: AppHandle) -> Result<CodexMcpStatus, String> {
-    status_for(&app)
+    Ok(to_codex_status(status_for(&app)?))
 }
 
 #[tauri::command]
 pub fn configure_codex_mcp(app: AppHandle, workspace_path: String) -> Result<CodexMcpStatus, String> {
-    let workspace = validate_workspace(Path::new(workspace_path.trim()))?;
-    let server_path = ensure_mcp_runtime(&app)?;
-
-    let config_path = codex_config_path(&app)?;
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-
-    let existing = if config_path.is_file() {
-        fs::read_to_string(&config_path).map_err(|error| error.to_string())?
-    } else {
-        String::new()
-    };
-
-    if config_path.is_file() {
-        let stamp = chrono_like_stamp();
-        let backup = config_path.with_file_name(format!("config.toml.bak-tie-{stamp}"));
-        let _ = fs::copy(&config_path, backup);
-    }
-
-    let cleaned = strip_mcp_server_block(&existing);
-    let block = build_mcp_block(&server_path, &workspace);
-    let next = if cleaned.is_empty() {
-        block
-    } else {
-        format!("{}\n\n{}", cleaned, block)
-    };
-    fs::write(&config_path, format!("{}\n", next.trim_end())).map_err(|error| error.to_string())?;
-
-    status_for(&app)
+    Ok(to_codex_status(configure_for_clients(
+        &app,
+        &workspace_path,
+        &["codex".to_owned()],
+    )?))
 }
 
 fn chrono_like_stamp() -> String {
