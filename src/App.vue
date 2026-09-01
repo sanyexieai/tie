@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AppSidebar from '@/components/AppSidebar.vue'
 import ContextPanel from '@/components/ContextPanel.vue'
 import DocumentEditor from '@/components/DocumentEditor.vue'
@@ -16,6 +16,14 @@ import AppIcon from '@/components/AppIcon.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 
+const PANEL_WIDTHS_KEY = 'tie:panel-widths'
+const SIDEBAR_DEFAULT = 256
+const CONTEXT_DEFAULT = 244
+const SIDEBAR_MIN = 180
+const SIDEBAR_MAX = 480
+const CONTEXT_MIN = 180
+const CONTEXT_MAX = 420
+
 const store = useWorkspaceStore()
 const backend = useBackendStore()
 const sidebarCollapsed = ref(false)
@@ -26,8 +34,89 @@ const focusMode = ref(false)
 const mobileContextOpen = ref(false)
 const backendDialogOpen = ref(false)
 const storageSettingsOpen = ref(false)
+const sidebarWidth = ref(SIDEBAR_DEFAULT)
+const contextWidth = ref(CONTEXT_DEFAULT)
+const resizingPanel = ref<'sidebar' | 'context' | null>(null)
 let mobileLayoutQuery: MediaQueryList | null = null
 let contextDrawerQuery: MediaQueryList | null = null
+let resizeStartX = 0
+let resizeStartWidth = 0
+
+const shellStyle = computed(() => ({
+  '--sidebar-width': `${sidebarWidth.value}px`,
+  '--context-width': `${contextWidth.value}px`,
+}))
+
+const showSidebarResize = computed(() => !focusMode.value && !sidebarCollapsed.value && !isMobileLayout.value)
+const showContextResize = computed(() => !focusMode.value && !contextCollapsed.value && !usesContextDrawer.value)
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, Math.round(value)))
+}
+
+function loadPanelWidths() {
+  try {
+    const raw = localStorage.getItem(PANEL_WIDTHS_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as { sidebarWidth?: unknown; contextWidth?: unknown }
+    if (typeof parsed.sidebarWidth === 'number' && Number.isFinite(parsed.sidebarWidth)) {
+      sidebarWidth.value = clamp(parsed.sidebarWidth, SIDEBAR_MIN, SIDEBAR_MAX)
+    }
+    if (typeof parsed.contextWidth === 'number' && Number.isFinite(parsed.contextWidth)) {
+      contextWidth.value = clamp(parsed.contextWidth, CONTEXT_MIN, CONTEXT_MAX)
+    }
+  } catch {
+    // keep defaults
+  }
+}
+
+function savePanelWidths() {
+  localStorage.setItem(PANEL_WIDTHS_KEY, JSON.stringify({
+    sidebarWidth: sidebarWidth.value,
+    contextWidth: contextWidth.value,
+  }))
+}
+
+function maxSidebarForViewport() {
+  return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, window.innerWidth - contextWidth.value - 360))
+}
+
+function maxContextForViewport() {
+  return Math.min(CONTEXT_MAX, Math.max(CONTEXT_MIN, window.innerWidth - sidebarWidth.value - 360))
+}
+
+function startResize(panel: 'sidebar' | 'context', event: PointerEvent) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  resizingPanel.value = panel
+  resizeStartX = event.clientX
+  resizeStartWidth = panel === 'sidebar' ? sidebarWidth.value : contextWidth.value
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  document.body.classList.add('panel-resizing')
+}
+
+function onResizeMove(event: PointerEvent) {
+  if (!resizingPanel.value) return
+  if (resizingPanel.value === 'sidebar') {
+    const next = resizeStartWidth + (event.clientX - resizeStartX)
+    sidebarWidth.value = clamp(next, SIDEBAR_MIN, maxSidebarForViewport())
+    return
+  }
+  const next = resizeStartWidth - (event.clientX - resizeStartX)
+  contextWidth.value = clamp(next, CONTEXT_MIN, maxContextForViewport())
+}
+
+function endResize(event: PointerEvent) {
+  if (!resizingPanel.value) return
+  resizingPanel.value = null
+  document.body.classList.remove('panel-resizing')
+  try {
+    ;(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId)
+  } catch {
+    // already released
+  }
+  savePanelWidths()
+}
 
 function toggleSidebar() { sidebarCollapsed.value = !sidebarCollapsed.value }
 function toggleContextPanel() {
@@ -77,6 +166,7 @@ function onShortcut(event: KeyboardEvent) {
   }
 }
 onMounted(async () => {
+  loadPanelWidths()
   mobileLayoutQuery = window.matchMedia('(max-width: 720px)')
   contextDrawerQuery = window.matchMedia('(max-width: 1080px)')
   syncMobileLayout()
@@ -89,6 +179,7 @@ onMounted(async () => {
   await store.initialize()
 })
 onBeforeUnmount(() => {
+  document.body.classList.remove('panel-resizing')
   mobileLayoutQuery?.removeEventListener('change', syncMobileLayout)
   contextDrawerQuery?.removeEventListener('change', syncContextDrawer)
   window.removeEventListener('keydown', onShortcut)
@@ -105,10 +196,24 @@ onBeforeUnmount(() => {
       'context-collapsed': contextCollapsed,
       'focus-mode': focusMode,
     }"
+    :style="shellStyle"
   >
     <button v-if="sidebarCollapsed && !focusMode" class="mobile-sidebar-toggle" aria-label="打开侧边栏" @click="toggleSidebar">☰</button>
     <div v-if="isMobileLayout && !sidebarCollapsed && !focusMode" class="mobile-sidebar-scrim" @click="toggleSidebar"></div>
     <AppSidebar v-if="!focusMode" @close="toggleSidebar" @open-storage-settings="storageSettingsOpen = true" />
+    <div
+      v-if="showSidebarResize"
+      class="panel-resize-handle panel-resize-handle-sidebar"
+      :class="{ active: resizingPanel === 'sidebar' }"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="调整左侧栏宽度"
+      tabindex="0"
+      @pointerdown="startResize('sidebar', $event)"
+      @pointermove="onResizeMove"
+      @pointerup="endResize"
+      @pointercancel="endResize"
+    ></div>
     <SearchView v-if="store.showingSearch" />
     <GraphView v-else-if="store.showingGraph" />
     <LibraryView v-else-if="store.showingRecent" mode="recent" />
@@ -117,6 +222,19 @@ onBeforeUnmount(() => {
     <TagView v-else-if="store.showingTags" />
     <TrashView v-else-if="store.showingTrash" />
     <DocumentEditor v-else @toggle-sidebar="toggleSidebar" @toggle-focus="toggleFocusMode" @toggle-context="toggleContextPanel" />
+    <div
+      v-if="showContextResize"
+      class="panel-resize-handle panel-resize-handle-context"
+      :class="{ active: resizingPanel === 'context' }"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="调整右侧栏宽度"
+      tabindex="0"
+      @pointerdown="startResize('context', $event)"
+      @pointermove="onResizeMove"
+      @pointerup="endResize"
+      @pointercancel="endResize"
+    ></div>
     <ContextPanel v-if="!focusMode && !contextCollapsed" @close="toggleContextPanel" />
     <div v-if="mobileContextOpen" class="mobile-context-scrim" @click="mobileContextOpen = false"></div>
     <ContextPanel v-if="mobileContextOpen" class="mobile-context-panel" @close="mobileContextOpen = false" />
