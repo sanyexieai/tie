@@ -70,7 +70,6 @@ jobs:
             src-tauri/target/release/bundle/deb/*.deb.sig
             src-tauri/target/release/bundle/rpm/*.rpm
             src-tauri/target/release/bundle/rpm/*.rpm.sig
-            src-tauri/target/release/bundle/latest.json
           )
           if [ ${#files[@]} -eq 0 ]; then
             echo "No Linux bundles found under src-tauri/target/release/bundle/"
@@ -124,7 +123,6 @@ jobs:
             src-tauri/target/release/bundle/msi/*.msi.sig
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/nsis/*.exe.sig
-            src-tauri/target/release/bundle/latest.json
           )
           if [ ${#files[@]} -eq 0 ]; then
             echo "No Windows bundles found under src-tauri/target/release/bundle/"
@@ -251,7 +249,7 @@ jobs:
           cp dist/linux/* dist/ 2>/dev/null || true
           cp dist/windows/* dist/ 2>/dev/null || true
           cp dist/android/* dist/ 2>/dev/null || true
-          python3 scripts/merge-updater-manifest.py dist/linux/latest.json dist/windows/latest.json dist/latest.json
+          python3 scripts/merge-updater-manifest.py dist dist/latest.json
           ls -la dist
 
       - name: Create GitHub Release

@@ -13,7 +13,7 @@
     "test:e2e": "playwright test",
     "backend:dev": "npm --prefix backend run dev",
     "backend:start": "npm --prefix backend run start",
-    "tauri": "node scripts/tauri-dev.mjs",
+    "tauri": "tauri",
     "tauri:dev": "node scripts/tauri-dev.mjs",
     "tauri:build": "node scripts/tauri-build.mjs",
     "tauri:build:linux": "tauri build --bundles deb,rpm",
