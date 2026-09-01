@@ -20,7 +20,10 @@ export interface Page {
   createdAt: string
   updatedAt: string
   deletedAt: string | null
+  /** 主存储源：树层级、历史与附件默认落在此源 */
   storageSourceId: string
+  /** 绑定的全部存储源（含主源）；保存时会同步写到每一个 */
+  storageSourceIds?: string[]
 }
 
 export interface Workspace {

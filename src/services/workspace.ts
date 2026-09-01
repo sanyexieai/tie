@@ -29,8 +29,8 @@ function initialSnapshot(): WorkspaceSnapshot {
   return {
     workspace: { id: 'local-demo', name: '我的知识库', sources: [{ id: sourceId, name: '浏览器演示工作区', path: 'localStorage', kind: 'local', available: true }] },
     pages: [
-      { id: root, title: '收集箱', icon: '📥', parentId: null, sortKey: 0, markdown: '# 收集箱\n\n把想法先放在这里，再慢慢整理。\n\n- 输入 `[[` 可以关联页面\n- 点击左侧的 + 创建子页面', tags: ['收集'], createdAt, updatedAt: createdAt, deletedAt: null, storageSourceId: sourceId },
-      { id: welcome, title: '欢迎使用 Tie', icon: '👋', parentId: root, sortKey: 0, markdown: '# 欢迎使用 Tie\n\nTie 把 **Notion 的页面树**、**Typora 的写作感** 和 **Obsidian 的链接关系** 放在一起。\n\n## 从这里开始\n\n1. 在左侧创建页面或子页面\n2. 直接用 Markdown 写作\n3. 用标签与链接整理知识', tags: ['开始'], createdAt, updatedAt: createdAt, deletedAt: null, storageSourceId: sourceId },
+      { id: root, title: '收集箱', icon: '📥', parentId: null, sortKey: 0, markdown: '# 收集箱\n\n把想法先放在这里，再慢慢整理。\n\n- 输入 `[[` 可以关联页面\n- 点击左侧的 + 创建子页面', tags: ['收集'], createdAt, updatedAt: createdAt, deletedAt: null, storageSourceId: sourceId, storageSourceIds: [sourceId] },
+      { id: welcome, title: '欢迎使用 Tie', icon: '👋', parentId: root, sortKey: 0, markdown: '# 欢迎使用 Tie\n\nTie 把 **Notion 的页面树**、**Typora 的写作感** 和 **Obsidian 的链接关系** 放在一起。\n\n## 从这里开始\n\n1. 在左侧创建页面或子页面\n2. 直接用 Markdown 写作\n3. 用标签与链接整理知识', tags: ['开始'], createdAt, updatedAt: createdAt, deletedAt: null, storageSourceId: sourceId, storageSourceIds: [sourceId] },
     ],
   }
 }
@@ -193,6 +193,7 @@ export const workspaceService = {
       updatedAt: now(),
       deletedAt: null,
       storageSourceId,
+      storageSourceIds: [storageSourceId],
     }
     return this.savePage(page)
   },
@@ -215,6 +216,17 @@ export const workspaceService = {
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : []
     if (!paths.length) return null
     return invoke<WorkspaceSnapshot>('import_markdown_files', { paths, targetSourceId, createdAt: now() })
+  },
+  async openMarkdownFiles(): Promise<{ snapshot: WorkspaceSnapshot; openedPageIds: string[]; createdSourceIds: string[] } | null> {
+    if (!await isTauri()) return null
+    const selected = await open({
+      multiple: true,
+      title: '从文件打开 Markdown',
+      filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
+    })
+    const paths = Array.isArray(selected) ? selected : selected ? [selected] : []
+    if (!paths.length) return null
+    return invoke('open_markdown_files', { paths, createdAt: now() })
   },
   async removeStorageSource(sourceId: string): Promise<WorkspaceSnapshot | null> {
     if (isS3SourceId(sourceId)) {

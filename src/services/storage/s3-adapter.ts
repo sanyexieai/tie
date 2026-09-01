@@ -112,16 +112,17 @@ export const s3StorageAdapter: StorageAdapter = {
   },
   async savePage(page, options?: SavePageOptions) {
     if (!(await isTauri())) throw new Error('S3 页面仅支持桌面端')
-    const provider = providerForS3Source(page.storageSourceId)
+    const writeId = options?.writeSourceId ?? page.storageSourceId
+    const provider = providerForS3Source(writeId)
     if (!provider?.credentialStored) throw new Error('未找到 S3 本机密钥，请重新保存该连接')
     try {
       const saved = await invoke<Page>('save_s3_page', {
-        connection: connectionFor(page.storageSourceId),
-        page: { ...page, storageSourceId: s3SourceId(provider.id) },
+        connection: connectionFor(writeId),
+        page: { ...page, storageSourceId: page.storageSourceId },
         expectedUpdatedAt: options?.force ? null : (options?.expectedUpdatedAt ?? null),
       })
       syncQueue.removeForPage(page.id)
-      return saved
+      return { ...saved, storageSourceId: page.storageSourceId, storageSourceIds: page.storageSourceIds }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (message.includes('其他设备更新')) throw new Error('页面已在其他设备更新，请重新载入后再保存')

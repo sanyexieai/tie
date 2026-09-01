@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 const store = useWorkspaceStore()
+const isDesktop = '__TAURI_INTERNALS__' in window
 const input = ref<HTMLInputElement | null>(null)
 const selectedIndex = ref(0)
 const query = computed(() => store.commandQuery.trim().toLocaleLowerCase())
@@ -12,6 +13,7 @@ const pages = computed(() => store.pages
 function emitWorkspaceCommand(name: string) { window.dispatchEvent(new Event(name)) }
 const actions = computed(() => [
   { id: 'new', label: '新建页面', hint: '在当前存储源创建顶层页面', run: async () => { await store.createPage(null) } },
+  { id: 'open-files', label: '从文件打开', hint: '打开本地 Markdown；必要时自动创建工作区', requiresDesktop: true, run: async () => { await store.openFromFiles() } },
   { id: 'new-child', label: '新建子页面', hint: '在当前页面下创建子页面', requiresPage: true, run: async () => { if (store.activePage) await store.createChildPage(store.activePage.id) } },
   { id: 'duplicate', label: '复制当前页面', hint: '复制内容、标签和所在页面层级', requiresPage: true, run: async () => { if (store.activePage) await store.duplicatePage(store.activePage.id) } },
   { id: 'favorite', label: store.activePage && store.favoritePageIds.includes(store.activePage.id) ? '取消收藏当前页面' : '收藏当前页面', hint: '将页面加入或移出收藏', requiresPage: true, run: () => { if (store.activePage) store.toggleFavorite(store.activePage.id) } },
@@ -25,7 +27,7 @@ const actions = computed(() => [
   { id: 'recent', label: '最近打开', hint: '查看最近访问的页面', run: () => store.openRecent() },
   { id: 'favorites', label: '收藏页面', hint: '查看已收藏的页面', run: () => store.openFavorites() },
   { id: 'graph', label: '知识图谱', hint: '浏览全工作区关系网络', run: () => store.openGraph() },
-].filter((item) => (!item.requiresPage || store.activePage) && (!query.value || `${item.label} ${item.hint}`.toLocaleLowerCase().includes(query.value))))
+].filter((item) => (!item.requiresPage || store.activePage) && (!item.requiresDesktop || isDesktop) && (!query.value || `${item.label} ${item.hint}`.toLocaleLowerCase().includes(query.value))))
 const total = computed(() => pages.value.length + actions.value.length)
 
 function sourceLabel(sourceId: string) {

@@ -51,6 +51,8 @@ export interface SavePageOptions {
   expectedUpdatedAt?: string
   queueOnFailure?: boolean
   force?: boolean
+  /** 物理写入目标源；frontmatter 仍以 page.storageSourceId 为主源 */
+  writeSourceId?: string
 }
 
 export interface S3ConnectionInput {

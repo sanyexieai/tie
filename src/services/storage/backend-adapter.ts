@@ -39,15 +39,16 @@ export const backendStorageAdapter: StorageAdapter = {
   async savePage(page, options?: SavePageOptions) {
     const profile = backendService.loadProfile()
     if (!profile.accessToken) throw new Error('请先连接自定义后台')
+    const writeId = options?.writeSourceId ?? page.storageSourceId
     try {
       const saved = await backendService.savePage(
         profile,
-        parseBackendWorkspaceId(page.storageSourceId),
+        parseBackendWorkspaceId(writeId),
         page,
         options?.force ? undefined : options?.expectedUpdatedAt,
       )
       syncQueue.removeForPage(page.id)
-      return { ...saved, storageSourceId: page.storageSourceId }
+      return { ...saved, storageSourceId: page.storageSourceId, storageSourceIds: page.storageSourceIds }
     } catch (error) {
       if (options?.queueOnFailure !== false && isRetryableStorageError(error, 'backend')) {
         syncQueue.enqueueSave(page, options?.expectedUpdatedAt)

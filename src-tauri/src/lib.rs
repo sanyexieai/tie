@@ -158,6 +158,8 @@ struct Page {
     deleted_at: Option<String>,
     #[serde(default)]
     storage_source_id: String,
+    #[serde(default)]
+    storage_source_ids: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -433,6 +435,7 @@ fn copy_page_history(source_root: &Path, target_root: &Path, page_id: &str) -> R
 }
 
 fn frontmatter(page: &Page) -> String {
+    let page = normalize_page_sources(page.clone());
     let parent = page.parent_id.clone().unwrap_or_default();
     let tags = page.tags.join(", ");
     let deleted = page
@@ -441,7 +444,86 @@ fn frontmatter(page: &Page) -> String {
         .map(|value| format!("deleted_at: {value}\n"))
         .unwrap_or_default();
     let icon = page.icon.replace(['\n', '\r'], "");
-    format!("---\ntie_version: 1\nid: {}\nstorage_source_id: {}\nparent_id: {}\nsort_key: {}\nicon: {}\ntags: [{}]\ncreated_at: {}\nupdated_at: {}\n{}---\n\n{}", page.id, page.storage_source_id, parent, page.sort_key, icon, tags, page.created_at, page.updated_at, deleted, page.markdown)
+    let extra_sources = source_ids_frontmatter(&page);
+    format!("---\ntie_version: 1\nid: {}\nstorage_source_id: {}\n{}parent_id: {}\nsort_key: {}\nicon: {}\ntags: [{}]\ncreated_at: {}\nupdated_at: {}\n{}---\n\n{}", page.id, page.storage_source_id, extra_sources, parent, page.sort_key, icon, tags, page.created_at, page.updated_at, deleted, page.markdown)
+}
+
+
+fn parse_source_ids(raw: &str) -> Vec<String> {
+    raw.trim_matches(['[', ']'])
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+
+fn merge_loaded_pages(pages: Vec<Page>) -> Vec<Page> {
+    let mut map: HashMap<String, Page> = HashMap::new();
+    for page in pages {
+        let page = normalize_page_sources(page);
+        match map.remove(&page.id) {
+            None => {
+                map.insert(page.id.clone(), page);
+            }
+            Some(existing) => {
+                let mut ids = existing.storage_source_ids.clone();
+                for id in &page.storage_source_ids {
+                    if !ids.iter().any(|item| item == id) {
+                        ids.push(id.clone());
+                    }
+                }
+                let newer = if existing.updated_at >= page.updated_at {
+                    existing
+                } else {
+                    page
+                };
+                let primary = if ids.iter().any(|id| id == &newer.storage_source_id) {
+                    newer.storage_source_id.clone()
+                } else {
+                    ids.first().cloned().unwrap_or_default()
+                };
+                map.insert(
+                    newer.id.clone(),
+                    normalize_page_sources(Page {
+                        storage_source_id: primary,
+                        storage_source_ids: ids,
+                        ..newer
+                    }),
+                );
+            }
+        }
+    }
+    map.into_values().collect()
+}
+
+fn normalize_page_sources(mut page: Page) -> Page {
+    if page.storage_source_ids.is_empty() {
+        if !page.storage_source_id.is_empty() {
+            page.storage_source_ids = vec![page.storage_source_id.clone()];
+        }
+    } else if !page.storage_source_id.is_empty()
+        && !page.storage_source_ids.iter().any(|id| id == &page.storage_source_id)
+    {
+        page.storage_source_ids.insert(0, page.storage_source_id.clone());
+    } else if page.storage_source_id.is_empty() {
+        if let Some(first) = page.storage_source_ids.first().cloned() {
+            page.storage_source_id = first;
+        }
+    }
+    page
+}
+
+fn source_ids_frontmatter(page: &Page) -> String {
+    if page.storage_source_ids.len() <= 1 {
+        String::new()
+    } else {
+        format!(
+            "storage_source_ids: [{}]\n",
+            page.storage_source_ids.join(", ")
+        )
+    }
 }
 
 fn value(lines: &[&str], key: &str) -> String {
@@ -477,7 +559,7 @@ fn parse_page(content: &str) -> Result<Page, String> {
         .unwrap_or("无标题")
         .to_owned();
     let parent_id = value(&lines, "parent_id");
-    Ok(Page {
+    Ok(normalize_page_sources(Page {
         id,
         title,
         icon: value(&lines, "icon"),
@@ -489,14 +571,15 @@ fn parse_page(content: &str) -> Result<Page, String> {
         updated_at: value(&lines, "updated_at"),
         deleted_at: (!value(&lines, "deleted_at").is_empty()).then(|| value(&lines, "deleted_at")),
         storage_source_id: value(&lines, "storage_source_id"),
-    })
+        storage_source_ids: parse_source_ids(&value(&lines, "storage_source_ids")),
+    }))
 }
 
 fn demo_pages(storage_source_id: &str) -> Vec<Page> {
     let created = "2026-08-27T00:00:00.000Z".to_owned();
     vec![
-    Page { id: "pg_inbox".into(), title: "收集箱".into(), icon: "📥".into(), parent_id: None, sort_key: 0, markdown: "# 收集箱\n\n把想法先放在这里，再慢慢整理。\n\n- 在页面内创建子页面\n- 直接用 Markdown 写作\n- 后续可通过链接、标签和图谱建立关联\n".into(), tags: vec!["收集".into()], created_at: created.clone(), updated_at: created.clone(), deleted_at: None, storage_source_id: storage_source_id.to_owned() },
-    Page { id: "pg_welcome".into(), title: "欢迎使用 Tie".into(), icon: "👋".into(), parent_id: Some("pg_inbox".into()), sort_key: 0, markdown: "# 欢迎使用 Tie\n\nTie 把 **Notion 的页面树**、**Typora 的写作感** 和 **Obsidian 的链接关系** 放在一起。\n\n## 从这里开始\n\n1. 在左侧创建页面或子页面\n2. 直接用 Markdown 写作\n3. 用标签与链接整理知识\n".into(), tags: vec!["开始".into()], created_at: created.clone(), updated_at: created, deleted_at: None, storage_source_id: storage_source_id.to_owned() },
+    Page { id: "pg_inbox".into(), title: "收集箱".into(), icon: "📥".into(), parent_id: None, sort_key: 0, markdown: "# 收集箱\n\n把想法先放在这里，再慢慢整理。\n\n- 在页面内创建子页面\n- 直接用 Markdown 写作\n- 后续可通过链接、标签和图谱建立关联\n".into(), tags: vec!["收集".into()], created_at: created.clone(), updated_at: created.clone(), deleted_at: None, storage_source_id: storage_source_id.to_owned(), storage_source_ids: vec![storage_source_id.to_owned()] },
+    Page { id: "pg_welcome".into(), title: "欢迎使用 Tie".into(), icon: "👋".into(), parent_id: Some("pg_inbox".into()), sort_key: 0, markdown: "# 欢迎使用 Tie\n\nTie 把 **Notion 的页面树**、**Typora 的写作感** 和 **Obsidian 的链接关系** 放在一起。\n\n## 从这里开始\n\n1. 在左侧创建页面或子页面\n2. 直接用 Markdown 写作\n3. 用标签与链接整理知识\n".into(), tags: vec!["开始".into()], created_at: created.clone(), updated_at: created, deleted_at: None, storage_source_id: storage_source_id.to_owned(), storage_source_ids: vec![storage_source_id.to_owned()] },
   ]
 }
 
@@ -541,7 +624,14 @@ fn load_workspace(app: tauri::AppHandle) -> Result<WorkspaceSnapshot, String> {
                 if page.storage_source_id.is_empty() {
                     page.storage_source_id = source.id.clone();
                 }
-                pages.push(page);
+                if !page
+                    .storage_source_ids
+                    .iter()
+                    .any(|id| id == &source.id)
+                {
+                    page.storage_source_ids.push(source.id.clone());
+                }
+                pages.push(normalize_page_sources(page));
             }
         }
     }
@@ -555,7 +645,7 @@ fn load_workspace(app: tauri::AppHandle) -> Result<WorkspaceSnapshot, String> {
             },
             sources,
         },
-        pages,
+        pages: merge_loaded_pages(pages),
     })
 }
 
@@ -593,11 +683,20 @@ fn add_storage_source(
 }
 
 #[tauri::command]
-fn save_page(app: tauri::AppHandle, page: Page, expected_updated_at: Option<String>) -> Result<Page, String> {
+fn save_page(
+    app: tauri::AppHandle,
+    page: Page,
+    expected_updated_at: Option<String>,
+    write_source_id: Option<String>,
+) -> Result<Page, String> {
+    let page = normalize_page_sources(page);
     let (sources, _) = workspace_sources(&app)?;
+    let write_id = write_source_id
+        .as_deref()
+        .unwrap_or(page.storage_source_id.as_str());
     let source = sources
         .iter()
-        .find(|source| source.id == page.storage_source_id)
+        .find(|source| source.id == write_id)
         .ok_or("页面所属存储源不存在")?;
     let root = PathBuf::from(&source.path);
     fs::create_dir_all(root.join("pages")).map_err(|error| error.to_string())?;
@@ -691,11 +790,16 @@ fn restore_page_revision(
     let restored = Page {
         id: page.id,
         storage_source_id: page.storage_source_id.clone(),
+        storage_source_ids: if page.storage_source_ids.is_empty() {
+            revision.storage_source_ids.clone()
+        } else {
+            page.storage_source_ids.clone()
+        },
         created_at: page.created_at.clone(),
         updated_at: page.updated_at,
         ..revision
     };
-    save_page(app, restored, None)
+    save_page(app, restored, None, None)
 }
 
 #[derive(serde::Deserialize)]
@@ -794,10 +898,11 @@ fn transfer_page_storage(
     if target_path.exists() {
         return Err("目标存储源中已存在相同页面 ID，无法迁移".to_owned());
     }
-    let transferred = Page {
-        storage_source_id: target_source_id,
+    let transferred = normalize_page_sources(Page {
+        storage_source_id: target_source_id.clone(),
+        storage_source_ids: vec![target_source_id],
         ..page
-    };
+    });
     fs::write(&target_path, frontmatter(&transferred)).map_err(|error| error.to_string())?;
     if let Err(error) = copy_page_history(&source_root, &target_root, &transferred.id) {
         let _ = fs::remove_file(&target_path);
@@ -972,10 +1077,237 @@ fn import_markdown_files(
             updated_at: created_at.clone(),
             deleted_at: None,
             storage_source_id: target_source_id.clone(),
+            storage_source_ids: vec![target_source_id.clone()],
         };
         fs::write(candidate.destination, frontmatter(&page)).map_err(|error| error.to_string())?;
     }
     load_workspace(app)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenMarkdownFilesResult {
+    snapshot: WorkspaceSnapshot,
+    opened_page_ids: Vec<String>,
+    created_source_ids: Vec<String>,
+}
+
+fn path_is_markdown(path: &Path) -> bool {
+    path.is_file()
+        && path.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+        })
+}
+
+fn infer_workspace_root_for_file(file: &Path) -> PathBuf {
+    let parent = file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    if parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("pages"))
+    {
+        if let Some(root) = parent.parent() {
+            return root.to_path_buf();
+        }
+    }
+    let mut cursor = parent.clone();
+    for _ in 0..5 {
+        if cursor.join("pages").is_dir() {
+            return cursor;
+        }
+        match cursor.parent() {
+            Some(next) => cursor = next.to_path_buf(),
+            None => break,
+        }
+    }
+    parent
+}
+
+fn find_source_covering_path<'a>(
+    sources: &'a [StorageSource],
+    file: &Path,
+) -> Option<&'a StorageSource> {
+    sources.iter().find(|source| {
+        let root = PathBuf::from(&source.path);
+        let Ok(root) = root.canonicalize() else {
+            return file.starts_with(Path::new(&source.path));
+        };
+        file.starts_with(&root)
+    })
+}
+
+fn ensure_local_source_at(
+    app: &tauri::AppHandle,
+    root: PathBuf,
+) -> Result<(StorageSource, bool), String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("无法打开工作区目录：{error}"))?;
+    if !root.is_dir() {
+        return Err("工作区路径不是目录".to_owned());
+    }
+    fs::create_dir_all(root.join("pages")).map_err(|error| error.to_string())?;
+
+    let existing_settings = load_settings(app)?;
+    let (mut sources, _) = workspace_sources(app)?;
+    if let Some(existing) = sources.iter().find(|source| {
+        PathBuf::from(&source.path)
+            .canonicalize()
+            .map(|path| path == root)
+            .unwrap_or(false)
+    }) {
+        return Ok((existing.clone(), false));
+    }
+
+    let source = source_from_path(root, "local".to_owned());
+    sources.push(source.clone());
+    let settings = WorkspaceSettings {
+        name: existing_settings.name,
+        path: String::new(),
+        kind: String::new(),
+        sources,
+        s3_providers: existing_settings.s3_providers,
+    };
+    save_settings(app, &settings)?;
+    Ok((source, true))
+}
+
+fn try_existing_page_id(root: &Path, file: &Path) -> Option<String> {
+    let pages_dir = root.join("pages");
+    let canon_file = file.canonicalize().ok()?;
+    let canon_pages = pages_dir.canonicalize().ok()?;
+    if !canon_file.starts_with(&canon_pages) {
+        return None;
+    }
+    let content = fs::read_to_string(file).ok()?;
+    let page = parse_page(&content).ok()?;
+    let expected = markdown_path(root, &page.id);
+    if expected.canonicalize().ok().as_ref() == Some(&canon_file) {
+        return Some(page.id);
+    }
+    // Still prefer frontmatter id when the file already lives under pages/.
+    Some(page.id)
+}
+
+fn import_single_markdown_file(
+    root: &Path,
+    source_id: &str,
+    file: &Path,
+    created_at: &str,
+) -> Result<String, String> {
+    if let Some(existing_id) = try_existing_page_id(root, file) {
+        return Ok(existing_id);
+    }
+
+    let pages_dir = root.join("pages");
+    fs::create_dir_all(&pages_dir).map_err(|error| error.to_string())?;
+    let sort_key = fs::read_dir(&pages_dir)
+        .map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "md")
+        })
+        .count() as i64;
+
+    let page_id = imported_page_id(file, source_id);
+    let destination = markdown_path(root, &page_id);
+    if destination.exists() {
+        return Ok(page_id);
+    }
+
+    let content = fs::read_to_string(file).map_err(|error| error.to_string())?;
+    let fallback_title = file
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("打开的页面")
+        .to_owned();
+    let (title, icon, markdown, tags, parent_id, page_sort_key) =
+        if let Ok(original) = parse_page(&content) {
+            (
+                original.title,
+                original.icon,
+                original.markdown,
+                original.tags,
+                None,
+                sort_key,
+            )
+        } else {
+            let (title, markdown, tags) = importable_page(content, fallback_title);
+            (title, String::new(), markdown, tags, None, sort_key)
+        };
+
+    let page = Page {
+        id: page_id.clone(),
+        title,
+        icon,
+        parent_id,
+        sort_key: page_sort_key,
+        markdown,
+        tags,
+        created_at: created_at.to_owned(),
+        updated_at: created_at.to_owned(),
+        deleted_at: None,
+        storage_source_id: source_id.to_owned(),
+        storage_source_ids: vec![source_id.to_owned()],
+    };
+    fs::write(destination, frontmatter(&page)).map_err(|error| error.to_string())?;
+    Ok(page_id)
+}
+
+#[tauri::command]
+fn open_markdown_files(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+    created_at: String,
+) -> Result<OpenMarkdownFilesResult, String> {
+    let mut opened_page_ids = Vec::new();
+    let mut created_source_ids = Vec::new();
+
+    for raw_path in paths {
+        let file = PathBuf::from(raw_path.trim())
+            .canonicalize()
+            .map_err(|error| format!("无法打开文件：{error}"))?;
+        if !path_is_markdown(&file) {
+            continue;
+        }
+
+        let (sources, _) = workspace_sources(&app)?;
+        let (source, created) = if let Some(existing) = find_source_covering_path(&sources, &file) {
+            (existing.clone(), false)
+        } else {
+            let root = infer_workspace_root_for_file(&file);
+            ensure_local_source_at(&app, root)?
+        };
+        if created {
+            created_source_ids.push(source.id.clone());
+        }
+
+        let page_id = import_single_markdown_file(
+            Path::new(&source.path),
+            &source.id,
+            &file,
+            &created_at,
+        )?;
+        if !opened_page_ids.contains(&page_id) {
+            opened_page_ids.push(page_id);
+        }
+    }
+
+    if opened_page_ids.is_empty() {
+        return Err("未选择有效的 Markdown 文件".to_owned());
+    }
+
+    Ok(OpenMarkdownFilesResult {
+        snapshot: load_workspace(app)?,
+        opened_page_ids,
+        created_source_ids,
+    })
 }
 
 #[tauri::command]
@@ -1551,6 +1883,23 @@ async fn permanently_delete_s3_pages(connection: S3Connection, page_ids: Vec<Str
 }
 
 #[tauri::command]
+fn copy_page_sidecars(
+    app: tauri::AppHandle,
+    page_id: String,
+    from_source_id: String,
+    to_source_id: String,
+) -> Result<(), String> {
+    if from_source_id == to_source_id {
+        return Ok(());
+    }
+    let from_root = source_root(&app, &from_source_id)?;
+    let to_root = source_root(&app, &to_source_id)?;
+    copy_page_history(&from_root, &to_root, &page_id)?;
+    copy_page_assets(&from_root, &to_root, &page_id)?;
+    Ok(())
+}
+
+#[tauri::command]
 fn save_file_page_asset(
     app: tauri::AppHandle,
     page: Page,
@@ -1648,6 +1997,8 @@ pub fn run() {
             add_storage_source,
             transfer_page_storage,
             import_markdown_files,
+            open_markdown_files,
+            copy_page_sidecars,
             remove_storage_source,
             rename_storage_source,
             rename_workspace,

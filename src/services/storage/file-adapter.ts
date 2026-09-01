@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { Page, PageRevision, StorageSource } from '@/types'
+import { pageBoundToSource } from '@/services/page-sources'
 import { isRetryableStorageError, queueFailureMessage } from '@/services/storage/retry'
 import { emptySyncResult, mergeSyncPages } from '@/services/storage/sync-merge'
 import { syncQueue } from '@/services/storage/sync-queue'
@@ -33,7 +34,7 @@ export const fileStorageAdapter: StorageAdapter = {
   async loadPages(sourceId) {
     if (!(await isTauri())) return { pages: [] }
     const snapshot = await invoke<{ pages: Page[] }>('load_workspace')
-    return { pages: snapshot.pages.filter((page) => page.storageSourceId === sourceId) }
+    return { pages: snapshot.pages.filter((page) => pageBoundToSource(page, sourceId)) }
   },
   async savePage(page, options?: SavePageOptions) {
     if (!(await isTauri())) throw new Error('文件存储仅支持桌面端')
@@ -41,6 +42,7 @@ export const fileStorageAdapter: StorageAdapter = {
       const saved = await invoke<Page>('save_page', {
         page,
         expectedUpdatedAt: options?.force ? null : (options?.expectedUpdatedAt ?? null),
+        writeSourceId: options?.writeSourceId ?? null,
       })
       syncQueue.removeForPage(page.id)
       return saved

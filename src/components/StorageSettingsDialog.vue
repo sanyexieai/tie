@@ -26,6 +26,7 @@ import {
   type AgentClientId,
   type AgentMcpStatus,
 } from '@/services/codex-mcp'
+import { pageBoundToSource } from '@/services/page-sources'
 import { isBackendSourceId, isBackendManagedS3SourceId, defaultBackendEndpoint } from '@/services/backend'
 import { isS3SourceId, providerForS3Source } from '@/services/s3'
 import { storageRegistry } from '@/services/storage/registry'
@@ -56,11 +57,14 @@ function onThemeModeChange(mode: ThemeMode) {
 const storageMenuOpen = ref(false)
 const choosingWorkspace = ref(false)
 const importingMarkdown = ref(false)
+const openingFromFiles = ref(false)
 const syncingRemote = ref(false)
 const isDesktop = '__TAURI_INTERNALS__' in window
+const storageListEl = ref<HTMLElement | null>(null)
 const draggingSourceId = ref<string | null>(null)
 const dropTargetId = ref<string | null>(null)
 const dropPosition = ref<'before' | 'after' | null>(null)
+let activeSourcePointerId: number | null = null
 const s3FormOpen = ref(false)
 const s3EditingSourceId = ref<string | null>(null)
 const s3Name = ref('')
@@ -302,7 +306,7 @@ async function applyCodexMcp() {
 }
 
 const sourcePageStats = computed(() => new Map(orderedSources.value.map((source) => {
-  const pages = store.pages.filter((page) => page.storageSourceId === source.id)
+  const pages = store.pages.filter((page) => pageBoundToSource(page, source.id))
   return [source.id, { total: pages.length, active: pages.filter((page) => !page.deletedAt).length, trashed: pages.filter((page) => page.deletedAt).length }]
 })))
 
@@ -425,6 +429,11 @@ async function importMarkdown() {
   try { await store.importMarkdownFiles(); storageMenuOpen.value = false } finally { importingMarkdown.value = false }
 }
 
+async function openFromFiles() {
+  openingFromFiles.value = true
+  try { await store.openFromFiles(); storageMenuOpen.value = false } finally { openingFromFiles.value = false }
+}
+
 async function syncAndReload() {
   if (!window.confirm('同步全部存储源并重新载入？尚未保存的编辑内容可能丢失。')) return
   syncingRemote.value = true
@@ -475,7 +484,10 @@ onMounted(() => {
   ensureCodexSourceSelection()
   void refreshCodexStatus()
 })
-onBeforeUnmount(() => document.removeEventListener('click', closeAiModeMenu))
+onBeforeUnmount(() => {
+  document.removeEventListener('click', closeAiModeMenu)
+  finishSourceDrag()
+})
 
 async function syncSource(sourceId: string) {
   if (isBackendSourceId(sourceId)) {
@@ -552,37 +564,94 @@ async function openSource(path: string) {
   if (isDesktop) await openPath(path)
 }
 
-function startDrag(event: DragEvent, sourceId: string) {
-  draggingSourceId.value = sourceId
-  event.dataTransfer?.setData('text/plain', sourceId)
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
-}
-
-function updateDropPosition(event: DragEvent, targetId: string) {
-  if (!draggingSourceId.value || draggingSourceId.value === targetId) return
-  const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
-  const relativeY = (event.clientY - bounds.top) / bounds.height
-  dropTargetId.value = targetId
-  dropPosition.value = relativeY < 0.5 ? 'before' : 'after'
-}
-
 function clearDropState() {
   dropTargetId.value = null
   dropPosition.value = null
 }
 
-function finishDrag() {
+function finishSourceDrag() {
   draggingSourceId.value = null
+  activeSourcePointerId = null
   clearDropState()
+  document.body.classList.remove('storage-source-reordering')
+  window.removeEventListener('pointermove', onSourcePointerMove)
+  window.removeEventListener('pointerup', onSourcePointerUp)
+  window.removeEventListener('pointercancel', onSourcePointerUp)
 }
 
-function dropOnSource(event: DragEvent, targetId: string) {
+function updateDropFromPoint(clientY: number) {
+  const sourceId = draggingSourceId.value
+  const list = storageListEl.value
+  if (!sourceId || !list) {
+    clearDropState()
+    return
+  }
+
+  const rows = [...list.querySelectorAll<HTMLElement>('[data-source-id]')]
+  let best: { id: string; position: 'before' | 'after'; distance: number } | null = null
+  for (const row of rows) {
+    const id = row.dataset.sourceId
+    if (!id || id === sourceId) continue
+    const bounds = row.getBoundingClientRect()
+    const mid = bounds.top + bounds.height / 2
+    const position: 'before' | 'after' = clientY < mid ? 'before' : 'after'
+    const distance = Math.abs(clientY - mid)
+    if (!best || distance < best.distance) best = { id, position, distance }
+  }
+
+  if (!best) {
+    clearDropState()
+    return
+  }
+  dropTargetId.value = best.id
+  dropPosition.value = best.position
+}
+
+function onSourcePointerMove(event: PointerEvent) {
+  if (activeSourcePointerId !== null && event.pointerId !== activeSourcePointerId) return
+  if (!draggingSourceId.value) return
   event.preventDefault()
-  const sourceId = event.dataTransfer?.getData('text/plain') || draggingSourceId.value
+  updateDropFromPoint(event.clientY)
+}
+
+function onSourcePointerUp(event: PointerEvent) {
+  if (activeSourcePointerId !== null && event.pointerId !== activeSourcePointerId) return
+  const sourceId = draggingSourceId.value
+  const targetId = dropTargetId.value
   const position = dropPosition.value
-  finishDrag()
-  if (!sourceId || !position || sourceId === targetId) return
+  finishSourceDrag()
+  if (!sourceId || !targetId || !position || sourceId === targetId) return
   store.reorderStorageSource(sourceId, targetId, position)
+}
+
+function startSourceDrag(event: PointerEvent, sourceId: string) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  event.stopPropagation()
+  finishSourceDrag()
+  draggingSourceId.value = sourceId
+  activeSourcePointerId = event.pointerId
+  document.body.classList.add('storage-source-reordering')
+  const handle = event.currentTarget
+  if (handle instanceof HTMLElement) {
+    try { handle.setPointerCapture(event.pointerId) } catch { /* WebView 偶发不支持 */ }
+  }
+  window.addEventListener('pointermove', onSourcePointerMove, { passive: false })
+  window.addEventListener('pointerup', onSourcePointerUp)
+  window.addEventListener('pointercancel', onSourcePointerUp)
+  updateDropFromPoint(event.clientY)
+}
+
+function canMoveSource(sourceId: string, direction: -1 | 1) {
+  const order = store.storageSourceOrder
+  const index = order.indexOf(sourceId)
+  if (index === -1) return false
+  const target = index + direction
+  return target >= 0 && target < order.length
+}
+
+function moveSource(sourceId: string, direction: -1 | 1) {
+  store.moveStorageSource(sourceId, direction)
 }
 
 function openConflictPage(pageId: string) {
@@ -670,6 +739,7 @@ function openConflictPage(pageId: string) {
         <button :disabled="choosingWorkspace" @click="chooseWorkspace('smb')"><strong>SMB 挂载目录</strong><small>选择系统已挂载的共享目录</small></button>
         <button @click="emit('connect-backend'); storageMenuOpen = false"><strong>自定义后台{{ backend.connected ? ' · 已连接' : '' }}</strong><small>{{ backend.connected ? '登录后可添加后台存储源' : '登录并添加后台存储源' }}</small></button>
         <button @click="openS3Form()"><strong>S3 兼容对象存储</strong><small>AWS S3、MinIO、R2、Ceph 等 · 本地保存</small></button>
+        <button v-if="isDesktop" :disabled="openingFromFiles" @click="openFromFiles"><strong>{{ openingFromFiles ? '正在打开…' : '从文件打开' }}</strong><small>打开 Markdown；不在已有源内时自动创建本地工作区</small></button>
         <button :disabled="importingMarkdown || !defaultSourceId || isBackendSourceId(defaultSourceId)" @click="importMarkdown"><strong>{{ importingMarkdown ? '正在导入…' : '导入 Markdown 文件' }}</strong><small>导入到优先级最高的可用存储源</small></button>
       </div>
 
@@ -831,7 +901,7 @@ function openConflictPage(pageId: string) {
         <p v-if="codexNotice" class="minio-config-notice">{{ codexNotice }}</p>
       </form>
 
-      <div v-if="orderedSources.length || isDesktop" class="storage-settings-list">
+      <div v-if="orderedSources.length || isDesktop" ref="storageListEl" class="storage-settings-list">
         <div
           v-if="isDesktop"
           class="storage-settings-row skills-workspace-row"
@@ -854,6 +924,7 @@ function openConflictPage(pageId: string) {
           v-for="source in orderedSources"
           :key="source.id"
           class="storage-settings-row"
+          :data-source-id="source.id"
           :class="{
             unavailable: source.available === false || sourceStatusClass(source) === 'offline',
             'backend-source-entry': source.kind === 'backend',
@@ -861,15 +932,14 @@ function openConflictPage(pageId: string) {
             'drop-before': dropTargetId === source.id && dropPosition === 'before',
             'drop-after': dropTargetId === source.id && dropPosition === 'after',
           }"
-          draggable="true"
-          @dragstart="startDrag($event, source.id)"
-          @dragend="finishDrag"
-          @dragenter.prevent="updateDropPosition($event, source.id)"
-          @dragover.prevent="updateDropPosition($event, source.id)"
-          @dragleave="clearDropState"
-          @drop.prevent="dropOnSource($event, source.id)"
         >
-          <span class="storage-drag-handle" aria-hidden="true">⋮⋮</span>
+          <button
+            type="button"
+            class="storage-drag-handle"
+            title="拖动调整优先级"
+            aria-label="拖动调整优先级"
+            @pointerdown="startSourceDrag($event, source.id)"
+          >⋮⋮</button>
           <div class="storage-settings-main" :title="sourceTitle(source)">
             <div class="storage-settings-title">
               <span class="storage-status" :class="sourceStatusClass(source)"></span>
@@ -879,6 +949,8 @@ function openConflictPage(pageId: string) {
             <small>{{ sourceDetail(source) }}</small>
           </div>
           <div class="storage-settings-actions" @mousedown.stop @click.stop>
+            <button type="button" title="上移" :disabled="!canMoveSource(source.id, -1)" @click="moveSource(source.id, -1)">↑</button>
+            <button type="button" title="下移" :disabled="!canMoveSource(source.id, 1)" @click="moveSource(source.id, 1)">↓</button>
             <button v-if="canSync(source)" :disabled="syncingRemote || store.reloading" title="同步此存储源" @click="syncSource(source.id)">↻</button>
             <button v-if="isDesktop && (source.kind === 'local' || source.kind === 'smb')" :disabled="source.available === false" title="在文件管理器中打开" @click="openSource(source.path)">↗</button>
             <button v-if="source.kind === 's3'" title="编辑连接" @click="openS3Form(source.id)">✎</button>

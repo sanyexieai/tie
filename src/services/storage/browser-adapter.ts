@@ -1,4 +1,5 @@
 import type { Page, PageId, StorageSource } from '@/types'
+import { normalizePageSources, pageBoundToSource } from '@/services/page-sources'
 import { mergeSyncPages } from '@/services/storage/sync-merge'
 import type { LoadPagesResult, StorageAdapter, StorageCapabilities, SyncSourceContext } from '@/services/storage/types'
 
@@ -78,31 +79,44 @@ export const browserStorageAdapter: StorageAdapter = {
   },
   async loadPages(sourceId) {
     const snapshot = localSnapshot()
-    return { pages: snapshot.pages.filter((page) => page.storageSourceId === sourceId) }
+    return { pages: snapshot.pages.filter((page) => pageBoundToSource(page, sourceId)) }
   },
   async savePage(page) {
+    const normalized = normalizePageSources(page)
     const snapshot = localSnapshot()
-    const index = snapshot.pages.findIndex((candidate) => candidate.id === page.id)
-    if (index === -1) snapshot.pages.push(page)
+    const index = snapshot.pages.findIndex((candidate) => candidate.id === normalized.id)
+    if (index === -1) snapshot.pages.push(normalized)
     else {
       const existing = snapshot.pages[index]
-      if (pageHasChanged(existing, page)) archiveLocalRevision(existing)
-      snapshot.pages[index] = page
+      if (pageHasChanged(existing, normalized)) archiveLocalRevision(existing)
+      snapshot.pages[index] = normalized
     }
     saveLocalSnapshot(snapshot)
-    return page
+    return normalized
   },
   async permanentlyDeletePages(_sourceId, pages) {
     const pageIds = new Set(pages.map((page) => page.id))
     const snapshot = localSnapshot()
-    snapshot.pages = snapshot.pages.filter((page) => !pageIds.has(page.id))
+    // 浏览器演示：解绑时若仍绑定其他源则只更新绑定列表
+    snapshot.pages = snapshot.pages.flatMap((page) => {
+      if (!pageIds.has(page.id)) return [page]
+      if (page.storageSourceId === _sourceId || (page.storageSourceIds ?? []).includes(_sourceId)) {
+        const ids = [...new Set([page.storageSourceId, ...(page.storageSourceIds ?? [])])].filter((id) => id !== _sourceId)
+        if (!ids.length) return []
+        return [normalizePageSources({ ...page, storageSourceId: ids[0]!, storageSourceIds: ids })]
+      }
+      return []
+    })
     saveLocalSnapshot(snapshot)
     const history = localHistory()
-    pageIds.forEach((pageId) => { delete history[pageId] })
+    snapshot.pages.forEach((page) => { if (pageIds.has(page.id)) return })
+    pageIds.forEach((pageId) => {
+      if (!snapshot.pages.some((page) => page.id === pageId)) delete history[pageId]
+    })
     saveLocalHistory(history)
   },
   async transferPage(page, targetSourceId) {
-    return this.savePage({ ...page, storageSourceId: targetSourceId })
+    return this.savePage(normalizePageSources({ ...page, storageSourceId: targetSourceId, storageSourceIds: [targetSourceId] }))
   },
   async listPageRevisions(page) {
     return (localHistory()[page.id] ?? []).map((revision) => ({

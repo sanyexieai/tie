@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { Page, PageRevision, StorageSource, WorkspaceSnapshot } from '@/types'
 import { isBackendRemoteSourceId } from '@/services/backend'
 import { copyPageAssets as copyPageAssetsBetweenSources } from '@/services/attachments'
+import { mergePagesById, normalizePageSources, pageBoundToSource, pageSourceIds, withPageSources } from '@/services/page-sources'
 import { canTransferBetweenSources, transferBlockedMessage } from '@/services/transfer-policy'
 import { isS3SourceId, s3ConnectionForSource } from '@/services/s3'
 import { backendStorageAdapter, loadAllBackendPages } from '@/services/storage/backend-adapter'
@@ -109,28 +110,87 @@ export const storageRegistry = {
     contextPages: Page[] = [],
     options: { remote?: boolean } = {},
   ): Promise<WorkspaceSnapshot> {
-    const filePages = fileSnapshot.pages.filter((page) => !isBackendRemoteSourceId(page.storageSourceId) && !isS3SourceId(page.storageSourceId))
+    const filePages = fileSnapshot.pages
+      .filter((page) => !isBackendRemoteSourceId(page.storageSourceId) && !isS3SourceId(page.storageSourceId))
+      .map((page) => normalizePageSources(page))
     if (options.remote === false) {
-      return { workspace: fileSnapshot.workspace, pages: filePages }
+      return { workspace: fileSnapshot.workspace, pages: mergePagesById(filePages) }
     }
     const remote = await this.loadRemotePages(contextPages.length ? contextPages : filePages)
-    return { workspace: fileSnapshot.workspace, pages: [...filePages, ...remote.pages] }
+    return {
+      workspace: fileSnapshot.workspace,
+      pages: mergePagesById([...filePages, ...remote.pages.map((page) => normalizePageSources(page))]),
+    }
   },
 
   async savePage(page: Page, options?: SavePageOptions): Promise<Page> {
-    return this.resolve(page.storageSourceId).savePage(page, options)
+    const normalized = normalizePageSources(page)
+    const targets = pageSourceIds(normalized)
+    const primaryWrite = options?.writeSourceId ?? normalized.storageSourceId
+    let saved = await this.resolve(primaryWrite).savePage(normalized, {
+      ...options,
+      writeSourceId: primaryWrite,
+    })
+    saved = normalizePageSources({
+      ...saved,
+      storageSourceId: normalized.storageSourceId,
+      storageSourceIds: targets,
+    })
+    for (const sourceId of targets) {
+      if (sourceId === primaryWrite) continue
+      await this.resolve(sourceId).savePage(saved, {
+        force: true,
+        queueOnFailure: options?.queueOnFailure,
+        writeSourceId: sourceId,
+      })
+    }
+    return saved
   },
 
   async permanentlyDeletePages(pages: Page[]) {
-    const groups = new Map<string, Page[]>()
-    pages.forEach((page) => {
-      const list = groups.get(page.storageSourceId) ?? []
-      list.push(page)
-      groups.set(page.storageSourceId, list)
-    })
-    for (const [sourceId, group] of groups) {
-      await this.resolve(sourceId).permanentlyDeletePages(sourceId, group)
+    for (const page of pages) {
+      for (const sourceId of pageSourceIds(page)) {
+        await this.resolve(sourceId).permanentlyDeletePages(sourceId, [{ ...page, storageSourceId: sourceId }])
+      }
     }
+  },
+
+  async bindPageToSource(page: Page, targetSourceId: string): Promise<Page> {
+    const normalized = normalizePageSources(page)
+    if (pageBoundToSource(normalized, targetSourceId)) return normalized
+    if (!canTransferBetweenSources(normalized.storageSourceId, targetSourceId)) {
+      throw new Error(transferBlockedMessage(normalized.storageSourceId, targetSourceId))
+    }
+    const next = withPageSources(normalized, normalized.storageSourceId, [...pageSourceIds(normalized), targetSourceId])
+    if (isFileSourceId(normalized.storageSourceId) && isFileSourceId(targetSourceId) && await isTauri()) {
+      await invoke('copy_page_sidecars', {
+        pageId: next.id,
+        fromSourceId: normalized.storageSourceId,
+        toSourceId: targetSourceId,
+      })
+    } else {
+      await this.copyPageHistory(next, normalized.storageSourceId, targetSourceId)
+      await this.copyPageAssets(next, normalized.storageSourceId, targetSourceId)
+    }
+    return this.savePage(next, { force: true })
+  },
+
+  async unbindPageFromSource(page: Page, sourceId: string): Promise<Page> {
+    const normalized = normalizePageSources(page)
+    const ids = pageSourceIds(normalized)
+    if (!ids.includes(sourceId)) return normalized
+    if (ids.length <= 1) throw new Error('至少需要保留一个存储源')
+    const nextIds = ids.filter((id) => id !== sourceId)
+    const primary = normalized.storageSourceId === sourceId ? nextIds[0]! : normalized.storageSourceId
+    const next = withPageSources(normalized, primary, nextIds)
+    await this.resolve(sourceId).permanentlyDeletePages(sourceId, [{ ...normalized, storageSourceId: sourceId }])
+    return this.savePage(next, { force: true })
+  },
+
+  async setPagePrimarySource(page: Page, sourceId: string): Promise<Page> {
+    const normalized = normalizePageSources(page)
+    if (!pageBoundToSource(normalized, sourceId)) throw new Error('尚未绑定该存储源')
+    return this.savePage(withPageSources(normalized, sourceId, pageSourceIds(normalized)), { force: true })
   },
 
   async transferPage(page: Page, targetSourceId: string): Promise<Page> {
@@ -212,10 +272,9 @@ export const storageRegistry = {
   },
 
   async transferPageCrossAdapter(page: Page, targetSourceId: string): Promise<Page> {
-    const sourceAdapter = this.resolve(page.storageSourceId)
     const targetAdapter = this.resolve(targetSourceId)
-    const transferred = { ...page, storageSourceId: targetSourceId }
-    await targetAdapter.savePage(transferred)
+    const transferred = withPageSources(page, targetSourceId, [targetSourceId])
+    await targetAdapter.savePage(transferred, { writeSourceId: targetSourceId, force: true })
     try {
       await this.copyPageHistory(page, page.storageSourceId, targetSourceId)
     } catch (error) {
@@ -226,7 +285,14 @@ export const storageRegistry = {
     } catch (error) {
       console.warn('页面附件迁移失败', error)
     }
-    await sourceAdapter.permanentlyDeletePages(page.storageSourceId, [page])
+    for (const sourceId of pageSourceIds(page)) {
+      try {
+        await this.resolve(sourceId).permanentlyDeletePages(sourceId, [{ ...page, storageSourceId: sourceId }])
+      } catch (error) {
+        if (sourceId === page.storageSourceId) throw error
+        console.warn('清理旧绑定源失败', error)
+      }
+    }
     return transferred
   },
 
