@@ -45,6 +45,9 @@ export function appUpdaterUnavailableReason(): string | null {
   if (runtime === 'desktop-dev') {
     return '桌面开发版不支持自动更新，请安装 Release 安装包后使用'
   }
+  if (runtime === 'mobile-dev') {
+    return 'Android 开发版不支持自动更新，请安装 Release APK 后使用'
+  }
   return null
 }
 

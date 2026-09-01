@@ -141,8 +141,81 @@ jobs:
           path: release-artifacts/*
           if-no-files-found: error
 
+  build-android:
+    runs-on: ubuntu-22.04
+    env:
+      NDK_VERSION: "27.2.12479018"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;${NDK_VERSION}"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Setup Android release signing
+        if: ${{ secrets.ANDROID_KEY_BASE64 != '' }}
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd src-tauri/gen/android
+          echo "keyAlias=${ANDROID_KEY_ALIAS}" > keystore.properties
+          echo "password=${ANDROID_KEY_PASSWORD}" >> keystore.properties
+          echo "${ANDROID_KEY_BASE64}" | base64 -d > "${RUNNER_TEMP}/keystore.jks"
+          echo "storeFile=${RUNNER_TEMP}/keystore.jks" >> keystore.properties
+
+      - name: Build Tauri app (Android)
+        run: npm run tauri:android:build
+        env:
+          CI: true
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+
+      - name: Collect Android APK
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: bash scripts/collect-android-apk.sh release-artifacts-android
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tie-android
+          path: release-artifacts-android/*.apk
+          if-no-files-found: error
+
   publish:
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, build-android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -159,6 +232,12 @@ jobs:
           name: tie-windows
           path: dist/windows
 
+      - name: Download Android artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: tie-android
+          path: dist/android
+
       - name: Merge updater manifest
         shell: bash
         env:
@@ -168,6 +247,7 @@ jobs:
           mkdir -p dist
           cp dist/linux/* dist/ 2>/dev/null || true
           cp dist/windows/* dist/ 2>/dev/null || true
+          cp dist/android/* dist/ 2>/dev/null || true
           python3 scripts/merge-updater-manifest.py dist/linux/latest.json dist/windows/latest.json dist/latest.json
           ls -la dist
 
@@ -189,5 +269,6 @@ jobs:
             dist/*.exe
             dist/*.exe.sig
             dist/latest.json
+            dist/tie-*-android*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

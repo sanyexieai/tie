@@ -5,6 +5,7 @@ import { mergePagesById, normalizePageSources, pageBoundToSource, pageSourceIds,
 import { loadLocalS3Providers, refreshS3Providers, s3StorageSource } from '@/services/s3'
 import { sourceStatusStore, syncQueue, storageRegistry } from '@/services/storage'
 import { transferPreservesHistory } from '@/services/transfer-policy'
+import { isMobileClient } from '@/services/platform'
 import { workspaceService } from '@/services/workspace'
 import { useBackendStore } from '@/stores/backend'
 import type { SyncConflict, SyncResult } from '@/services/storage/types'
@@ -370,6 +371,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function addStorageSource(kind: StorageKind = 'local') {
+    if (isMobileClient.value && kind !== 's3') return false
     const snapshot = await workspaceService.addStorageSource(kind)
     if (!snapshot) return false
     workspace.value = snapshot.workspace

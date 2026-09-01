@@ -13,7 +13,6 @@
     "opener:allow-reveal-item-in-dir",
     "opener:allow-default-urls",
     "clipboard-manager:allow-read-image",
-    "updater:default",
     "process:allow-restart"
   ]
 }

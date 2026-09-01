@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { preparePageExportBundle } from '@/services/attachments'
+import { getPlatformType, isTauriDesktop } from '@/services/platform'
 import { storageRegistry } from '@/services/storage/registry'
 import type { SavePageOptions } from '@/services/storage/types'
 import { isBackendRemoteSourceId } from '@/services/backend'
@@ -59,10 +60,18 @@ function defaultPreferences(): WorkspacePreferences {
   return { favoritePageIds: [], recentPageIds: [], collapsedPageIds: [], spellcheckEnabled: true, sourceMode: false, storageSourceOrder: [], skillsSectionCollapsed: true }
 }
 
-async function isTauri() { return '__TAURI_INTERNALS__' in window }
+async function isTauri() {
+  return isTauriDesktop()
+}
 
 async function loadFileSnapshot(): Promise<WorkspaceSnapshot> {
-  if (await isTauri()) return invoke<WorkspaceSnapshot>('load_workspace')
+  if (isTauriDesktop()) {
+    const platform = getPlatformType()
+    if (platform === 'android' || platform === 'ios') {
+      return invoke<WorkspaceSnapshot>('load_mobile_workspace')
+    }
+    return invoke<WorkspaceSnapshot>('load_workspace')
+  }
   return localSnapshot()
 }
 

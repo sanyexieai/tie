@@ -1,0 +1,21 @@
+{
+  "name": "@tie/mcp",
+  "version": "1.0.2",
+  "private": true,
+  "type": "module",
+  "description": "Local-first MCP server for Tie workspaces (Codex / other agents)",
+  "bin": {
+    "tie-mcp": "./src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.0",
+    "zod": "^3.25.0"
+  }
+}

@@ -17,6 +17,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 import { checkForAppUpdateOnStartup } from '@/services/app-updater'
+import { initPlatform } from '@/services/platform'
 
 const PANEL_WIDTHS_KEY = 'tie:panel-widths'
 const SIDEBAR_DEFAULT = 256
@@ -178,6 +179,7 @@ onMounted(async () => {
   contextDrawerQuery.addEventListener('change', syncContextDrawer)
   window.addEventListener('keydown', onShortcut)
   window.addEventListener('tie:toggle-focus-mode', toggleFocusMode)
+  await initPlatform()
   await backend.initialize()
   await store.initialize()
   const update = await checkForAppUpdateOnStartup()

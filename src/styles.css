@@ -422,6 +422,11 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   border-color: var(--accent);
   background: var(--accent);
 }
+.mobile-client-banner {
+  margin-bottom: 10px;
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent-soft) 55%, var(--bg-muted));
+}
 .app-update-dialog .app-update-notes {
   margin: 0;
   color: var(--text-secondary);

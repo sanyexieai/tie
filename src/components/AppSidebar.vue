@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import PageTreeItem from '@/components/PageTreeItem.vue'
 import AppIcon from '@/components/AppIcon.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { supportsAgentSkills } from '@/services/platform'
 import { useBackendStore } from '@/stores/backend'
 
 const store = useWorkspaceStore()
@@ -23,7 +24,7 @@ watch(() => backend.workspaces.map((workspace) => workspace.id).join('\n'), () =
 })
 
 watch(() => store.initialized, (ready) => {
-  if (ready && '__TAURI_INTERNALS__' in window) void store.refreshSkills()
+  if (ready && supportsAgentSkills.value && '__TAURI_INTERNALS__' in window) void store.refreshSkills()
 }, { immediate: true })
 
 async function createTopLevel() { await store.createPage(null) }
@@ -122,7 +123,7 @@ function openFirstInbox() {
       />
     </div>
 
-    <div class="sidebar-section-title skills-section-title">
+    <div v-if="supportsAgentSkills" class="sidebar-section-title skills-section-title">
       <button
         type="button"
         class="skills-section-toggle"
@@ -137,6 +138,7 @@ function openFirstInbox() {
       <button type="button" title="扫描并接入" @click="store.openSkillManager()">+</button>
     </div>
     <div
+      v-if="supportsAgentSkills"
       v-show="!store.skillsSectionCollapsed"
       class="page-tree skills-tree"
       role="list"

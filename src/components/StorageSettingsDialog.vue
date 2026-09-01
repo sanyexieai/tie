@@ -40,7 +40,7 @@ import {
   checkForAppUpdate,
   downloadAndInstallAppUpdate,
 } from '@/services/app-updater'
-import { isTauriDesktop, tieRuntimeKind, tieRuntimeLabel } from '@/services/platform'
+import { isTauriDesktop, isMobileClient, supportsLocalFileStorage, tieRuntimeKind, tieRuntimeLabel } from '@/services/platform'
 
 const emit = defineEmits<{ close: []; 'connect-backend': [] }>()
 const store = useWorkspaceStore()
@@ -742,6 +742,13 @@ async function installAppUpdate() {
         </div>
       </div>
 
+      <div v-if="isMobileClient" class="theme-mode-row mobile-client-banner">
+        <span>
+          <strong>Android 精简版</strong>
+          <small>仅支持 S3 与自定义后台同步；本地目录、SMB、Agent Skills 请使用桌面端。</small>
+        </span>
+      </div>
+
       <div class="theme-mode-row app-update-row">
         <span>
           <strong>应用更新</strong>
@@ -786,7 +793,7 @@ async function installAppUpdate() {
           @click="toggleAiForm"
         >AI 标签提取</button>
         <button
-          v-if="isDesktop"
+          v-if="supportsLocalFileStorage"
           type="button"
           :class="{ active: codexFormOpen }"
           :aria-expanded="codexFormOpen"
@@ -813,17 +820,17 @@ async function installAppUpdate() {
       </div>
 
       <div v-if="storageMenuOpen" class="storage-menu storage-settings-menu">
-        <button :disabled="choosingWorkspace" @click="chooseWorkspace('local')"><strong>本地目录</strong><small>选择磁盘中的知识库</small></button>
-        <button :disabled="choosingWorkspace" @click="chooseWorkspace('smb')"><strong>SMB 挂载目录</strong><small>选择系统已挂载的共享目录</small></button>
+        <button v-if="supportsLocalFileStorage" :disabled="choosingWorkspace" @click="chooseWorkspace('local')"><strong>本地目录</strong><small>选择磁盘中的知识库</small></button>
+        <button v-if="supportsLocalFileStorage" :disabled="choosingWorkspace" @click="chooseWorkspace('smb')"><strong>SMB 挂载目录</strong><small>选择系统已挂载的共享目录</small></button>
         <button @click="emit('connect-backend'); storageMenuOpen = false"><strong>自定义后台{{ backend.connected ? ' · 已连接' : '' }}</strong><small>{{ backend.connected ? '登录后可添加后台存储源' : '登录并添加后台存储源' }}</small></button>
-        <button @click="openS3Form()"><strong>S3 兼容对象存储</strong><small>AWS S3、MinIO、R2、Ceph 等 · 本地保存</small></button>
-        <button v-if="isDesktop" :disabled="openingFromFiles" @click="openFromFiles"><strong>{{ openingFromFiles ? '正在打开…' : '从文件打开' }}</strong><small>打开 Markdown；不在已有源内时自动创建本地工作区</small></button>
-        <button :disabled="importingMarkdown || !defaultSourceId || isBackendSourceId(defaultSourceId)" @click="importMarkdown"><strong>{{ importingMarkdown ? '正在导入…' : '导入 Markdown 文件' }}</strong><small>导入到优先级最高的可用存储源</small></button>
+        <button @click="openS3Form()"><strong>S3 兼容对象存储</strong><small>AWS S3、MinIO、R2、Ceph 等 · {{ isMobileClient ? '密钥保存在应用私有目录' : '本地保存' }}</small></button>
+        <button v-if="supportsLocalFileStorage" :disabled="openingFromFiles" @click="openFromFiles"><strong>{{ openingFromFiles ? '正在打开…' : '从文件打开' }}</strong><small>打开 Markdown；不在已有源内时自动创建本地工作区</small></button>
+        <button v-if="supportsLocalFileStorage" :disabled="importingMarkdown || !defaultSourceId || isBackendSourceId(defaultSourceId)" @click="importMarkdown"><strong>{{ importingMarkdown ? '正在导入…' : '导入 Markdown 文件' }}</strong><small>导入到优先级最高的可用存储源</small></button>
       </div>
 
       <form v-if="s3FormOpen" class="minio-config-form" @submit.prevent="saveS3Connection">
         <strong>{{ s3EditingSourceId ? '编辑 S3 连接' : '连接 S3 兼容对象存储' }}</strong>
-        <small>兼容 AWS S3、MinIO、R2、Ceph；连接配置保存在本机，密钥保存在系统凭据库。</small>
+        <small>兼容 AWS S3、MinIO、R2、Ceph；{{ isMobileClient ? '连接配置与密钥保存在应用私有目录。' : '连接配置保存在本机，密钥保存在系统凭据库。' }}</small>
         <label>显示名称<input v-model="s3Name" placeholder="例如：团队附件库" /></label>
         <label>Endpoint<input v-model="s3Endpoint" required placeholder="https://minio.example.com" /></label>
         <label>Bucket<input v-model="s3Bucket" required placeholder="knowledge-base" /></label>
@@ -935,7 +942,7 @@ async function installAppUpdate() {
       </form>
       <p v-if="!aiFormOpen && aiNotice" class="minio-config-notice">{{ aiNotice }}</p>
 
-      <form v-if="isDesktop && codexFormOpen" class="minio-config-form codex-mcp-form" @submit.prevent="applyCodexMcp">
+      <form v-if="supportsLocalFileStorage && codexFormOpen" class="minio-config-form codex-mcp-form" @submit.prevent="applyCodexMcp">
         <strong>Agent 知识库</strong>
         <small>{{ codexStatusSummary }} · 把本地/SMB 工作区接入 Codex / Cursor / Claude Code 的 MCP。Skill 在「Agent Skills」管理；接入时会同步到对应客户端目录。</small>
         <label>
@@ -979,9 +986,9 @@ async function installAppUpdate() {
         <p v-if="codexNotice" class="minio-config-notice">{{ codexNotice }}</p>
       </form>
 
-      <div v-if="orderedSources.length || isDesktop" ref="storageListEl" class="storage-settings-list">
+      <div v-if="orderedSources.length || supportsLocalFileStorage" ref="storageListEl" class="storage-settings-list">
         <div
-          v-if="isDesktop"
+          v-if="supportsLocalFileStorage"
           class="storage-settings-row skills-workspace-row"
           role="button"
           tabindex="0"
@@ -1039,7 +1046,7 @@ async function installAppUpdate() {
       </div>
       <p v-else class="storage-settings-empty">还没有连接存储源，点击「添加存储源」开始。</p>
 
-      <p class="storage-settings-note">所有存储源的页面都在左侧同一棵树里；Agent Skills 是并列的特殊工作区。这里只调整优先级和管理连接。</p>
+      <p class="storage-settings-note">{{ isMobileClient ? 'Android 精简版通过 S3 或后台加载页面；连接后点「同步并载入」。' : '所有存储源的页面都在左侧同一棵树里；Agent Skills 是并列的特殊工作区。这里只调整优先级和管理连接。' }}</p>
     </section>
   </div>
 </template>

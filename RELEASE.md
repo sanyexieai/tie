@@ -8,7 +8,8 @@
 
 1. 在 **Ubuntu 22.04** 构建 Linux 安装包（`.deb` / `.rpm`；固定 22.04 以兼容 WebKitGTK 4.1 与较低 glibc）
 2. 在 Windows 构建 Windows 安装包（`.msi` / `.exe` NSIS）
-3. 创建 GitHub Release，并附上上述产物与 `latest.json`（供桌面端自动更新）
+3. 在 **Ubuntu 22.04** 构建 Android 通用 APK（`tie-<版本>-android-universal.apk`）
+4. 创建 GitHub Release，并附上上述产物与 `latest.json`（供桌面端自动更新）
 
 ### 自动更新签名
 
@@ -27,6 +28,23 @@ cat ~/.tauri/tie.key   # 复制到 GitHub Secret，勿提交仓库
 ```
 
 **私钥丢失后，已安装用户将无法再验证你发布的新版本。**
+
+### Android 发布签名（可选，推荐）
+
+未配置时 CI 仍会构建 **未签名** APK（文件名带 `-unsigned`，一般无法直接安装）。配置以下 Secret 后，Gradle 会在 Release 构建时自动签名：
+
+| Secret | 说明 |
+|--------|------|
+| `ANDROID_KEY_BASE64` | Release keystore（`.jks`）的 base64，例如 `base64 -w0 tie-release.jks` |
+| `ANDROID_KEY_ALIAS` | 密钥别名 |
+| `ANDROID_KEY_PASSWORD` | keystore 与 key 的密码（若相同则填同一值） |
+
+本地生成 keystore 示例：
+
+```bash
+keytool -genkey -v -keystore tie-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias tie
+base64 -w0 tie-release.jks   # 输出写入 ANDROID_KEY_BASE64
+```
 
 桌面端启动时会静默检查 `https://github.com/sanyexieai/tie/releases/latest/download/latest.json`；发现新版本会提示，也可在「设置 → 应用更新」手动检查。
 

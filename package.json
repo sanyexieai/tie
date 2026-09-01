@@ -1,7 +1,7 @@
 {
   "name": "tie",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.0.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -18,6 +18,8 @@
     "tauri:build": "node scripts/tauri-build.mjs",
     "tauri:build:linux": "tauri build --bundles deb,rpm",
     "tauri:build:windows": "tauri build --bundles msi,nsis",
+    "tauri:android:dev": "node scripts/tauri-android-dev.mjs",
+    "tauri:android:build": "tauri android build",
     "mcp": "node packages/tie-mcp/src/server.js",
     "mcp:setup": "node scripts/setup-codex-mcp.mjs",
     "test:mcp": "npm --prefix packages/tie-mcp test",
@@ -29,6 +31,7 @@
     "@tauri-apps/plugin-clipboard-manager": "^2.3.3",
     "@tauri-apps/plugin-dialog": "^2.4.0",
     "@tauri-apps/plugin-opener": "^2.5.0",
+    "@tauri-apps/plugin-os": "^2.3.2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-store": "^2.4.0",
     "@tauri-apps/plugin-updater": "^2.11.0",

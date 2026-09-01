@@ -82,7 +82,7 @@ Typora 风格编辑区、侧栏页面树，以及右侧大纲 / 链接 / 局部�
 | 类型 | 说明 |
 |------|------|
 | 本地目录 / SMB | 真实 Markdown 文件，历史在 `.tie/history/` |
-| 本地 S3 | MinIO、AWS S3、R2 等；凭据存系统 keyring，配置在 `workspace.json` |
+| 本地 S3 | MinIO、AWS S3、R2 等；桌面凭据存系统 keyring，Android 凭据存应用私有目录；配置在 `workspace.json` |
 | 自定义后台 | 可选 Express 服务，托管工作区页面与 S3 Provider 凭据 |
 | backend-s3 | 通过后台代理访问 S3，本地不保存密钥 |
 
@@ -157,7 +157,7 @@ npm run backend:dev
 | 存储类型 | 备份方式 |
 |----------|----------|
 | 本地目录 / SMB | 直接复制整个存储源目录（含 `pages/`、`.tie/history/`、`.tie/assets/`） |
-| 本地 S3 | 备份 bucket 内 `tie/` 前缀对象；凭据在系统 keyring |
+| 本地 S3 | 备份 bucket 内 `tie/` 前缀对象；桌面凭据在系统 keyring，Android 在应用私有目录 |
 | 后台工作区 | 复制 `backend/data/workspaces/<工作区 ID>/` |
 | 浏览器演示 | 无法可靠备份，请勿用于重要数据 |
 
@@ -170,7 +170,7 @@ Tie 内的页面 ID 与跨源链接写在 Markdown Frontmatter 中；迁移目�
 - 涉及后台源的页面迁移**不保留**历史版本（file ↔ S3 迁移会保留）
 - 浏览器模式不支持 `tie://asset/` 真实附件存储
 - Linux AppImage 安装包尚未提供（当前 Release 为 deb/rpm；Windows 为 msi/nsis）
-- 桌面版支持应用内自动更新（需 Release 已签名并上传 `latest.json`）；浏览器演示模式不支持
+- 桌面版支持应用内自动更新（需 Release 已签名并上传 `latest.json`）；浏览器演示模式与 Android 精简版不支持
 - Codex / Agent 外接知识库为可选本地包 `@tie/mcp`（`packages/tie-mcp`），不依赖自定义后台
 
 ## 运行
@@ -207,6 +207,78 @@ npm run tauri:build:windows  # msi + nsis
 
 Linux 构建需要 WebKitGTK、libsoup 和相关 GTK 开发库；缺少这些依赖时，前端的浏览器开发模式仍可使用。
 
+开发时若 Vite 报 `Port 1420 is already in use`，说明上次 dev 未退出干净，可先结束占用进程再重试：
+
+```bash
+ss -tlnp | rg ':1420'
+kill <pid>
+npm run tauri:dev
+```
+
+### Android 精简版（S3 / 后台同步）
+
+Android 版**不包含**本地目录、SMB、Agent Skills、MCP 接入、应用内 OTA 更新；页面通过 **S3** 或 **自定义后台** 同步。Rust 侧按平台拆分：`common/` + `s3/` 为双端共用，`desktop/`、`credentials`、`ai_cli`、`codex_mcp`、`skills` 仅桌面编译进包。
+
+**环境要求：**
+
+- JDK 17+（Android Gradle 推荐；可用 Temurin 装到 `~/.local/jdk`）
+- Android SDK + NDK（`platform-tools`、`build-tools`、`platforms;android-35`、`ndk;27.2.12479018` 等）
+- 环境变量（写入 `~/.bashrc` 后 `source ~/.bashrc`）：
+
+```bash
+export JAVA_HOME="$HOME/.local/jdk"
+export ANDROID_HOME="$HOME/Android/Sdk"
+export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+```
+
+- Rust Android targets：
+
+```bash
+rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+```
+
+**Linux 无 Android Studio 时装 SDK（用户目录，无需 sudo）：**
+
+```bash
+mkdir -p ~/Android/Sdk/cmdline-tools
+curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" \
+  -o /tmp/cmdline-tools.zip
+unzip -q /tmp/cmdline-tools.zip -d /tmp/android-cmdline
+mv /tmp/android-cmdline/cmdline-tools ~/Android/Sdk/cmdline-tools/latest
+yes | sdkmanager --licenses
+sdkmanager --install \
+  "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+```
+
+也可用 [Android Studio](https://developer.android.com/studio) 图形界面安装 SDK，路径按实际安装位置调整上述变量。
+
+**首次初始化 Android 工程（只需一次，需已设好 SDK/NDK）：**
+
+```bash
+CI=true npx tauri android init --ci
+```
+
+生成目录：`src-tauri/gen/android/`（勿手改；升级 Tauri 或改包名时可重新 init）。
+
+**开发调试（需连接设备或模拟器）：**
+
+```bash
+npm run tauri:android:dev
+```
+
+**构建 APK：**
+
+```bash
+npm run tauri:android:build
+```
+
+首次 Gradle 构建可能需 10–30 分钟。产物通常在 `src-tauri/gen/android/app/build/outputs/apk/`。
+
+推送 `v*` tag 时，GitHub Actions（`release.yml`）会自动构建并上传 `tie-<版本>-android-universal.apk` 到 Release；需在仓库 Secrets 配置 `ANDROID_KEY_*` 才会产出可安装的已签名 APK（见 [`RELEASE.md`](RELEASE.md)）。
+
+在应用「设置 → 添加存储源」中配置 S3 或登录后台，然后点「同步并载入」拉取页面。
+
 ### 可选：Agent 知识库（Codex / Cursor / Claude Code）
 
 - **桌面端**：存储设置 →「Agent 知识库」→ 选择工作区与客户端 →「接入所选客户端」
@@ -219,6 +291,21 @@ npm run mcp:setup -- --workspace /path/to/workspace --clients cursor,claude
 ```
 
 配置与 Skill 见 [`packages/tie-mcp/README.md`](packages/tie-mcp/README.md)。
+
+## 桌面 / 移动端代码结构（Rust）
+
+`src-tauri/src/` 按平台拆分，避免移动端编入桌面专用依赖（如 `keyring`、OpenSSL 系 TLS）：
+
+| 模块 | 平台 | 职责 |
+|------|------|------|
+| `common/` | 双端 | 工作区类型、设置读写、Markdown 解析、路径工具 |
+| `s3/` | 双端 | S3 页面/附件/历史、Provider 配置、连接测试 |
+| `mobile.rs` | 双端 | 移动端工作区快照；Android/iOS S3 凭据文件 |
+| `credentials.rs` | 仅桌面 | 系统 keyring 读写 S3 密钥 |
+| `desktop/` | 仅桌面 | 本地/SMB 页面、导入导出、file↔S3 迁移 |
+| `ai_cli.rs` / `codex_mcp.rs` / `skills.rs` | 仅桌面 | AI 标签 CLI、Agent MCP、Skill 管理 |
+
+S3 客户端使用 `minio` + **rustls**（`default-features = false, features = ["rustls-tls"]`），便于 Android 交叉编译。桌面 OTA 权限在 `capabilities/desktop-updater.json`，移动端 capability 不含 `updater`。
 
 ## 开发检查
 
