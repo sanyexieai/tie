@@ -182,13 +182,16 @@ jobs:
           workspaces: src-tauri -> target
 
       - name: Setup Android release signing
-        if: ${{ secrets.ANDROID_KEY_BASE64 != '' }}
         env:
           ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          if [ -z "${ANDROID_KEY_BASE64}" ]; then
+            echo "ANDROID_KEY_BASE64 not configured; building unsigned APK."
+            exit 0
+          fi
           cd src-tauri/gen/android
           echo "keyAlias=${ANDROID_KEY_ALIAS}" > keystore.properties
           echo "password=${ANDROID_KEY_PASSWORD}" >> keystore.properties
