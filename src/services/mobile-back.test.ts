@@ -1,16 +1,22 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 
+type TieBackWindow = Window & { __tieHandleAndroidBack?: () => boolean }
+
+function backWindow() {
+  return window as TieBackWindow
+}
+
 function installWindowStub() {
-  const store: Record<string, unknown> = {}
+  const store: { __tieHandleAndroidBack?: () => boolean } = {}
   vi.stubGlobal('window', {
     get __tieHandleAndroidBack() {
-      return store.__tieHandleAndroidBack as (() => boolean) | undefined
+      return store.__tieHandleAndroidBack
     },
     set __tieHandleAndroidBack(value: (() => boolean) | undefined) {
       if (value === undefined) delete store.__tieHandleAndroidBack
       else store.__tieHandleAndroidBack = value
     },
-  })
+  } satisfies TieBackWindow)
 }
 
 describe('mobile-back handler contract', () => {
@@ -31,7 +37,7 @@ describe('mobile-back handler contract', () => {
       goBack,
       showLeaveHint,
     })
-    expect(window.__tieHandleAndroidBack?.()).toBe(false)
+    expect(backWindow().__tieHandleAndroidBack?.()).toBe(false)
     expect(goBack).toHaveBeenCalledOnce()
     expect(showLeaveHint).not.toHaveBeenCalled()
     uninstallMobileBackHandler()
@@ -46,9 +52,9 @@ describe('mobile-back handler contract', () => {
       goBack,
       showLeaveHint,
     })
-    expect(window.__tieHandleAndroidBack?.()).toBe(false)
+    expect(backWindow().__tieHandleAndroidBack?.()).toBe(false)
     expect(showLeaveHint).toHaveBeenCalledOnce()
-    expect(window.__tieHandleAndroidBack?.()).toBe(true)
+    expect(backWindow().__tieHandleAndroidBack?.()).toBe(true)
     uninstallMobileBackHandler()
   })
 
@@ -61,12 +67,12 @@ describe('mobile-back handler contract', () => {
       goBack: () => true,
       showLeaveHint,
     })
-    expect(window.__tieHandleAndroidBack?.()).toBe(false)
+    expect(backWindow().__tieHandleAndroidBack?.()).toBe(false)
     atHome = false
     resetMobileBackLeaveArm()
-    expect(window.__tieHandleAndroidBack?.()).toBe(false)
+    expect(backWindow().__tieHandleAndroidBack?.()).toBe(false)
     atHome = true
-    expect(window.__tieHandleAndroidBack?.()).toBe(false)
+    expect(backWindow().__tieHandleAndroidBack?.()).toBe(false)
     expect(showLeaveHint).toHaveBeenCalledTimes(2)
     uninstallMobileBackHandler()
   })
