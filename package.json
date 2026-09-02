@@ -22,6 +22,7 @@
     "tauri:android:build": "tauri android build",
     "android:emulator:setup": "bash scripts/setup-android-emulator.sh",
     "android:emulator": "bash scripts/start-android-emulator.sh",
+    "android:debug": "bash scripts/android-debug.sh",
     "mcp": "node packages/tie-mcp/src/server.js",
     "mcp:setup": "node scripts/setup-codex-mcp.mjs",
     "test:mcp": "npm --prefix packages/tie-mcp test",

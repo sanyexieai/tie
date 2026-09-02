@@ -261,7 +261,21 @@ CI=true npx tauri android init --ci
 
 生成目录：`src-tauri/gen/android/`（勿手改；升级 Tauri 或改包名时可重新 init）。
 
-**开发调试（必须先有 adb 设备，无需 Android Studio）：**
+**一键连接并调试（推荐）：**
+
+```bash
+npm run android:debug
+```
+
+无设备时会自动启动模拟器，配置 `adb reverse`，再跑 `tauri android dev`（编译 debug 包、安装到设备、连 Vite 热更新）。
+
+仅构建 Release 并安装（不启 dev server）：
+
+```bash
+npm run android:debug -- --install-only
+```
+
+**开发调试（分步）：**
 
 ```bash
 adb devices   # 应看到一行 xxx	device（不能是 unauthorized 或空列表）
