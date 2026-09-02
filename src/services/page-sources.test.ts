@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Page } from '@/types'
-import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageCloudSourceIds, pageContentEqual, pageForStorageWrite, pageMirrorSourceIds, pageSourceIds, pageSourceRoleLabel, prunePageSources, remapPageSourceIds, resolveCollaborationPrimary, sourceShortLabel, withPageSources } from '@/services/page-sources'
+import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageCloudSourceIds, pageContentEqual, pageForStorageWrite, pageMirrorSourceIds, pageSourceIds, pageSourceRoleLabel, pageWriteEqual, prunePageSources, remapPageSourceIds, resolveCollaborationPrimary, sourceShortLabel, withPageSources } from '@/services/page-sources'
 
 function page(partial: Partial<Page> & Pick<Page, 'id' | 'storageSourceId'>): Page {
   return {
@@ -148,5 +148,12 @@ describe('page-sources', () => {
     const b = page({ id: 'a', storageSourceId: 's1', markdown: '# hi\n\n\n' })
     expect(pageContentEqual(a, b)).toBe(true)
     expect(pageContentEqual(a, page({ id: 'a', storageSourceId: 's1', markdown: '# bye\n' }))).toBe(false)
+  })
+
+  it('pageWriteEqual treats deletedAt changes as a write', () => {
+    const active = page({ id: 'a', storageSourceId: 's1', markdown: '# hi\n', deletedAt: null })
+    const trashed = { ...active, deletedAt: '2026-01-02T00:00:00.000Z' }
+    expect(pageContentEqual(active, trashed)).toBe(true)
+    expect(pageWriteEqual(active, trashed)).toBe(false)
   })
 })

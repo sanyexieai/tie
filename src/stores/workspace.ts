@@ -1,7 +1,7 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { backendWorkspaceSource, backendS3ProviderSource, isBackendRemoteSourceId } from '@/services/backend'
-import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageContentEqual, pageSourceIds, prunePageSources, remapPageSourceIds, withPageSources } from '@/services/page-sources'
+import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageContentEqual, pageSourceIds, pageWriteEqual, prunePageSources, remapPageSourceIds, withPageSources } from '@/services/page-sources'
 import { reconcileSaveAgainstRemote } from '@/services/save-reconcile'
 import { isLocalWinningConflict } from '@/services/storage/sync-merge'
 import { loadLocalS3Providers, refreshS3Providers, s3StorageSource, takeS3SourceIdRemap, buildS3SourceIdHealingRemap } from '@/services/s3'
@@ -796,8 +796,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const previous = pages.value.find((item) => item.id === page.id)
     const markdown = withChildPageLinks(page)
     const contentDraft = { ...page, markdown }
-    // 无正文/标题/标签差异时不写盘、不刷新 updatedAt（避免自动保存空转）。
-    if (!options?.force && previous && pageContentEqual(contentDraft, previous)) {
+    // 无正文/标题/标签/删除态/树结构差异时不写盘、不刷新 updatedAt（避免自动保存空转）。
+    if (!options?.force && previous && pageWriteEqual(contentDraft, previous)) {
       return
     }
     const draft = { ...contentDraft, updatedAt: new Date().toISOString() }
@@ -1056,7 +1056,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const deletedAt = new Date().toISOString()
     saving.value = true
     try {
-      const updated = await Promise.all(pages.value.filter((page) => removed.has(page.id)).map((page) => workspaceService.savePage({ ...page, deletedAt, updatedAt: deletedAt })))
+      const updated = await Promise.all(pages.value.filter((page) => removed.has(page.id)).map((page) => workspaceService.savePage({ ...page, deletedAt, updatedAt: deletedAt }, { force: true })))
       pages.value = pages.value.map((page) => updated.find((candidate) => candidate.id === page.id) ?? page)
       const parentUpdates = pages.value
         .filter((parent) => !parent.deletedAt)
@@ -1092,7 +1092,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const updatedAt = new Date().toISOString()
     saving.value = true
     try {
-      const updated = await Promise.all(pages.value.filter((page) => restored.has(page.id)).map((page) => workspaceService.savePage({ ...page, parentId: restoreAtTopLevel && page.id === pageId ? null : page.parentId, deletedAt: null, updatedAt })))
+      const updated = await Promise.all(pages.value.filter((page) => restored.has(page.id)).map((page) => workspaceService.savePage({ ...page, parentId: restoreAtTopLevel && page.id === pageId ? null : page.parentId, deletedAt: null, updatedAt }, { force: true })))
       pages.value = pages.value.map((page) => updated.find((candidate) => candidate.id === page.id) ?? page)
       const parentUpdates = pages.value
         .filter((parent) => !parent.deletedAt)

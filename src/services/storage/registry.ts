@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { Page, PageRevision, StorageSource, WorkspaceSnapshot } from '@/types'
 import { isBackendRemoteSourceId } from '@/services/backend'
 import { copyPageAssets as copyPageAssetsBetweenSources, ensurePageAssetsOnSource } from '@/services/attachments'
-import { mergePagesById, normalizePageSources, pageBoundToSource, pageContentEqual, pageForStorageWrite, pageMirrorSourceIds, pageSourceIds, remapPageSourceIds, withPageSources } from '@/services/page-sources'
+import { mergePagesById, normalizePageSources, pageBoundToSource, pageForStorageWrite, pageMirrorSourceIds, pageSourceIds, pageWriteEqual, remapPageSourceIds, withPageSources } from '@/services/page-sources'
 import { canTransferBetweenSources, transferBlockedMessage } from '@/services/transfer-policy'
 import { isS3SourceId, s3ConnectionForSource, buildS3SourceIdHealingRemap } from '@/services/s3'
 import { isCloudStorageSourceId } from '@/services/storage-identity'
@@ -136,7 +136,7 @@ export const storageRegistry = {
         ...normalized,
         storageSourceId: primaryWrite,
       }).catch(() => null)
-      if (latest && pageContentEqual(latest, normalized)) {
+      if (latest && pageWriteEqual(latest, normalized)) {
         return normalizePageSources({
           ...latest,
           storageSourceId: normalized.storageSourceId,
@@ -408,7 +408,7 @@ export const storageRegistry = {
       try {
         if (item.operation === 'save') {
           const latest = await this.readLatestPage(item.page).catch(() => null)
-          if (latest && pageContentEqual(latest, item.page)) {
+          if (latest && pageWriteEqual(latest, item.page)) {
             savedPages.push(normalizePageSources({
               ...latest,
               storageSourceId: item.page.storageSourceId,
@@ -418,7 +418,7 @@ export const storageRegistry = {
             continue
           }
           let expectedUpdatedAt = item.expectedUpdatedAt
-          if (latest && expectedUpdatedAt && latest.updatedAt !== expectedUpdatedAt && pageContentEqual(latest, item.page)) {
+          if (latest && expectedUpdatedAt && latest.updatedAt !== expectedUpdatedAt && pageWriteEqual(latest, item.page)) {
             expectedUpdatedAt = latest.updatedAt
           }
           const saved = await this.savePage(item.page, { expectedUpdatedAt, queueOnFailure: false })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { PageTreeNode, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { pageBoundToSource, pageSourceIds, pageSourceRoleLabel, sourceShortLabel } from '@/services/page-sources'
@@ -63,6 +63,9 @@ const actionsOpen = ref(false)
 const bindMenuOpen = ref(false)
 const bindBusy = ref(false)
 const actionsRoot = ref<HTMLElement | null>(null)
+const moreButton = ref<HTMLElement | null>(null)
+const actionMenu = ref<HTMLElement | null>(null)
+const menuStyle = ref<Record<string, string>>({})
 const swipeActionsRef = ref<HTMLElement | null>(null)
 const swipeOffset = ref(0)
 const swipeActionsWidth = ref(220)
@@ -274,12 +277,51 @@ function onTreeKeydown(event: KeyboardEvent) {
   }
 }
 
+function positionActionMenu() {
+  const button = moreButton.value
+  if (!button) return
+  const rect = button.getBoundingClientRect()
+  const menuWidth = 168
+  const pad = 8
+  const left = Math.min(
+    Math.max(pad, rect.right - menuWidth),
+    window.innerWidth - menuWidth - pad,
+  )
+  const spaceBelow = window.innerHeight - rect.bottom - pad
+  const preferUp = spaceBelow < 220 && rect.top > spaceBelow
+  menuStyle.value = preferUp
+    ? {
+        left: `${left}px`,
+        bottom: `${window.innerHeight - rect.top + 4}px`,
+        top: 'auto',
+        maxHeight: `${Math.max(160, rect.top - pad * 2)}px`,
+      }
+    : {
+        left: `${left}px`,
+        top: `${rect.bottom + 4}px`,
+        bottom: 'auto',
+        maxHeight: `${Math.max(160, spaceBelow)}px`,
+      }
+}
+
+function toggleActions() {
+  actionsOpen.value = !actionsOpen.value
+  bindMenuOpen.value = false
+  if (actionsOpen.value) {
+    void nextTick(() => positionActionMenu())
+  }
+}
+
 function closeActionsOnOutside(event: MouseEvent) {
   const target = event.target
-  if (actionsOpen.value && target instanceof Node && !actionsRoot.value?.contains(target)) {
-    actionsOpen.value = false
-    bindMenuOpen.value = false
-  }
+  if (!(actionsOpen.value && target instanceof Node)) return
+  if (actionsRoot.value?.contains(target) || actionMenu.value?.contains(target)) return
+  actionsOpen.value = false
+  bindMenuOpen.value = false
+}
+
+function onWindowReposition() {
+  if (actionsOpen.value) positionActionMenu()
 }
 
 function measureSwipeActions() {
@@ -297,11 +339,15 @@ watch(() => swipeCtx?.openPageId.value, (id) => {
 
 onMounted(() => {
   document.addEventListener('click', closeActionsOnOutside)
+  window.addEventListener('resize', onWindowReposition)
+  window.addEventListener('scroll', onWindowReposition, true)
   measureSwipeActions()
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', closeActionsOnOutside)
+  window.removeEventListener('resize', onWindowReposition)
+  window.removeEventListener('scroll', onWindowReposition, true)
   if (swipeCtx?.openPageId.value === props.node.id) swipeCtx.setOpen(null)
 })
 </script>
@@ -390,46 +436,56 @@ onBeforeUnmount(() => {
           >{{ sourceShortLabel(item.name) }}</span>
         </span>
         <span v-if="!compact" ref="actionsRoot" class="tree-actions" :class="{ open: actionsOpen }" @click.stop>
-          <button class="tree-more-button" :aria-expanded="actionsOpen" aria-label="页面操作" @click="actionsOpen = !actionsOpen; bindMenuOpen = false">⋯</button>
-          <span v-if="actionsOpen" class="tree-action-menu">
-            <button title="新建子页面" @click="actionsOpen = false; emit('create', node.id)">+ 新建子页面</button>
-            <button title="重命名页面" @click="actionsOpen = false; emit('rename', node.id)">✎ 重命名</button>
-            <button title="复制页面" @click="actionsOpen = false; emit('duplicate', node.id)">⧉ 复制页面</button>
-            <button title="绑定存储源" :class="{ active: bindMenuOpen }" @click="bindMenuOpen = !bindMenuOpen">◈ 绑定存储源</button>
-            <div v-if="bindMenuOpen" class="tree-bind-menu">
-              <button
-                v-for="item in sourceChoices"
-                :key="item.id"
-                :class="{ bound: boundSourceIds.includes(item.id), primary: pageSourceRoleLabel(livePage, item.id) === 'primary' }"
-                :disabled="bindBusy || item.available === false"
-                :title="item.available === false ? '当前不可访问' : item.path"
-                @click="toggleSourceBinding(item.id)"
-              >
-                <span>{{ boundSourceIds.includes(item.id) ? '✓' : '○' }} {{ sourceShortLabel(item.name) }} {{ item.name }}</span>
-                <small>{{ pageSourceRoleLabel(livePage, item.id) === 'primary' ? '协作主源' : boundSourceIds.includes(item.id) ? '备份镜像' : '未绑定' }}</small>
-              </button>
-              <p v-if="!sourceChoices.length" class="tree-bind-empty">没有可绑定的存储源</p>
-              <div v-if="boundCloudSourceIds.length > 1" class="tree-primary-actions">
-                <span>设为协作主源（仅云端）</span>
+          <button ref="moreButton" class="tree-more-button" :aria-expanded="actionsOpen" aria-haspopup="menu" aria-label="页面操作" @click="toggleActions">⋯</button>
+          <Teleport to="body">
+            <div
+              v-if="actionsOpen"
+              ref="actionMenu"
+              class="tree-action-menu tree-action-menu-portal"
+              role="menu"
+              :style="menuStyle"
+              @click.stop
+            >
+              <button type="button" title="新建子页面" @click="actionsOpen = false; emit('create', node.id)">+ 新建子页面</button>
+              <button type="button" title="重命名页面" @click="actionsOpen = false; emit('rename', node.id)">✎ 重命名</button>
+              <button type="button" title="复制页面" @click="actionsOpen = false; emit('duplicate', node.id)">⧉ 复制页面</button>
+              <button type="button" title="绑定存储源" :class="{ active: bindMenuOpen }" @click="bindMenuOpen = !bindMenuOpen; void nextTick(() => positionActionMenu())">◈ 绑定存储源</button>
+              <div v-if="bindMenuOpen" class="tree-bind-menu">
                 <button
-                  v-for="sourceId in boundCloudSourceIds"
-                  :key="`primary-${sourceId}`"
+                  v-for="item in sourceChoices"
+                  :key="item.id"
                   type="button"
-                  :class="{ active: sourceId === livePage.storageSourceId }"
-                  :disabled="bindBusy || sourceId === livePage.storageSourceId"
-                  @click="store.setPagePrimarySource(livePage.id, sourceId)"
-                >{{ store.allSources.find((item) => item.id === sourceId)?.name ?? sourceId }}</button>
+                  :class="{ bound: boundSourceIds.includes(item.id), primary: pageSourceRoleLabel(livePage, item.id) === 'primary' }"
+                  :disabled="bindBusy || item.available === false"
+                  :title="item.available === false ? '当前不可访问' : item.path"
+                  @click="toggleSourceBinding(item.id)"
+                >
+                  <span>{{ boundSourceIds.includes(item.id) ? '✓' : '○' }} {{ sourceShortLabel(item.name) }} {{ item.name }}</span>
+                  <small>{{ pageSourceRoleLabel(livePage, item.id) === 'primary' ? '协作主源' : boundSourceIds.includes(item.id) ? '备份镜像' : '未绑定' }}</small>
+                </button>
+                <p v-if="!sourceChoices.length" class="tree-bind-empty">没有可绑定的存储源</p>
+                <div v-if="boundCloudSourceIds.length > 1" class="tree-primary-actions">
+                  <span>设为协作主源（仅云端）</span>
+                  <button
+                    v-for="sourceId in boundCloudSourceIds"
+                    :key="`primary-${sourceId}`"
+                    type="button"
+                    :class="{ active: sourceId === livePage.storageSourceId }"
+                    :disabled="bindBusy || sourceId === livePage.storageSourceId"
+                    @click="store.setPagePrimarySource(livePage.id, sourceId)"
+                  >{{ store.allSources.find((item) => item.id === sourceId)?.name ?? sourceId }}</button>
+                </div>
+                <button
+                  v-if="boundSourceIds.length > 1"
+                  type="button"
+                  class="tree-mirror-sync"
+                  :disabled="bindBusy"
+                  @click="pushMirrorsFromTree"
+                >同步到备份</button>
               </div>
-              <button
-                v-if="boundSourceIds.length > 1"
-                type="button"
-                class="tree-mirror-sync"
-                :disabled="bindBusy"
-                @click="pushMirrorsFromTree"
-              >同步到备份</button>
+              <button type="button" class="danger" title="删除页面" @click="actionsOpen = false; emit('remove', node.id)">× 删除页面</button>
             </div>
-            <button class="danger" title="删除页面" @click="actionsOpen = false; emit('remove', node.id)">× 删除页面</button>
-          </span>
+          </Teleport>
         </span>
       </div>
     </div>

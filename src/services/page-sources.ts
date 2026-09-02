@@ -149,6 +149,21 @@ export function pageContentEqual(
     && a.tags.every((tag, index) => tag === b.tags[index])
 }
 
+/**
+ * 判断是否可以跳过落盘：正文相同且删除/树结构元数据也相同。
+ * 若只比正文，软删除（deletedAt）会被当成无改动而写不进去。
+ */
+export function pageWriteEqual(
+  a: Pick<Page, 'title' | 'markdown' | 'tags' | 'deletedAt' | 'parentId' | 'sortKey' | 'icon'>,
+  b: Pick<Page, 'title' | 'markdown' | 'tags' | 'deletedAt' | 'parentId' | 'sortKey' | 'icon'>,
+) {
+  return pageContentEqual(a, b)
+    && (a.deletedAt ?? null) === (b.deletedAt ?? null)
+    && (a.parentId ?? null) === (b.parentId ?? null)
+    && a.sortKey === b.sortKey
+    && (a.icon ?? '') === (b.icon ?? '')
+}
+
 /** 页面树与编辑器顶栏用的单字标签；完整名称放 title。 */
 export function sourceShortLabel(name: string) {
   const first = Array.from(name.trim())[0]
