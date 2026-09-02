@@ -268,6 +268,12 @@ adb devices   # 应看到一行 xxx	device（不能是 unauthorized 或空列表
 npm run tauri:android:dev
 ```
 
+脚本会自动 `adb reverse tcp:1420`，模拟器/USB 用 `127.0.0.1:1420`，**不要**默认加 `--host`（否则会误选 VPN 网卡如 `198.18.0.1`）。WiFi 真机调试时：
+
+```bash
+npm run tauri:android:dev -- --host
+```
+
 未连接手机/模拟器时，Tauri 会尝试执行 `Android Studio` 命令；若未安装 Studio 会报 `No such file or directory`。脚本会在启动前检查 `adb devices` 并提示。
 
 无模拟器时可安装命令行 emulator（**Linux x86_64 电脑请用 x86_64 镜像，比 arm 快**）：

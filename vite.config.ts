@@ -8,7 +8,11 @@ export default defineConfig({
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },
   clearScreen: false,
-  server: { host: '127.0.0.1', port: 1420, strictPort: true },
+  server: {
+    host: process.env.TAURI_DEV_HOST ? '0.0.0.0' : '127.0.0.1',
+    port: 1420,
+    strictPort: true,
+  },
   preview: { host: '127.0.0.1', port: 4173, strictPort: true },
   envPrefix: ['VITE_', 'TAURI_'],
   build: {

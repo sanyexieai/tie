@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { execSync, spawnSync } from 'node:child_process'
+import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const DEV_PORT = 1420
 
 function listAdbDevices() {
   try {
@@ -26,6 +28,61 @@ function hasRunnableDevice(devices) {
   return devices.some((device) => device.state === 'device')
 }
 
+function runnableDevices(devices) {
+  return devices.filter((device) => device.state === 'device')
+}
+
+function isBadDevHost(ip) {
+  return ip.startsWith('198.18.') || ip.startsWith('127.') || ip === '0.0.0.0'
+}
+
+function pickLanHost() {
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    if (!ifaces) continue
+    for (const net of ifaces) {
+      if (net.family !== 'IPv4' || net.internal) continue
+      const ip = net.address
+      if (isBadDevHost(ip)) continue
+      return ip
+    }
+  }
+  return null
+}
+
+function setupAdbReverse(devices) {
+  for (const device of runnableDevices(devices)) {
+    try {
+      execSync(`adb -s ${device.id} reverse tcp:${DEV_PORT} tcp:${DEV_PORT}`, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch {
+      console.warn(`adb reverse 失败（${device.id}），若无法加载页面可手动执行: adb -s ${device.id} reverse tcp:${DEV_PORT} tcp:${DEV_PORT}`)
+    }
+  }
+}
+
+function normalizeHostArgs(argv) {
+  const args = [...argv]
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] !== '--host') continue
+    const next = args[i + 1]
+    if (!next || next.startsWith('-')) {
+      const ip = pickLanHost()
+      if (!ip) {
+        console.error('未找到可用局域网 IP，请手动: npm run tauri:android:dev -- --host 192.168.x.x')
+        process.exit(1)
+      }
+      args.splice(i + 1, 0, ip)
+      continue
+    }
+    if (isBadDevHost(next)) {
+      const ip = pickLanHost()
+      if (ip) args[i + 1] = ip
+    }
+  }
+  return args
+}
+
 const devices = listAdbDevices()
 if (!hasRunnableDevice(devices)) {
   console.error('\n未检测到可用的 Android 设备或模拟器（adb devices 为空或未授权）。')
@@ -35,22 +92,29 @@ if (!hasRunnableDevice(devices)) {
   }
   console.error('可选方案：')
   console.error('  1. USB 连接手机，开启开发者选项与 USB 调试，执行 adb devices 确认状态为 device')
-  console.error('  2. 安装命令行模拟器（无需 Android Studio）：')
-  console.error('     npm run android:emulator:setup && npm run android:emulator')
-  console.error('  3. 仅构建 APK 安装到手机：npm run tauri:android:build && adb install -r ...apk')
+  console.error('  2. 安装命令行模拟器：npm run android:emulator:setup && npm run android:emulator')
+  console.error('  3. 仅构建 APK：npm run tauri:android:build && adb install -r ...apk')
   console.error('')
   process.exit(1)
 }
 
-const userArgs = process.argv.slice(2)
-const hasHost = userArgs.includes('--host') || userArgs.some((arg) => arg.startsWith('--host'))
-const tauriArgs = ['tauri', 'android', 'dev']
-if (!hasHost) tauriArgs.push('--host')
-tauriArgs.push(...userArgs)
+setupAdbReverse(devices)
 
-const result = spawnSync('npx', tauriArgs, {
+const userArgs = normalizeHostArgs(process.argv.slice(2))
+const wantsLanHost = userArgs.includes('--host') || userArgs.some((arg) => arg.startsWith('--host='))
+
+if (!wantsLanHost) {
+  console.log(`已配置 adb reverse tcp:${DEV_PORT}；Vite 使用 127.0.0.1:${DEV_PORT}（模拟器/USB 调试用）`)
+  console.log('WiFi 真机调试请加: npm run tauri:android:dev -- --host')
+}
+
+const result = spawnSync('npx', ['tauri', 'android', 'dev', ...userArgs], {
   cwd: root,
   stdio: 'inherit',
   shell: process.platform === 'win32',
+  env: {
+    ...process.env,
+    ...(wantsLanHost ? {} : { TAURI_DEV_HOST: undefined }),
+  },
 })
 process.exit(result.status ?? 1)
