@@ -1,11 +1,9 @@
-use super::paths::{markdown_path, page_asset_dir, revision_dir};
 use super::types::*;
-use std::{
-    collections::HashMap,
-    fs,
-    path::Path,
-    time::{SystemTime, UNIX_EPOCH},
-};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use super::paths::{markdown_path, page_asset_dir, revision_dir};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use std::{collections::HashMap, fs, path::Path};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn revision_id() -> String {
     let nanos = SystemTime::now()
@@ -25,6 +23,7 @@ pub(crate) fn page_has_changed(before: &Page, after: &Page) -> bool {
         || before.deleted_at != after.deleted_at
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn archive_page_revision(root: &Path, page: &Page) -> Result<(), String> {
     let directory = revision_dir(root, &page.id);
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
@@ -47,6 +46,7 @@ pub(crate) fn archive_page_revision(root: &Path, page: &Page) -> Result<(), Stri
     Ok(())
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn copy_page_assets(source_root: &Path, target_root: &Path, page_id: &str) -> Result<(), String> {
     let source_directory = page_asset_dir(source_root, page_id);
     if !source_directory.exists() {
@@ -66,6 +66,7 @@ pub(crate) fn copy_page_assets(source_root: &Path, target_root: &Path, page_id: 
     Ok(())
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn remove_page_assets(root: &Path, page_id: &str) -> Result<(), String> {
     let directory = page_asset_dir(root, page_id);
     if directory.exists() {
@@ -74,6 +75,7 @@ pub(crate) fn remove_page_assets(root: &Path, page_id: &str) -> Result<(), Strin
     Ok(())
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn copy_page_history(source_root: &Path, target_root: &Path, page_id: &str) -> Result<(), String> {
     let source_directory = revision_dir(source_root, page_id);
     if !source_directory.exists() {
@@ -122,6 +124,7 @@ fn parse_source_ids(raw: &str) -> Vec<String> {
 }
 
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn merge_loaded_pages(pages: Vec<Page>) -> Vec<Page> {
     let mut map: HashMap<String, Page> = HashMap::new();
     for page in pages {
@@ -238,6 +241,7 @@ pub(crate) fn parse_page(content: &str) -> Result<Page, String> {
     }))
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn demo_pages(storage_source_id: &str) -> Vec<Page> {
     let created = "2026-08-27T00:00:00.000Z".to_owned();
     vec![
@@ -246,6 +250,7 @@ pub(crate) fn demo_pages(storage_source_id: &str) -> Vec<Page> {
   ]
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn ensure_demo(root: &Path, storage_source_id: &str) -> Result<(), String> {
     if fs::read_dir(root.join("pages"))
         .map_err(|error| error.to_string())?

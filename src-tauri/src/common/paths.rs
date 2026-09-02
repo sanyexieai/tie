@@ -1,13 +1,16 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn markdown_path(root: &Path, page_id: &str) -> PathBuf {
     root.join("pages").join(format!("{page_id}.md"))
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn revision_dir(root: &Path, page_id: &str) -> PathBuf {
     root.join(".tie").join("history").join(page_id)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn page_asset_dir(root: &Path, page_id: &str) -> PathBuf {
     root.join(".tie").join("assets").join(page_id)
 }

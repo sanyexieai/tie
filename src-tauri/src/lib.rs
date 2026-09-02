@@ -13,6 +13,7 @@ mod desktop;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod skills;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::Manager;
 
 #[tauri::command]
@@ -20,27 +21,30 @@ fn load_mobile_workspace(app: tauri::AppHandle) -> Result<common::WorkspaceSnaps
     mobile::load_mobile_workspace(&app)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn set_desktop_window_icon(app: &tauri::App) {
+    if let Some(icon) = app.default_window_icon().cloned() {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.set_icon(icon);
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut builder = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_process::init());
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
-    }
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     builder
-        .setup(|app| {
+        .setup(|_app| {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            if let Some(icon) = app.default_window_icon().cloned() {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.set_icon(icon);
-                }
-            }
+            set_desktop_window_icon(_app);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

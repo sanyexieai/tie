@@ -1,9 +1,10 @@
 use super::types::*;
+use std::{fs, path::PathBuf};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::{
     collections::hash_map::DefaultHasher,
-    fs,
     hash::{Hash, Hasher},
-    path::{Path, PathBuf},
+    path::Path,
 };
 use tauri::Manager;
 
@@ -36,6 +37,7 @@ pub(crate) fn save_settings(app: &tauri::AppHandle, settings: &WorkspaceSettings
     fs::write(app_data_dir(app)?.join("workspace.json"), content).map_err(|error| error.to_string())
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn source_id(path: &Path, kind: &str) -> String {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
@@ -43,6 +45,7 @@ fn source_id(path: &Path, kind: &str) -> String {
     format!("src_{kind}_{:016x}", hasher.finish())
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn source_from_path(path: PathBuf, kind: String) -> StorageSource {
     let name = path
         .file_name()
@@ -58,6 +61,7 @@ pub(crate) fn source_from_path(path: PathBuf, kind: String) -> StorageSource {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn workspace_sources(app: &tauri::AppHandle) -> Result<(Vec<StorageSource>, bool), String> {
     let settings = load_settings(app)?;
     if !settings.sources.is_empty() {
