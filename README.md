@@ -275,6 +275,12 @@ npm run android:debug
 npm run android:debug -- --install-only
 ```
 
+若报 `ENOSPC: file watchers`：已默认让 Vite 忽略 `src-tauri/target`；仍出现时临时提高限制：
+
+```bash
+sudo sysctl -w fs.inotify.max_user_watches=524288
+```
+
 **开发调试（分步）：**
 
 ```bash

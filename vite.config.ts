@@ -12,6 +12,14 @@ export default defineConfig({
     host: process.env.TAURI_DEV_HOST ? '0.0.0.0' : '127.0.0.1',
     port: 1420,
     strictPort: true,
+    watch: {
+      // Rust/Android 构建产物文件极多，纳入 watch 会触发 ENOSPC
+      ignored: [
+        '**/src-tauri/target/**',
+        '**/src-tauri/gen/android/**/build/**',
+        '**/src-tauri/gen/android/.gradle/**',
+      ],
+    },
   },
   preview: { host: '127.0.0.1', port: 4173, strictPort: true },
   envPrefix: ['VITE_', 'TAURI_'],
