@@ -61,6 +61,10 @@ export function mergeSyncPages(
         localUpdatedAt: local.updatedAt,
         remoteUpdatedAt: remote.updatedAt,
       })
+      // 保留本地副本供编辑器/冲突 UI 对照；远程内容由 readLatestPage 拉取。
+      updated.push(pageId)
+      merged.push(local)
+      return
     }
     updated.push(pageId)
     merged.push(remote)

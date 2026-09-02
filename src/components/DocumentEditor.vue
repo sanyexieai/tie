@@ -53,6 +53,10 @@ let exportedTimer: number | undefined
 let refreshedTimer: number | undefined
 let autoSaveTimer: number | undefined
 let changeRevision = 0
+let autoSaveFlushing = false
+let autoSavePending = false
+let autoSaveFlushDone: Promise<void> = Promise.resolve()
+let resolveAutoSaveFlushDone: (() => void) | null = null
 
 const status = computed(() => {
   const savedLabel = activeSource.value?.kind === 'backend' ? '已保存到后台' : '已保存到本地'
@@ -185,18 +189,47 @@ watch(() => store.outlineScrollRequest, async () => {
   headings?.[store.outlineScrollTarget]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 })
 
-function queueAutoSave(page: Page, revision: number) {
+function queueAutoSave() {
+  if (hasRemoteConflict.value) return
   if (autoSaveTimer) window.clearTimeout(autoSaveTimer)
-  autoSaveTimer = window.setTimeout(async () => {
-    try {
-      await store.persist(page)
-      if (revision === changeRevision) hasUnsavedChanges.value = false
-      saveError.value = null
-    } catch (reason) {
-      saveError.value = saveFailureMessage(reason)
-      if (hasRemoteConflict.value) void loadConflictPreview()
-    }
+  autoSaveTimer = window.setTimeout(() => {
+    void flushAutoSave()
   }, 650)
+}
+
+async function flushAutoSave() {
+  if (autoSaveFlushing) {
+    autoSavePending = true
+    return
+  }
+  autoSaveFlushing = true
+  autoSaveFlushDone = new Promise<void>((resolve) => {
+    resolveAutoSaveFlushDone = resolve
+  })
+  try {
+    do {
+      autoSavePending = false
+      if (hasRemoteConflict.value) break
+      const revision = changeRevision
+      // 紧挨写入前再取草稿，避免手动保存之后仍用旧快照回写。
+      const page = draft()
+      if (!page) break
+      try {
+        await store.persist(page)
+        if (revision === changeRevision) hasUnsavedChanges.value = false
+        saveError.value = null
+      } catch (reason) {
+        saveError.value = saveFailureMessage(reason)
+        if (hasRemoteConflict.value) void loadConflictPreview()
+        break
+      }
+      if (changeRevision !== revision) autoSavePending = true
+    } while (autoSavePending)
+  } finally {
+    autoSaveFlushing = false
+    resolveAutoSaveFlushDone?.()
+    resolveAutoSaveFlushDone = null
+  }
 }
 
 function saveFailureMessage(reason: unknown) {
@@ -212,6 +245,7 @@ function conflictConfirm(message: string) {
 
 function cancelAutoSave() {
   changeRevision += 1
+  autoSavePending = false
   if (autoSaveTimer) {
     window.clearTimeout(autoSaveTimer)
     autoSaveTimer = undefined
@@ -242,13 +276,15 @@ function onInput() {
   hasUnsavedChanges.value = true
   saveError.value = null
   changeRevision += 1
-  queueAutoSave(page, changeRevision)
+  queueAutoSave()
 }
 
 async function saveNow() {
+  if (autoSaveTimer) window.clearTimeout(autoSaveTimer)
+  autoSavePending = false
+  if (autoSaveFlushing) await autoSaveFlushDone
   const page = draft()
   if (!page) return false
-  if (autoSaveTimer) window.clearTimeout(autoSaveTimer)
   try {
     await store.persist(page)
     hasUnsavedChanges.value = false

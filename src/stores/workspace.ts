@@ -1,7 +1,7 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { backendWorkspaceSource, backendS3ProviderSource, isBackendRemoteSourceId } from '@/services/backend'
-import { mergePagesById, normalizePageSources, pageBoundToSource, pageSourceIds, withPageSources } from '@/services/page-sources'
+import { mergePagesById, normalizePageSources, pageBoundToSource, pageContentEqual, pageSourceIds, withPageSources } from '@/services/page-sources'
 import { reconcileSaveAgainstRemote } from '@/services/save-reconcile'
 import { loadLocalS3Providers, refreshS3Providers, s3StorageSource } from '@/services/s3'
 import { sourceStatusStore, syncQueue, storageRegistry } from '@/services/storage'
@@ -292,7 +292,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function applyWorkspaceReload() {
     const { snapshot, syncResults } = await workspaceService.loadWithSync(pages.value)
     workspace.value = snapshot.workspace
-    setPages([...snapshot.pages, ...pages.value])
+    const conflictIds = new Set(syncResults.flatMap((result) => result.conflicts.map((item) => item.pageId)))
+    const localById = new Map(pages.value.map((page) => [page.id, page]))
+    const incoming = snapshot.pages.map((page) => {
+      const local = localById.get(page.id)
+      if (local && conflictIds.has(page.id)) return local
+      return page
+    })
+    setPages([...incoming, ...pages.value.filter((page) => conflictIds.has(page.id))])
     applySyncResults(syncResults)
     const availablePageIds = new Set(pages.value.filter((page) => !page.deletedAt).map((page) => page.id))
     favoritePageIds.value = favoritePageIds.value.filter((pageId) => availablePageIds.has(pageId))
@@ -325,11 +332,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function syncSource(sourceId: string) {
     const result = await workspaceService.syncSource(sourceId, pages.value)
     const remoteById = new Map(result.pages.map((page) => [page.id, normalizePageSources(page)]))
+    const conflictIds = new Set(result.conflicts.map((item) => item.pageId))
     const untouched = pages.value.filter((page) => !pageBoundToSource(page, sourceId))
     const reconciled = pages.value.filter((page) => pageBoundToSource(page, sourceId)).flatMap((page) => {
       const remote = remoteById.get(page.id)
       if (remote) {
         remoteById.delete(page.id)
+        // 内容冲突时保留本地内存副本，避免编辑中的草稿被远程时间戳静默覆盖。
+        if (conflictIds.has(page.id)) return [page]
         return mergePagesById([page, {
           ...remote,
           storageSourceIds: [...pageSourceIds(page), ...pageSourceIds(remote), sourceId],
@@ -703,60 +713,87 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     clearSyncConflict(remote.id)
   }
 
+  /** 同一页面的保存串行化，避免自动保存重叠时误用旧 expectedUpdatedAt。 */
+  const persistChains = new Map<PageId, Promise<void>>()
+
   async function persist(page: Page, options?: { force?: boolean }) {
+    const prior = persistChains.get(page.id) ?? Promise.resolve()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const chained = prior.catch(() => undefined).then(() => gate)
+    persistChains.set(page.id, chained)
+    await prior.catch(() => undefined)
     saving.value = true
     try {
-      const previous = pages.value.find((item) => item.id === page.id)
-      const draft = { ...page, markdown: withChildPageLinks(page), updatedAt: new Date().toISOString() }
-      let expectedUpdatedAt = options?.force ? undefined : previous?.updatedAt
+      await persistUnlocked(page, options)
+    } finally {
+      saving.value = false
+      release()
+      if (persistChains.get(page.id) === chained) persistChains.delete(page.id)
+    }
+  }
 
-      if (!options?.force && previous) {
+  async function persistUnlocked(page: Page, options?: { force?: boolean }) {
+    const previous = pages.value.find((item) => item.id === page.id)
+    const draft = { ...page, markdown: withChildPageLinks(page), updatedAt: new Date().toISOString() }
+    let expectedUpdatedAt = options?.force ? undefined : previous?.updatedAt
+
+    // 同步已登记冲突时，禁止自动/普通保存静默覆盖远程。
+    if (!options?.force && syncConflicts.value.has(page.id)) {
+      throw new Error('页面已在其他设备更新，请重新载入后再保存')
+    }
+
+    if (!options?.force && previous) {
+      const latest = await workspaceService.readLatestPage(previous).catch(() => null)
+      if (latest) {
+        const result = reconcileSaveAgainstRemote(previous, draft, latest)
+        if (result.action === 'skip') {
+          adoptRemotePage(result.page, previous)
+          return
+        }
+        if (result.action === 'conflict') {
+          registerSyncConflict(page.id, previous.storageSourceId, draft.updatedAt, result.remote.updatedAt)
+          throw new Error('页面已在其他设备更新，请重新载入后再保存')
+        }
+        expectedUpdatedAt = result.expectedUpdatedAt
+        if (result.adoptRemoteTimestamp) {
+          pages.value = pages.value.map((item) => (
+            item.id === page.id ? { ...item, updatedAt: result.adoptRemoteTimestamp! } : item
+          ))
+        }
+      }
+    }
+
+    try {
+      const saved = await workspaceService.savePage(
+        draft,
+        { expectedUpdatedAt, force: options?.force },
+      )
+      const index = pages.value.findIndex((item) => item.id === saved.id)
+      if (index === -1) pages.value.push(saved)
+      else pages.value[index] = saved
+      clearSyncConflict(saved.id)
+      if (previous && previous.title !== saved.title) {
+        const linkPattern = pageLinkPattern(saved.id)
+        const targetUrl = `tie://page/${saved.id}`
+        const updates = pages.value.filter((item) => item.id !== saved.id && !item.deletedAt && item.markdown.includes(targetUrl)).map((item) => ({ ...item, markdown: item.markdown.replace(linkPattern, markdownLink(saved.title, saved.id)), updatedAt: new Date().toISOString() }))
+        if (updates.length) {
+          const savedLinks = await Promise.all(updates.map((item) => workspaceService.savePage(item, { force: options?.force })))
+          pages.value = pages.value.map((item) => savedLinks.find((candidate) => candidate.id === item.id) ?? item)
+        }
+      }
+    } catch (error) {
+      if (!options?.force && previous && error instanceof Error && error.message.includes('其他设备')) {
         const latest = await workspaceService.readLatestPage(previous).catch(() => null)
-        if (latest) {
-          const result = reconcileSaveAgainstRemote(previous, draft, latest)
-          if (result.action === 'skip') {
-            adoptRemotePage(result.page, previous)
-            return
-          }
-          if (result.action === 'conflict') {
-            registerSyncConflict(page.id, previous.storageSourceId, draft.updatedAt, result.remote.updatedAt)
-            throw new Error('页面已在其他设备更新，请重新载入后再保存')
-          }
-          expectedUpdatedAt = result.expectedUpdatedAt
-          if (result.adoptRemoteTimestamp) {
-            pages.value = pages.value.map((item) => (
-              item.id === page.id ? { ...item, updatedAt: result.adoptRemoteTimestamp! } : item
-            ))
-          }
+        if (latest && pageContentEqual(latest, draft)) {
+          adoptRemotePage(latest, previous)
+          clearSyncConflict(latest.id)
+          return
         }
+        if (latest) registerSyncConflict(page.id, previous.storageSourceId, draft.updatedAt, latest.updatedAt)
       }
-
-      try {
-        const saved = await workspaceService.savePage(
-          draft,
-          { expectedUpdatedAt, force: options?.force },
-        )
-        const index = pages.value.findIndex((item) => item.id === saved.id)
-        if (index === -1) pages.value.push(saved)
-        else pages.value[index] = saved
-        clearSyncConflict(saved.id)
-        if (previous && previous.title !== saved.title) {
-          const linkPattern = pageLinkPattern(saved.id)
-          const targetUrl = `tie://page/${saved.id}`
-          const updates = pages.value.filter((item) => item.id !== saved.id && !item.deletedAt && item.markdown.includes(targetUrl)).map((item) => ({ ...item, markdown: item.markdown.replace(linkPattern, markdownLink(saved.title, saved.id)), updatedAt: new Date().toISOString() }))
-          if (updates.length) {
-            const savedLinks = await Promise.all(updates.map((item) => workspaceService.savePage(item, { force: options?.force })))
-            pages.value = pages.value.map((item) => savedLinks.find((candidate) => candidate.id === item.id) ?? item)
-          }
-        }
-      } catch (error) {
-        if (!options?.force && previous && error instanceof Error && error.message.includes('其他设备')) {
-          const latest = await workspaceService.readLatestPage(previous).catch(() => null)
-          if (latest) registerSyncConflict(page.id, previous.storageSourceId, draft.updatedAt, latest.updatedAt)
-        }
-        throw error
-      }
-    } finally { saving.value = false }
+      throw error
+    }
   }
 
   async function resolveConflictOverwriteLocal(page: Page) {

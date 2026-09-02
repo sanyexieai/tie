@@ -37,13 +37,13 @@ describe('mergeSyncPages', () => {
     expect(result.pages[0]?.markdown).toBe('# local')
   })
 
-  it('prefers remote when remote is newer with different content', () => {
+  it('keeps local and records conflict when remote is newer with different content', () => {
     const local = [page('a', sourceId, '2026-01-01T00:00:00.000Z', '# local')]
     const remote = [page('a', sourceId, '2026-01-03T00:00:00.000Z', '# remote')]
     const result = mergeSyncPages(sourceId, local, remote, new Set(['a']))
     expect(result.conflicts).toHaveLength(1)
     expect(result.updated).toEqual(['a'])
-    expect(result.pages[0]?.markdown).toBe('# remote')
+    expect(result.pages[0]?.markdown).toBe('# local')
   })
 
   it('treats identical timestamps and markdown as unchanged', () => {
