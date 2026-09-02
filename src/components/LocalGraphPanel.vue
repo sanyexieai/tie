@@ -31,7 +31,7 @@ interface SimEdge {
 }
 
 const store = useWorkspaceStore()
-const showTags = ref(false)
+const showTags = ref(true)
 const depth = ref(1)
 const canvasEl = ref<HTMLCanvasElement | null>(null)
 const wrapEl = ref<HTMLElement | null>(null)
@@ -96,6 +96,7 @@ function buildGraph() {
   const levels = new Map<string, number>([[current.id, 0]])
   const queue = [current.id]
   const maxDepth = Math.max(1, Math.min(3, depth.value))
+  const pageById = new Map(store.pages.map((page) => [page.id, page]))
 
   while (queue.length) {
     const id = queue.shift()!
@@ -105,15 +106,22 @@ function buildGraph() {
       ...store.outgoingLinks(id),
       ...store.backlinks(id),
     ]
-    for (const page of related) {
-      if (levels.has(page.id)) continue
-      levels.set(page.id, level + 1)
-      queue.push(page.id)
+    const page = pageById.get(id)
+    if (page?.parentId) {
+      const parent = pageById.get(page.parentId)
+      if (parent && !parent.deletedAt) related.push(parent)
+    }
+    for (const child of store.pages) {
+      if (!child.deletedAt && child.parentId === id) related.push(child)
+    }
+    for (const relatedPage of related) {
+      if (levels.has(relatedPage.id)) continue
+      levels.set(relatedPage.id, level + 1)
+      queue.push(relatedPage.id)
     }
   }
 
   const pageIds = [...levels.keys()].filter((id) => id !== current.id).slice(0, 18)
-  const pageById = new Map(store.pages.map((page) => [page.id, page]))
 
   const pageNodes: SimNode[] = [
     {
@@ -149,10 +157,21 @@ function buildGraph() {
 
   const visible = new Set(pageNodes.map((node) => node.id))
   const nextEdges: SimEdge[] = []
+  const edgeKey = new Set<string>()
+  const pushEdge = (from: string, to: string, kind: SimEdge['kind']) => {
+    if (!visible.has(from) || !visible.has(to) || from === to) return
+    const key = `${from}\0${to}\0${kind}`
+    if (edgeKey.has(key)) return
+    edgeKey.add(key)
+    nextEdges.push({ from, to, kind })
+  }
   for (const id of visible) {
     for (const page of store.outgoingLinks(id)) {
-      if (!visible.has(page.id)) continue
-      nextEdges.push({ from: id, to: page.id, kind: 'link' })
+      pushEdge(id, page.id, 'link')
+    }
+    const page = pageById.get(id)
+    if (page?.parentId && visible.has(page.parentId)) {
+      pushEdge(page.parentId, page.id, 'link')
     }
   }
 
@@ -309,7 +328,7 @@ function draw() {
     ctx.strokeStyle = edge.kind === 'tag'
       ? (active ? palette.tagLink : palette.tagLinkDim)
       : (active ? palette.link : palette.linkDim)
-    ctx.lineWidth = (active ? 1.3 : 0.8) / scale
+    ctx.lineWidth = (active ? 1.6 : 1.05) / scale
     ctx.stroke()
   }
 

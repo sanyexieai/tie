@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { preparePageExportBundle } from '@/services/attachments'
 import { getPlatformType, isTauriDesktop } from '@/services/platform'
+import { mergePagesById } from '@/services/page-sources'
 import { storageRegistry } from '@/services/storage/registry'
 import type { SavePageOptions } from '@/services/storage/types'
 import { isBackendRemoteSourceId } from '@/services/backend'
@@ -87,7 +88,7 @@ export const workspaceService = {
     const remote = await storageRegistry.loadRemotePages(contextPages)
     const merged = await storageRegistry.mergeSnapshot(fileSnapshot, contextPages, { remote: false })
     return {
-      snapshot: { workspace: merged.workspace, pages: [...merged.pages, ...remote.pages] },
+      snapshot: { workspace: merged.workspace, pages: mergePagesById([...merged.pages, ...remote.pages]) },
       syncResults: remote.syncResults,
     }
   },

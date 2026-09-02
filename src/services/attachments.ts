@@ -8,6 +8,7 @@ import {
   parseBackendWorkspaceId,
 } from '@/services/backend'
 import { isS3SourceId, s3ConnectionForSource } from '@/services/s3'
+import { pageCloudSourceIds, pageSourceIds } from '@/services/page-sources'
 import { isFileSourceId } from '@/services/storage/types'
 
 export const ASSET_URL_PREFIX = 'tie://asset/'
@@ -134,90 +135,172 @@ async function isTauri() {
 }
 
 export function canStorePageAssets(page: Page) {
-  if (isBackendSourceId(page.storageSourceId) || isBackendManagedS3SourceId(page.storageSourceId)) {
+  return assetWriteSourceIds(page).length > 0
+}
+
+function canStoreAssetsOnSource(sourceId: string) {
+  if (isBackendSourceId(sourceId) || isBackendManagedS3SourceId(sourceId)) {
     return Boolean(backendService.loadProfile().accessToken)
   }
   if (!('__TAURI_INTERNALS__' in window)) return false
-  return isFileSourceId(page.storageSourceId) || isS3SourceId(page.storageSourceId)
+  return isFileSourceId(sourceId) || isS3SourceId(sourceId)
 }
 
-async function readPageAsset(page: Page, assetName: string) {
-  if (isBackendSourceId(page.storageSourceId)) {
+/**
+ * 附件写入目标：有云端绑定时必须写到云端（多端才能看见）；
+ * 纯本机页才只写本机主源。
+ */
+export function assetWriteSourceIds(page: Pick<Page, 'storageSourceId' | 'storageSourceIds'>) {
+  const cloud = pageCloudSourceIds(page).filter((id) => canStoreAssetsOnSource(id))
+  if (cloud.length) return cloud
+  const primary = page.storageSourceId.trim()
+  if (primary && canStoreAssetsOnSource(primary)) return [primary]
+  return pageSourceIds(page).filter((id) => canStoreAssetsOnSource(id))
+}
+
+async function readPageAssetFromSource(page: Page, sourceId: string, assetName: string) {
+  const scoped = { ...page, storageSourceId: sourceId }
+  if (isBackendSourceId(sourceId)) {
     const profile = backendService.loadProfile()
     if (!profile.accessToken) throw new Error('请先连接自定义后台')
     return backendService.readWorkspacePageAsset(
       profile,
-      parseBackendWorkspaceId(page.storageSourceId),
+      parseBackendWorkspaceId(sourceId),
       page.id,
       assetName,
     )
   }
-  if (isBackendManagedS3SourceId(page.storageSourceId)) {
+  if (isBackendManagedS3SourceId(sourceId)) {
     const profile = backendService.loadProfile()
     if (!profile.accessToken) throw new Error('请先连接自定义后台')
     return backendService.readProviderPageAsset(
       profile,
-      parseBackendProviderId(page.storageSourceId),
+      parseBackendProviderId(sourceId),
       page.id,
       assetName,
     )
   }
-  if (isS3SourceId(page.storageSourceId)) {
+  if (isS3SourceId(sourceId)) {
     const bytes = await invoke<number[]>('read_s3_page_asset', {
-      connection: s3ConnectionForSource(page.storageSourceId),
-      page,
+      connection: s3ConnectionForSource(sourceId),
+      page: scoped,
       assetName,
     })
     return new Uint8Array(bytes).buffer
   }
-  if (isFileSourceId(page.storageSourceId)) {
-    const bytes = await invoke<number[]>('read_file_page_asset', { page, assetName })
+  if (isFileSourceId(sourceId)) {
+    const bytes = await invoke<number[]>('read_file_page_asset', { page: scoped, assetName })
     return new Uint8Array(bytes).buffer
   }
   throw new Error('该存储源不支持附件')
 }
 
-async function writePageAsset(page: Page, assetName: string, data: Uint8Array) {
-  if (isBackendSourceId(page.storageSourceId)) {
+async function readPageAsset(page: Page, assetName: string) {
+  const sourceIds = pageSourceIds(page)
+  let lastError: unknown = null
+  for (const sourceId of sourceIds) {
+    if (!canStoreAssetsOnSource(sourceId)) continue
+    try {
+      return await readPageAssetFromSource(page, sourceId, assetName)
+    } catch (error) {
+      lastError = error
+    }
+  }
+  if (lastError instanceof Error) throw lastError
+  throw new Error('该存储源不支持附件')
+}
+
+async function writePageAssetToSource(page: Page, sourceId: string, assetName: string, data: Uint8Array) {
+  const scoped = { ...page, storageSourceId: sourceId }
+  if (isBackendSourceId(sourceId)) {
     const profile = backendService.loadProfile()
     if (!profile.accessToken) throw new Error('请先连接自定义后台')
     await backendService.uploadWorkspacePageAsset(
       profile,
-      parseBackendWorkspaceId(page.storageSourceId),
+      parseBackendWorkspaceId(sourceId),
       page.id,
       assetName,
       data,
     )
     return
   }
-  if (isBackendManagedS3SourceId(page.storageSourceId)) {
+  if (isBackendManagedS3SourceId(sourceId)) {
     const profile = backendService.loadProfile()
     if (!profile.accessToken) throw new Error('请先连接自定义后台')
     await backendService.uploadProviderPageAsset(
       profile,
-      parseBackendProviderId(page.storageSourceId),
+      parseBackendProviderId(sourceId),
       page.id,
       assetName,
       data,
     )
     return
   }
-  if (isS3SourceId(page.storageSourceId)) {
+  if (isS3SourceId(sourceId)) {
     if (!(await isTauri())) throw new Error('S3 附件仅支持桌面端')
     await invoke<string>('save_s3_page_asset', {
-      connection: s3ConnectionForSource(page.storageSourceId),
-      page,
+      connection: s3ConnectionForSource(sourceId),
+      page: scoped,
       fileName: assetName,
       data: [...data],
     })
     return
   }
-  if (isFileSourceId(page.storageSourceId)) {
+  if (isFileSourceId(sourceId)) {
     if (!(await isTauri())) throw new Error('附件上传仅支持桌面端')
-    await invoke<string>('save_file_page_asset', { page, fileName: assetName, data: [...data] })
+    await invoke<string>('save_file_page_asset', { page: scoped, fileName: assetName, data: [...data] })
     return
   }
   throw new Error('该存储源不支持附件')
+}
+
+async function writePageAsset(page: Page, assetName: string, data: Uint8Array) {
+  const targets = assetWriteSourceIds(page)
+  if (!targets.length) throw new Error('该存储源不支持附件')
+  let wrote = false
+  let lastError: unknown = null
+  for (const sourceId of targets) {
+    try {
+      await writePageAssetToSource(page, sourceId, assetName, data)
+      wrote = true
+    } catch (error) {
+      lastError = error
+    }
+  }
+  if (!wrote) {
+    throw lastError instanceof Error ? lastError : new Error('无法保存附件')
+  }
+}
+
+/**
+ * 保存到某一存储源前：把正文里引用到、但目标源缺失的附件从其他源补过去。
+ * 解决「图还在本机、正文已上云」导致另一端裂图。
+ */
+export async function ensurePageAssetsOnSource(page: Page, targetSourceId: string) {
+  if (!canStoreAssetsOnSource(targetSourceId)) return
+  const assetNames = collectAssetNamesFromMarkdown(page.markdown, page.id)
+  if (!assetNames.length) return
+
+  for (const assetName of assetNames) {
+    try {
+      await readPageAssetFromSource(page, targetSourceId, assetName)
+      continue
+    } catch {
+      // missing on target — try heal from other bindings
+    }
+    let bytes: ArrayBuffer | null = null
+    for (const sourceId of pageSourceIds(page)) {
+      if (sourceId === targetSourceId || !canStoreAssetsOnSource(sourceId)) continue
+      try {
+        bytes = await readPageAssetFromSource(page, sourceId, assetName)
+        break
+      } catch {
+        // try next
+      }
+    }
+    if (!bytes) continue
+    await writePageAssetToSource(page, targetSourceId, assetName, new Uint8Array(bytes))
+  }
 }
 
 async function listPageAssetNames(page: Page, sourceId: string) {
@@ -249,12 +332,11 @@ async function listPageAssetNames(page: Page, sourceId: string) {
 
 export async function copyPageAssets(page: Page, fromSourceId: string, toSourceId: string) {
   if (fromSourceId === toSourceId) return
-  const sourcePage = { ...page, storageSourceId: fromSourceId }
-  const targetPage = { ...page, storageSourceId: toSourceId }
+  if (!canStoreAssetsOnSource(toSourceId)) throw new Error('目标存储源不支持附件')
   const assetNames = await listPageAssetNames(page, fromSourceId)
   for (const assetName of assetNames) {
-    const data = new Uint8Array(await readPageAsset(sourcePage, assetName))
-    await writePageAsset(targetPage, assetName, data)
+    const data = new Uint8Array(await readPageAssetFromSource(page, fromSourceId, assetName))
+    await writePageAssetToSource(page, toSourceId, assetName, data)
   }
 }
 

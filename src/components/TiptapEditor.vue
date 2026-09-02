@@ -58,6 +58,13 @@ function activePage() {
   return props.pages.find((page) => page.id === props.pageId) ?? null
 }
 
+function markdownForImageAttrs(attrs: { src?: string | null; alt?: string | null; title?: string | null }) {
+  const src = String(attrs.src ?? '')
+  const alt = String(attrs.alt ?? '')
+  const title = attrs.title ? ` "${String(attrs.title)}"` : ''
+  return `![${alt}](${src}${title})`
+}
+
 function createAssetImageExtension() {
   return Image.extend({
     parseHTML() {
@@ -78,41 +85,113 @@ function createAssetImageExtension() {
       ]
     },
     addNodeView() {
-      return ({ node }) => {
+      return ({ node, getPos, editor: viewEditor }) => {
+        let currentNode = node
         const wrap = document.createElement('span')
         wrap.className = 'tie-image-wrap'
+        wrap.contentEditable = 'false'
         const img = document.createElement('img')
         img.className = 'tiptap-image'
         img.draggable = false
-        img.alt = String(node.attrs.alt ?? '')
-        const src = String(node.attrs.src ?? '')
+        img.alt = String(currentNode.attrs.alt ?? '')
+        const broken = document.createElement('span')
+        broken.className = 'tie-image-broken'
+        broken.hidden = true
         let displayObjectUrl: string | null = null
+        let currentSrc = String(currentNode.attrs.src ?? '')
+        let demoting = false
+
+        const setBroken = (assetSrc: string, message: string) => {
+          wrap.classList.add('is-broken')
+          img.removeAttribute('src')
+          img.hidden = true
+          broken.hidden = false
+          broken.textContent = message
+          broken.title = '点击编辑为 Markdown 文本'
+          wrap.dataset.tieAsset = assetSrc
+        }
+
+        const setLoaded = () => {
+          wrap.classList.remove('is-broken')
+          delete wrap.dataset.tieAsset
+          img.hidden = false
+          broken.hidden = true
+          broken.textContent = ''
+        }
+
+        const demoteToEditableText = () => {
+          if (demoting) return
+          const pos = getPos()
+          if (typeof pos !== 'number') return
+          const markdown = markdownForImageAttrs({
+            src: currentSrc,
+            alt: img.alt,
+            title: currentNode.attrs.title,
+          })
+          const textNode = viewEditor.schema.text(markdown)
+          demoting = true
+          const from = pos
+          const to = pos + currentNode.nodeSize
+          const tr = viewEditor.state.tr.replaceWith(from, to, textNode)
+          const caret = from + Math.min(Math.max(2, Math.floor(markdown.length / 2)), markdown.length)
+          tr.setSelection(TextSelection.create(tr.doc, caret))
+          viewEditor.view.dispatch(tr)
+          viewEditor.view.focus()
+        }
 
         const applySrc = (nextSrc: string) => {
+          currentSrc = nextSrc
           if (displayObjectUrl) {
             URL.revokeObjectURL(displayObjectUrl)
             displayObjectUrl = null
           }
           if (parseAssetUrl(nextSrc)) {
             img.dataset.tieAsset = nextSrc
+            // Never assign tie:// to <img src> — browsers can't load it and it
+            // looks like frozen "text" you cannot click into (atom node).
             img.removeAttribute('src')
+            img.hidden = true
+            broken.hidden = false
+            broken.textContent = '图片加载中…'
+            wrap.classList.remove('is-broken')
             void resolveAssetDisplayUrl(props.pages, nextSrc).then((url) => {
               if (img.dataset.tieAsset !== nextSrc) return
-              displayObjectUrl = url.startsWith('blob:') ? url : null
+              if (!url.startsWith('blob:')) {
+                const name = parseAssetUrl(nextSrc)?.assetName ?? nextSrc
+                setBroken(nextSrc, `缺少图片 ${name}`)
+                return
+              }
+              displayObjectUrl = url
               img.src = url
+              setLoaded()
             })
             return
           }
           delete img.dataset.tieAsset
+          setLoaded()
+          img.onload = () => setLoaded()
+          img.onerror = () => setBroken(nextSrc, nextSrc || '图片无法显示')
           img.src = nextSrc
         }
 
-        applySrc(src)
+        wrap.addEventListener('mousedown', (event) => {
+          if (!wrap.classList.contains('is-broken')) return
+          if (event.button !== 0) return
+          event.preventDefault()
+          event.stopPropagation()
+          demoteToEditableText()
+        })
+
+        applySrc(currentSrc)
         wrap.appendChild(img)
+        wrap.appendChild(broken)
         return {
           dom: wrap,
+          selectNode: () => wrap.classList.add('ProseMirror-selectednode'),
+          deselectNode: () => wrap.classList.remove('ProseMirror-selectednode'),
           update: (updated) => {
             if (updated.type.name !== 'image') return false
+            currentNode = updated
             img.alt = String(updated.attrs.alt ?? '')
             applySrc(String(updated.attrs.src ?? ''))
             return true
@@ -120,7 +199,10 @@ function createAssetImageExtension() {
           // Display uses a temporary blob URL; never let that mutate node attrs.
           ignoreMutation: (mutation) => {
             if (mutation.type === 'attributes' && mutation.attributeName === 'src') return true
-            return mutation.target === img || img.contains(mutation.target as Node)
+            return mutation.target === img
+              || mutation.target === broken
+              || img.contains(mutation.target as Node)
+              || broken.contains(mutation.target as Node)
           },
           destroy: () => {
             if (displayObjectUrl) URL.revokeObjectURL(displayObjectUrl)
@@ -231,6 +313,23 @@ function createTieImagePasteExtension() {
 
 function stripInlineImageHtml(html: string) {
   return html.replace(/<img\b[^>]*\bsrc=["'](?:blob:|data:)[^"']*["'][^>]*>/gi, '')
+}
+
+/** Remove autolink marks on tie://asset/... so caret can sit mid-URL. */
+function stripAssetAutolinks(currentEditor: Editor) {
+  const linkType = currentEditor.schema.marks.link
+  if (!linkType) return
+  const { tr, doc } = currentEditor.state
+  let changed = false
+  doc.descendants((node, pos) => {
+    if (!node.isText) return
+    const mark = node.marks.find((item) => item.type === linkType)
+    const href = String(mark?.attrs.href ?? '')
+    if (!mark || !href.startsWith('tie://') || href.startsWith('tie://page/')) return
+    tr.removeMark(pos, pos + node.nodeSize, linkType)
+    changed = true
+  })
+  if (changed) currentEditor.view.dispatch(tr)
 }
 
 let rewritingInlineImages = false
@@ -378,13 +477,18 @@ const editor = useEditor({
         openOnClick: false,
         autolink: true,
         linkOnPaste: true,
-        protocols: ['tie'],
-        isAllowedUri: (url, { defaultValidate }) => url.startsWith('tie://page/') || defaultValidate(url),
+        protocols: ['http', 'https', 'mailto', 'tie'],
+        // Only wiki links use tie:// — never autolink asset URLs (blocks mid-URL caret).
+        isAllowedUri: (url, { defaultValidate }) => {
+          if (url.startsWith('tie://page/')) return true
+          if (url.startsWith('tie://')) return false
+          return defaultValidate(url)
+        },
       },
     }),
     Markdown,
     CodeBlockLowlight.configure({ lowlight }),
-    createAssetImageExtension().configure({ allowBase64: false }),
+    createAssetImageExtension().configure({ allowBase64: false, inline: true }),
     createTieImagePasteExtension(),
     Placeholder.configure({ placeholder: '开始写作，支持 Markdown 快捷输入…' }),
     TaskList,
@@ -469,9 +573,15 @@ const editor = useEditor({
       return false
     },
   },
-  onCreate: () => scheduleDecorateChildPageLinks(),
+  onCreate: ({ editor: currentEditor }) => {
+    // 初始化清理不要当成用户编辑，避免一打开页面就触发自动保存刷 updatedAt。
+    syncingExternalValue = true
+    stripAssetAutolinks(currentEditor)
+    syncingExternalValue = false
+    scheduleDecorateChildPageLinks()
+  },
   onUpdate: ({ editor: currentEditor }) => {
-    if (!syncingExternalValue) emit('update:modelValue', currentEditor.getMarkdown())
+    if (!syncingExternalValue && !rewritingInlineImages) emit('update:modelValue', currentEditor.getMarkdown())
     updateMenus(currentEditor)
     scheduleDecorateChildPageLinks()
     void rewriteInlineImageNodes(currentEditor)
@@ -481,15 +591,41 @@ const editor = useEditor({
 
 watch(() => props.modelValue, (markdown) => {
   if (!editor.value || editor.value.getMarkdown() === markdown) return
+  const selection = editor.value.state.selection
   syncingExternalValue = true
   editor.value.commands.setContent(markdown, { contentType: 'markdown', emitUpdate: false })
+  stripAssetAutolinks(editor.value)
+  const maxPos = editor.value.state.doc.content.size
+  const from = Math.min(selection.from, maxPos)
+  const to = Math.min(selection.to, maxPos)
+  try {
+    editor.value.commands.setTextSelection({ from, to })
+  } catch {
+    // ignore invalid selection after content swap
+  }
   syncingExternalValue = false
   scheduleDecorateChildPageLinks()
 })
 
 watch(childPageIds, () => scheduleDecorateChildPageLinks())
 watch(() => props.pages.map((page) => `${page.id}:${page.parentId ?? ''}:${page.deletedAt ?? ''}`).join('|'), () => scheduleDecorateChildPageLinks())
+watch(() => props.pages.map((page) => `${page.id}:${page.storageSourceId}:${(page.storageSourceIds ?? []).join(',')}`).join('|'), () => {
+  refreshAssetImages()
+})
 watch(() => props.spellcheck, (enabled) => editor.value?.view.dom.setAttribute('spellcheck', String(enabled)))
+
+function refreshAssetImages() {
+  const root = editor.value?.view.dom
+  if (!root) return
+  root.querySelectorAll<HTMLImageElement>('img[data-tie-asset]').forEach((img) => {
+    const asset = img.dataset.tieAsset
+    if (!asset) return
+    void resolveAssetDisplayUrl(props.pages, asset).then((url) => {
+      if (img.dataset.tieAsset !== asset) return
+      if (img.src !== url) img.src = url
+    })
+  })
+}
 
 function scheduleDecorateChildPageLinks() {
   void nextTick(() => {

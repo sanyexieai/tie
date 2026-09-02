@@ -49,6 +49,15 @@ export function pageIdsNeedingDownload(index: S3PageIndexEntry[], cached: S3Prov
     .map((entry) => entry.pageId)
 }
 
+/**
+ * 索引里有、但当前结果集没有的页：冷启动 / 仅云端页在增量同步时必须补拉，
+ * 否则会因「etag 未变 + 本机上下文没有」被静默漏掉。
+ */
+export function pageIdsMissingFromResult(index: S3PageIndexEntry[], presentIds: Iterable<string>) {
+  const present = presentIds instanceof Set ? presentIds : new Set(presentIds)
+  return index.map((entry) => entry.pageId).filter((pageId) => !present.has(pageId))
+}
+
 export function nextS3SyncState(index: S3PageIndexEntry[]): S3ProviderSyncState {
   const objects: Record<string, S3ObjectSyncState> = {}
   index.forEach((entry) => {

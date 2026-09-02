@@ -2,7 +2,8 @@
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { PageTreeNode, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
-import { pageBoundToSource, pageSourceIds, sourceShortLabel } from '@/services/page-sources'
+import { pageBoundToSource, pageSourceIds, pageSourceRoleLabel, sourceShortLabel } from '@/services/page-sources'
+import { isCloudStorageSourceId } from '@/services/storage-identity'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { pageTreeDragKey } from '@/composables/pageTreeDrag'
 import { mobilePageSwipeKey } from '@/composables/mobilePageSwipe'
@@ -33,13 +34,18 @@ const usesTouchReorder = computed(() => props.touchReorder || Boolean(dragCtx))
 const expanded = computed(() => !store.collapsedPageIds.includes(props.node.id))
 const hasChildren = computed(() => props.node.children.length > 0)
 const livePage = computed(() => store.pages.find((page) => page.id === props.node.id) ?? props.node)
-const boundSourceIds = computed(() => pageSourceIds(livePage.value))
+const boundSourceIds = computed(() => {
+  const known = new Set(store.allSources.map((source) => source.id))
+  return pageSourceIds(livePage.value).filter((id) => known.has(id))
+})
+const boundCloudSourceIds = computed(() => boundSourceIds.value.filter((id) => isCloudStorageSourceId(id)))
 const boundSources = computed(() => boundSourceIds.value
   .map((id) => props.sourcesById[id])
   .filter((item): item is StorageSource => Boolean(item)))
 const sourceChoices = computed(() => store.allSources.filter((item) => store.canBindPageTo(item.id, livePage.value) || pageBoundToSource(livePage.value, item.id)))
 function sourceBadgeTitle(item: StorageSource) {
-  const primary = item.id === livePage.value.storageSourceId ? ' · 主源' : ' · 已绑定'
+  const role = pageSourceRoleLabel(livePage.value, item.id)
+  const primary = role === 'primary' ? ' · 协作主源' : ' · 备份镜像'
   return `${item.name}${primary}\n${item.path}`
 }
 const hasSyncConflict = computed(() => store.syncConflicts.has(props.node.id))
@@ -192,13 +198,27 @@ async function toggleSourceBinding(targetSourceId: string) {
     if (bound) {
       if (boundSourceIds.value.length <= 1) return
       const target = store.allSources.find((item) => item.id === targetSourceId)
-      if (!usesMobileUi.value && !window.confirm(`取消绑定「${target?.name ?? '存储源'}」？该源上的页面副本将被删除。`)) return
+      if (!usesMobileUi.value && !window.confirm(`取消绑定备份「${target?.name ?? '存储源'}」？该源上的页面副本将被删除。`)) return
       await store.unbindPageFromSource(page.id, targetSourceId, true)
     } else {
       await store.bindPageToSource(page.id, targetSourceId, true)
     }
   } catch (error) {
     if (!usesMobileUi.value) window.alert(error instanceof Error ? error.message : '无法更新存储源绑定')
+  } finally {
+    bindBusy.value = false
+  }
+}
+
+async function pushMirrorsFromTree() {
+  if (bindBusy.value || boundSourceIds.value.length <= 1) return
+  bindBusy.value = true
+  try {
+    await store.pushPageToMirrors(livePage.value.id)
+    actionsOpen.value = false
+    bindMenuOpen.value = false
+  } catch (error) {
+    if (!usesMobileUi.value) window.alert(error instanceof Error ? error.message : '同步到备份源失败')
   } finally {
     bindBusy.value = false
   }
@@ -355,7 +375,7 @@ onBeforeUnmount(() => {
             v-for="item in boundSources.slice(0, 2)"
             :key="item.id"
             class="page-source-badge"
-            :class="[item.kind, { primary: item.id === livePage.storageSourceId }]"
+            :class="[item.kind, { primary: pageSourceRoleLabel(livePage, item.id) === 'primary' }]"
             :title="sourceBadgeTitle(item)"
           >{{ sourceShortLabel(item.name) }}</span>
           <span v-if="boundSources.length > 2" class="page-source-more">+{{ boundSources.length - 2 }}</span>
@@ -365,7 +385,7 @@ onBeforeUnmount(() => {
             v-for="item in boundSources"
             :key="item.id"
             class="page-source-badge"
-            :class="[item.kind, { primary: item.id === livePage.storageSourceId }]"
+            :class="[item.kind, { primary: pageSourceRoleLabel(livePage, item.id) === 'primary' }]"
             :title="sourceBadgeTitle(item)"
           >{{ sourceShortLabel(item.name) }}</span>
         </span>
@@ -380,15 +400,33 @@ onBeforeUnmount(() => {
               <button
                 v-for="item in sourceChoices"
                 :key="item.id"
-                :class="{ bound: boundSourceIds.includes(item.id), primary: item.id === livePage.storageSourceId }"
+                :class="{ bound: boundSourceIds.includes(item.id), primary: pageSourceRoleLabel(livePage, item.id) === 'primary' }"
                 :disabled="bindBusy || item.available === false"
                 :title="item.available === false ? '当前不可访问' : item.path"
                 @click="toggleSourceBinding(item.id)"
               >
                 <span>{{ boundSourceIds.includes(item.id) ? '✓' : '○' }} {{ sourceShortLabel(item.name) }} {{ item.name }}</span>
-                <small>{{ item.id === livePage.storageSourceId ? '主源' : boundSourceIds.includes(item.id) ? '已绑定' : '未绑定' }}</small>
+                <small>{{ pageSourceRoleLabel(livePage, item.id) === 'primary' ? '协作主源' : boundSourceIds.includes(item.id) ? '备份镜像' : '未绑定' }}</small>
               </button>
               <p v-if="!sourceChoices.length" class="tree-bind-empty">没有可绑定的存储源</p>
+              <div v-if="boundCloudSourceIds.length > 1" class="tree-primary-actions">
+                <span>设为协作主源（仅云端）</span>
+                <button
+                  v-for="sourceId in boundCloudSourceIds"
+                  :key="`primary-${sourceId}`"
+                  type="button"
+                  :class="{ active: sourceId === livePage.storageSourceId }"
+                  :disabled="bindBusy || sourceId === livePage.storageSourceId"
+                  @click="store.setPagePrimarySource(livePage.id, sourceId)"
+                >{{ store.allSources.find((item) => item.id === sourceId)?.name ?? sourceId }}</button>
+              </div>
+              <button
+                v-if="boundSourceIds.length > 1"
+                type="button"
+                class="tree-mirror-sync"
+                :disabled="bindBusy"
+                @click="pushMirrorsFromTree"
+              >同步到备份</button>
             </div>
             <button class="danger" title="删除页面" @click="actionsOpen = false; emit('remove', node.id)">× 删除页面</button>
           </span>

@@ -3,11 +3,13 @@ import type { Page } from '@/types'
 import {
   loadS3SyncState,
   nextS3SyncState,
+  pageIdsMissingFromResult,
   pageIdsNeedingDownload,
   saveS3SyncState,
   type S3PageIndexEntry,
 } from '@/services/s3-sync-state'
 import {
+  createStableS3ProviderId,
   isS3SourceId,
   loadLocalS3Providers,
   providerForS3Source,
@@ -19,6 +21,7 @@ import {
   type LocalS3Provider,
 } from '@/services/s3'
 import { isRetryableStorageError, queueFailureMessage } from '@/services/storage/retry'
+import { pageBoundToSource } from '@/services/page-sources'
 import { emptySyncResult, mergeSyncPages } from '@/services/storage/sync-merge'
 import { syncQueue } from '@/services/storage/sync-queue'
 import type { S3ConnectionInput, SavePageOptions, StorageAdapter, StorageCapabilities, SyncResult, SyncSourceContext } from '@/services/storage/types'
@@ -78,10 +81,18 @@ async function loadIndexedPages(sourceId: string, context?: SyncSourceContext) {
     downloaded = await invoke<Page[]>('load_s3_pages_by_ids', { connection, pageIds: downloadIds })
   }
 
-  saveS3SyncState(provider.id, nextS3SyncState(index))
-
   const unchangedPages = (context?.localPages ?? [])
-    .filter((page) => page.storageSourceId === sourceId && remoteIds.has(page.id) && !downloadIds.includes(page.id))
+    .filter((page) => pageBoundToSource(page, sourceId) && remoteIds.has(page.id) && !downloadIds.includes(page.id))
+
+  // 增量缓存认为「未变」时不会进 downloadIds；若本机上下文也没有该页（冷启动、仅云端），必须补拉。
+  const presentIds = new Set([...unchangedPages, ...downloaded].map((page) => page.id))
+  const missingIds = pageIdsMissingFromResult(index, presentIds)
+  if (missingIds.length) {
+    const extras = await invoke<Page[]>('load_s3_pages_by_ids', { connection, pageIds: missingIds })
+    downloaded = [...downloaded, ...extras]
+  }
+
+  saveS3SyncState(provider.id, nextS3SyncState(index))
 
   const mergedRemote = [...unchangedPages, ...downloaded]
   return mergeSyncPages(sourceId, context?.localPages ?? [], mergedRemote, remoteIds)
@@ -199,10 +210,18 @@ export const s3StorageAdapter: StorageAdapter = {
     localStorage.removeItem(`tie-s3-sync-state-v1:${provider.id}`)
   },
   async saveConnection(input) {
-    const providerId = input.id ?? crypto.randomUUID()
-    await testAndSaveCredentials(input, providerId)
+    const providerId = input.id?.trim() || createStableS3ProviderId(input.endpoint, input.bucket)
+    const stableId = createStableS3ProviderId(input.endpoint, input.bucket)
+    // 新建用指纹；更新若仍是旧 UUID，迁到指纹并写一份新凭据。
+    const writeId = providerId === stableId ? providerId : stableId
+    if (providerId !== writeId) {
+      await testAndSaveCredentials(input, writeId)
+      await invoke('remove_s3_credentials', { providerId }).catch(() => undefined)
+    } else {
+      await testAndSaveCredentials(input, writeId)
+    }
     const provider: LocalS3Provider = {
-      id: providerId,
+      id: writeId,
       name: input.name.trim() || input.bucket.trim(),
       endpoint: input.endpoint.trim(),
       bucket: input.bucket.trim(),
@@ -223,16 +242,31 @@ export const s3StorageAdapter: StorageAdapter = {
       bucket: input.bucket?.trim() || provider.bucket,
       region: input.region !== undefined ? (input.region.trim() || undefined) : provider.region,
     }
+    const stableId = createStableS3ProviderId(next.endpoint, next.bucket)
+    next.id = stableId
     if (input.accessKey && input.secretKey) {
-      await testAndSaveCredentials({ ...next, ...input, accessKey: input.accessKey, secretKey: input.secretKey }, provider.id)
+      await testAndSaveCredentials({ ...next, ...input, accessKey: input.accessKey, secretKey: input.secretKey }, stableId)
+      if (provider.id !== stableId) {
+        await invoke('remove_s3_credentials', { providerId: provider.id }).catch(() => undefined)
+      }
       next.credentialStored = true
     } else if (await isTauri()) {
-      await invoke('test_s3_connection', {
-        providerId: provider.id,
-        endpoint: next.endpoint,
-        bucket: next.bucket,
-        region: next.region ?? null,
-      })
+      if (provider.id !== stableId) {
+        // 无新密钥时依赖 Rust load/upsert 侧迁移凭据；先用旧 id 测连通。
+        await invoke('test_s3_connection', {
+          providerId: provider.id,
+          endpoint: next.endpoint,
+          bucket: next.bucket,
+          region: next.region ?? null,
+        })
+      } else {
+        await invoke('test_s3_connection', {
+          providerId: stableId,
+          endpoint: next.endpoint,
+          bucket: next.bucket,
+          region: next.region ?? null,
+        })
+      }
     }
     await upsertS3ProviderAsync(next)
     return s3StorageSource(next)

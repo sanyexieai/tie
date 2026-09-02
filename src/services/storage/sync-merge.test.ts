@@ -37,13 +37,24 @@ describe('mergeSyncPages', () => {
     expect(result.pages[0]?.markdown).toBe('# local')
   })
 
-  it('keeps local and records conflict when remote is newer with different content', () => {
+  it('adopts remote when remote is newer with different content', () => {
     const local = [page('a', sourceId, '2026-01-01T00:00:00.000Z', '# local')]
     const remote = [page('a', sourceId, '2026-01-03T00:00:00.000Z', '# remote')]
     const result = mergeSyncPages(sourceId, local, remote, new Set(['a']))
     expect(result.conflicts).toHaveLength(1)
     expect(result.updated).toEqual(['a'])
-    expect(result.pages[0]?.markdown).toBe('# local')
+    expect(result.pages[0]?.markdown).toBe('# remote')
+  })
+
+  it('compares dual-bound pages even when primary source differs', () => {
+    const local = [{
+      ...page('a', 's3:other', '2026-01-01T00:00:00.000Z', '# local'),
+      storageSourceIds: ['s3:other', sourceId],
+    }]
+    const remote = [page('a', sourceId, '2026-01-03T00:00:00.000Z', '# remote')]
+    const result = mergeSyncPages(sourceId, local, remote, new Set(['a']))
+    expect(result.conflicts).toHaveLength(1)
+    expect(result.pages[0]?.markdown).toBe('# remote')
   })
 
   it('treats identical timestamps and markdown as unchanged', () => {

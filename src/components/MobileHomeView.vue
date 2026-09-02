@@ -5,7 +5,8 @@ import PageTreeItem from '@/components/PageTreeItem.vue'
 import { pageTreeDragKey } from '@/composables/pageTreeDrag'
 import { mobilePageSwipeKey } from '@/composables/mobilePageSwipe'
 import { usePageTreePointerDrag } from '@/composables/usePageTreePointerDrag'
-import { pageBoundToSource, pageSourceIds, sourceShortLabel } from '@/services/page-sources'
+import { pageBoundToSource, pageSourceIds, pageSourceRoleLabel, sourceShortLabel } from '@/services/page-sources'
+import { isCloudStorageSourceId } from '@/services/storage-identity'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 const store = useWorkspaceStore()
@@ -29,7 +30,12 @@ const bindSourceChoices = computed(() => {
   if (!bindPage.value) return []
   return store.allSources.filter((source) => store.canBindPageTo(source.id, bindPage.value!) || pageBoundToSource(bindPage.value!, source.id))
 })
-const bindSourceIds = computed(() => bindPage.value ? pageSourceIds(bindPage.value) : [])
+const bindSourceIds = computed(() => {
+  if (!bindPage.value) return []
+  const known = new Set(store.allSources.map((source) => source.id))
+  return pageSourceIds(bindPage.value).filter((id) => known.has(id))
+})
+const bindCloudSourceIds = computed(() => bindSourceIds.value.filter((id) => isCloudStorageSourceId(id)))
 
 provide(mobilePageSwipeKey, {
   openPageId: openSwipePageId,
@@ -149,12 +155,29 @@ async function toggleBindSource(targetSourceId: string) {
 
 async function setBindPrimary(sourceId: string) {
   if (!bindPage.value || bindBusy.value) return
+  if (!isCloudStorageSourceId(sourceId)) {
+    bindError.value = '协作主源只能是云端存储（S3 / 后台）'
+    return
+  }
   bindBusy.value = true
   bindError.value = ''
   try {
     await store.setPagePrimarySource(bindPage.value.id, sourceId)
   } catch (error) {
-    bindError.value = error instanceof Error ? error.message : '无法设置主源'
+    bindError.value = error instanceof Error ? error.message : '无法设置协作主源'
+  } finally {
+    bindBusy.value = false
+  }
+}
+
+async function pushBindMirrors() {
+  if (!bindPage.value || bindBusy.value || bindSourceIds.value.length <= 1) return
+  bindBusy.value = true
+  bindError.value = ''
+  try {
+    await store.pushPageToMirrors(bindPage.value.id)
+  } catch (error) {
+    bindError.value = error instanceof Error ? error.message : '同步到备份源失败'
   } finally {
     bindBusy.value = false
   }
@@ -264,7 +287,7 @@ async function setBindPrimary(sourceId: string) {
           </div>
           <button type="button" aria-label="关闭" @click="bindPageId = null">×</button>
         </header>
-        <p class="mobile-sheet-hint">勾选要同步写入的存储源；主源决定树层级与默认附件位置。</p>
+        <p class="mobile-sheet-hint">协作认云端主源；本机只是备份。日常只写主源，点「同步到备份」才更新镜像。</p>
         <div class="mobile-bind-list">
           <button
             v-for="source in bindSourceChoices"
@@ -284,20 +307,22 @@ async function setBindPrimary(sourceId: string) {
               <strong>{{ sourceShortLabel(source.name) }} · {{ source.name }}</strong>
               <small>{{ source.available === false ? '当前不可访问' : source.path }}</small>
             </span>
-            <span v-if="source.id === bindPage.storageSourceId" class="mobile-bind-tag">主源</span>
+            <span v-if="pageSourceRoleLabel(bindPage, source.id) === 'primary'" class="mobile-bind-tag">协作主源</span>
+            <span v-else-if="bindSourceIds.includes(source.id)" class="mobile-bind-tag mirror">备份</span>
           </button>
           <p v-if="!bindSourceChoices.length" class="mobile-bind-empty">没有可绑定的存储源</p>
         </div>
-        <div v-if="bindSourceIds.length > 1" class="mobile-bind-primary">
-          <span>设为主源</span>
+        <div v-if="bindCloudSourceIds.length > 1 || (bindCloudSourceIds.length === 1 && bindSourceIds.length > 1)" class="mobile-bind-primary">
+          <span>设为协作主源（仅云端）</span>
           <button
-            v-for="sourceId in bindSourceIds"
+            v-for="sourceId in bindCloudSourceIds"
             :key="sourceId"
             type="button"
             :class="{ active: sourceId === bindPage.storageSourceId }"
             :disabled="bindBusy || sourceId === bindPage.storageSourceId"
             @click="setBindPrimary(sourceId)"
           >{{ store.allSources.find((item) => item.id === sourceId)?.name ?? sourceId }}</button>
+          <button type="button" class="mobile-bind-mirror-sync" :disabled="bindBusy" @click="pushBindMirrors">同步到备份</button>
         </div>
         <p v-if="bindError" class="mobile-sheet-error" role="alert">{{ bindError }}</p>
       </section>

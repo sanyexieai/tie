@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   ASSET_URL_PREFIX,
+  assetWriteSourceIds,
   buildAssetUrl,
   collectAssetNamesFromMarkdown,
   inlineImageSrcFromHtml,
@@ -38,6 +39,29 @@ describe('attachments', () => {
     expect(inlineImageSrcFromHtml('<img src="blob:http://localhost/abc">')).toBe('blob:http://localhost/abc')
     expect(inlineImageSrcFromHtml('<img src="data:image/png;base64,abc">')).toBe('data:image/png;base64,abc')
     expect(inlineImageSrcFromHtml('<img src="https://example.com/a.png">')).toBeNull()
+  })
+
+  describe('assetWriteSourceIds', () => {
+    beforeEach(() => {
+      vi.stubGlobal('window', { __TAURI_INTERNALS__: {} })
+    })
+    afterEach(() => {
+      vi.unstubAllGlobals()
+    })
+
+    it('prefers cloud bindings over local primary', () => {
+      expect(assetWriteSourceIds({
+        storageSourceId: 'src_local_a',
+        storageSourceIds: ['src_local_a', 's3:cloud'],
+      })).toEqual(['s3:cloud'])
+    })
+
+    it('falls back to local primary when no cloud binding', () => {
+      expect(assetWriteSourceIds({
+        storageSourceId: 'src_local_a',
+        storageSourceIds: ['src_local_a'],
+      })).toEqual(['src_local_a'])
+    })
   })
 
   it('prepares export bundle and rewrites markdown when assets are unavailable', async () => {

@@ -1,4 +1,5 @@
 import type { Page } from '@/types'
+import { pageBoundToSource } from '@/services/page-sources'
 import type { SyncConflict, SyncResult } from '@/services/storage/types'
 
 export function emptySyncResult(sourceId: string, error?: string): SyncResult {
@@ -24,7 +25,8 @@ export function mergeSyncPages(
   remotePages: Page[],
   remoteIds: Set<string>,
 ): SyncResult {
-  const scopedLocal = localPages.filter((page) => page.storageSourceId === sourceId)
+  // 双绑定页面主源可能不是当前同步源，必须按绑定关系纳入比较。
+  const scopedLocal = localPages.filter((page) => pageBoundToSource(page, sourceId))
   const localById = new Map(scopedLocal.map((page) => [page.id, page]))
   const remoteById = new Map(remotePages.map((page) => [page.id, page]))
   const added: string[] = []
@@ -61,9 +63,9 @@ export function mergeSyncPages(
         localUpdatedAt: local.updatedAt,
         remoteUpdatedAt: remote.updatedAt,
       })
-      // 保留本地副本供编辑器/冲突 UI 对照；远程内容由 readLatestPage 拉取。
+      // 远程更新：采纳远程以便多客户端收敛；冲突标记留给编辑器脏草稿处理。
       updated.push(pageId)
-      merged.push(local)
+      merged.push(remote)
       return
     }
     updated.push(pageId)

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import TieSelect from '@/components/TieSelect.vue'
+import { pageBoundToSource } from '@/services/page-sources'
 import { readGraphPalette } from '@/services/theme'
 import { useWorkspaceStore } from '@/stores/workspace'
 
@@ -35,13 +36,15 @@ const sourceFilterOptions = computed(() => [
   })),
 ])
 const tagFilter = ref<string | null>(null)
-const showTags = ref(false)
+const showTags = ref(true)
 const showOrphans = ref(true)
 const hoveredId = ref<string | null>(null)
 const selectedId = ref<string | null>(null)
 const canvasEl = ref<HTMLCanvasElement | null>(null)
 const wrapEl = ref<HTMLElement | null>(null)
 const nodeCount = ref(0)
+const pageNodeCount = ref(0)
+const tagNodeCount = ref(0)
 const edgeCount = ref(0)
 
 // Keep simulation state out of Vue reactivity — mutating reactive nodes every frame freezes the UI.
@@ -66,8 +69,8 @@ let lastPointer = { x: 0, y: 0 }
 let downPointer = { x: 0, y: 0 }
 let settledFrames = 0
 
-const MAX_PAGE_NODES = 220
-const MAX_TAG_NODES = 24
+const MAX_PAGE_NODES = 2000
+const MAX_TAG_NODES = 48
 
 function rebuildNeighborCache() {
   const focus = hoveredId.value || selectedId.value
@@ -89,6 +92,8 @@ function setSimGraph(nextNodes: SimNode[], nextEdges: SimEdge[]) {
   simEdges = nextEdges
   nodeIndex = new Map(nextNodes.map((node) => [node.id, node]))
   nodeCount.value = nextNodes.length
+  pageNodeCount.value = nextNodes.filter((node) => node.kind === 'page').length
+  tagNodeCount.value = nextNodes.filter((node) => node.kind === 'tag').length
   edgeCount.value = nextEdges.length
   rebuildNeighborCache()
   settledFrames = 0
@@ -103,7 +108,7 @@ function buildGraph() {
   const includeTags = showTags.value || Boolean(activeTag)
   const pages = store.pages.filter((page) => (
     !page.deletedAt
-    && (!sourceFilter.value || page.storageSourceId === sourceFilter.value)
+    && (!sourceFilter.value || pageBoundToSource(page, sourceFilter.value))
     && (!activeTag || page.tags.includes(activeTag))
     && (!query || `${page.title} ${page.tags.join(' ')}`.toLocaleLowerCase().includes(query))
   ))
@@ -112,8 +117,15 @@ function buildGraph() {
     .filter((link) => pageIds.has(link.fromPageId) && pageIds.has(link.toPageId))
     .map((link) => ({ from: link.fromPageId, to: link.toPageId, kind: 'link' as const }))
 
+  // 树父子关系也是图谱边（不依赖正文里是否还留着子页链接）。
+  const treeEdges: SimEdge[] = []
+  for (const page of pages) {
+    if (!page.parentId || !pageIds.has(page.parentId)) continue
+    treeEdges.push({ from: page.parentId, to: page.id, kind: 'link' })
+  }
+
   const degree = new Map<string, number>()
-  for (const edge of linkEdges) {
+  for (const edge of [...linkEdges, ...treeEdges]) {
     degree.set(edge.from, (degree.get(edge.from) ?? 0) + 1)
     degree.set(edge.to, (degree.get(edge.to) ?? 0) + 1)
   }
@@ -145,7 +157,15 @@ function buildGraph() {
   }
 
   const visiblePageIds = new Set(pageNodes.map((node) => node.id))
-  const nextEdges: SimEdge[] = linkEdges.filter((edge) => visiblePageIds.has(edge.from) && visiblePageIds.has(edge.to))
+  const edgeKey = new Set<string>()
+  const nextEdges: SimEdge[] = []
+  for (const edge of [...linkEdges, ...treeEdges]) {
+    if (!visiblePageIds.has(edge.from) || !visiblePageIds.has(edge.to)) continue
+    const key = `${edge.from}\0${edge.to}\0${edge.kind}`
+    if (edgeKey.has(key)) continue
+    edgeKey.add(key)
+    nextEdges.push(edge)
+  }
   const pageById = new Map(pages.map((page) => [page.id, page]))
 
   if (includeTags) {
@@ -343,7 +363,7 @@ function draw() {
     ctx.strokeStyle = edge.kind === 'tag'
       ? (active ? palette.tagLink : palette.tagLinkDim)
       : (active ? palette.link : palette.linkDim)
-    ctx.lineWidth = (active ? 1.4 : 0.8) / scale
+    ctx.lineWidth = (active ? 1.8 : 1.15) / scale
     ctx.stroke()
   }
 
@@ -487,12 +507,19 @@ function onThemeChanged() {
   draw()
 }
 
-watch([filter, sourceFilter, showTags, showOrphans], () => {
+watch(() => store.allSources.map((source) => source.id).join('\n'), () => {
+  if (sourceFilter.value && !store.allSources.some((source) => source.id === sourceFilter.value)) {
+    sourceFilter.value = null
+  }
   buildGraph()
 })
 
-watch(() => store.pages.length, () => buildGraph())
-watch(() => store.links.length, () => buildGraph())
+watch([filter, sourceFilter, showTags, showOrphans, tagFilter], () => {
+  buildGraph()
+})
+
+watch(() => store.pages.map((page) => `${page.id}:${page.parentId}:${page.updatedAt}:${page.tags.join(',')}`).join('|'), () => buildGraph())
+watch(() => store.links.map((link) => `${link.fromPageId}->${link.toPageId}`).join('|'), () => buildGraph())
 
 onMounted(() => {
   resize()
@@ -541,10 +568,10 @@ onBeforeUnmount(() => {
         @wheel.prevent="onWheel"
       />
       <div class="obsidian-graph-hint">
-        <span>{{ nodeCount }} 节点 · {{ edgeCount }} 连线</span>
+        <span>{{ pageNodeCount }} 页面 · {{ edgeCount }} 连线{{ tagNodeCount ? ` · ${tagNodeCount} 标签` : '' }}</span>
         <span>悬停高亮 · 点页面打开 · 点标签筛选 · 拖拽 / 缩放</span>
       </div>
-      <p v-if="!nodeCount" class="obsidian-graph-empty">没有可显示的页面。创建页面并用 `[[链接]]` 关联后会出现网络。</p>
+      <p v-if="!nodeCount" class="obsidian-graph-empty">没有可显示的页面。创建页面、加标签，或用 `[[` / 页面链接关联后会出现网络。</p>
     </section>
   </main>
 </template>

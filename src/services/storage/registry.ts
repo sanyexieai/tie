@@ -1,10 +1,11 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { Page, PageRevision, StorageSource, WorkspaceSnapshot } from '@/types'
 import { isBackendRemoteSourceId } from '@/services/backend'
-import { copyPageAssets as copyPageAssetsBetweenSources } from '@/services/attachments'
-import { mergePagesById, normalizePageSources, pageBoundToSource, pageContentEqual, pageSourceIds, withPageSources } from '@/services/page-sources'
+import { copyPageAssets as copyPageAssetsBetweenSources, ensurePageAssetsOnSource } from '@/services/attachments'
+import { mergePagesById, normalizePageSources, pageBoundToSource, pageContentEqual, pageForStorageWrite, pageMirrorSourceIds, pageSourceIds, remapPageSourceIds, withPageSources } from '@/services/page-sources'
 import { canTransferBetweenSources, transferBlockedMessage } from '@/services/transfer-policy'
-import { isS3SourceId, s3ConnectionForSource } from '@/services/s3'
+import { isS3SourceId, s3ConnectionForSource, buildS3SourceIdHealingRemap } from '@/services/s3'
+import { isCloudStorageSourceId } from '@/services/storage-identity'
 import { backendStorageAdapter, loadAllBackendPages } from '@/services/storage/backend-adapter'
 import { backendS3StorageAdapter, loadAllBackendS3Pages } from '@/services/storage/backend-s3-adapter'
 import { browserStorageAdapter, loadBrowserSnapshot } from '@/services/storage/browser-adapter'
@@ -110,9 +111,13 @@ export const storageRegistry = {
     contextPages: Page[] = [],
     options: { remote?: boolean } = {},
   ): Promise<WorkspaceSnapshot> {
-    const filePages = fileSnapshot.pages
-      .filter((page) => !isBackendRemoteSourceId(page.storageSourceId) && !isS3SourceId(page.storageSourceId))
-      .map((page) => normalizePageSources(page))
+    // 磁盘上读到的页面都要保留。协作主源改成云端后，frontmatter 里可能是 s3:/backend:，
+    // 不能再按 primary 类型过滤，否则本机副本会在启动时被丢掉。
+    const healing = buildS3SourceIdHealingRemap(fileSnapshot.pages)
+    const filePages = fileSnapshot.pages.map((page) => {
+      const normalized = normalizePageSources(page)
+      return healing.size ? remapPageSourceIds(normalized, healing) : normalized
+    })
     if (options.remote === false) {
       return { workspace: fileSnapshot.workspace, pages: mergePagesById(filePages) }
     }
@@ -125,8 +130,12 @@ export const storageRegistry = {
 
   async savePage(page: Page, options?: SavePageOptions): Promise<Page> {
     const normalized = normalizePageSources(page)
+    const primaryWrite = options?.writeSourceId ?? normalized.storageSourceId
     if (!options?.force) {
-      const latest = await this.readLatestPage(normalized).catch(() => null)
+      const latest = await this.readLatestPage({
+        ...normalized,
+        storageSourceId: primaryWrite,
+      }).catch(() => null)
       if (latest && pageContentEqual(latest, normalized)) {
         return normalizePageSources({
           ...latest,
@@ -135,31 +144,46 @@ export const storageRegistry = {
         })
       }
     }
-    const targets = pageSourceIds(normalized)
-    const primaryWrite = options?.writeSourceId ?? normalized.storageSourceId
-    let saved = await this.resolve(primaryWrite).savePage(normalized, {
+    // 方案 A：日常保存只写协作主源；写云端时剥离本机 sourceId。
+    const forWrite = pageForStorageWrite(normalized, primaryWrite)
+    // 正文上云前先把引用到的附件补到目标源，避免另一端只有 markdown、没有图。
+    if (isCloudStorageSourceId(primaryWrite)) {
+      try {
+        await ensurePageAssetsOnSource(normalized, primaryWrite)
+      } catch (error) {
+        console.warn('保存前同步页面附件失败', error)
+      }
+    }
+    const saved = await this.resolve(primaryWrite).savePage(forWrite, {
       ...options,
       writeSourceId: primaryWrite,
     })
-    saved = normalizePageSources({
+    return normalizePageSources({
       ...saved,
       storageSourceId: normalized.storageSourceId,
-      storageSourceIds: targets,
+      storageSourceIds: pageSourceIds(normalized),
     })
-    for (const sourceId of targets) {
-      if (sourceId === primaryWrite) continue
+  },
+
+  /** 把当前主源内容强制推到所有备份镜像（正文 + 附件）。 */
+  async pushPageToMirrors(page: Page): Promise<Page> {
+    const normalized = normalizePageSources(page)
+    const mirrors = pageMirrorSourceIds(normalized)
+    if (!mirrors.length) return normalized
+    for (const sourceId of mirrors) {
+      const forWrite = pageForStorageWrite(normalized, sourceId)
+      await this.resolve(sourceId).savePage(forWrite, {
+        force: true,
+        queueOnFailure: true,
+        writeSourceId: sourceId,
+      })
       try {
-        await this.resolve(sourceId).savePage(saved, {
-          force: true,
-          queueOnFailure: options?.queueOnFailure,
-          writeSourceId: sourceId,
-        })
+        await this.copyPageAssets(normalized, normalized.storageSourceId, sourceId)
       } catch (error) {
-        if (!options?.force) throw error
-        console.warn(`绑定源 ${sourceId} 强制同步写入失败`, error)
+        console.warn(`备份源 ${sourceId} 附件同步失败`, error)
       }
     }
-    return saved
+    return normalized
   },
 
   async permanentlyDeletePages(pages: Page[]) {
@@ -177,6 +201,7 @@ export const storageRegistry = {
       throw new Error(transferBlockedMessage(normalized.storageSourceId, targetSourceId))
     }
     const next = withPageSources(normalized, normalized.storageSourceId, [...pageSourceIds(normalized), targetSourceId])
+    // withPageSources 在存在云端绑定时会自动把主源收束到云端。
     if (isFileSourceId(normalized.storageSourceId) && isFileSourceId(targetSourceId) && await isTauri()) {
       await invoke('copy_page_sidecars', {
         pageId: next.id,
@@ -187,6 +212,11 @@ export const storageRegistry = {
       await this.copyPageHistory(next, normalized.storageSourceId, targetSourceId)
       await this.copyPageAssets(next, normalized.storageSourceId, targetSourceId)
     }
+    // 初次绑定：把当前正文种子写入备份镜像，之后日常保存不再自动双写。
+    await this.resolve(targetSourceId).savePage(pageForStorageWrite(next, targetSourceId), {
+      force: true,
+      writeSourceId: targetSourceId,
+    })
     return this.savePage(next, { force: true })
   },
 
@@ -205,6 +235,9 @@ export const storageRegistry = {
   async setPagePrimarySource(page: Page, sourceId: string): Promise<Page> {
     const normalized = normalizePageSources(page)
     if (!pageBoundToSource(normalized, sourceId)) throw new Error('尚未绑定该存储源')
+    if (!isCloudStorageSourceId(sourceId)) {
+      throw new Error('协作主源只能是云端存储（S3 / 后台）')
+    }
     return this.savePage(withPageSources(normalized, sourceId, pageSourceIds(normalized)), { force: true })
   },
 

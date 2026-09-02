@@ -20,9 +20,9 @@ export interface Page {
   createdAt: string
   updatedAt: string
   deletedAt: string | null
-  /** 主存储源：树层级、历史与附件默认落在此源 */
+  /** 主存储源：多客户端协作的唯一真相源；日常保存只写入这里 */
   storageSourceId: string
-  /** 绑定的全部存储源（含主源）；保存时会同步写到每一个 */
+  /** 绑定源列表（含主源）。除主源外为备份镜像，不随每次保存自动写入，需手动「同步到备份」 */
   storageSourceIds?: string[]
 }
 
