@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use std::path::PathBuf;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn markdown_path(root: &Path, page_id: &str) -> PathBuf {
