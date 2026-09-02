@@ -6,13 +6,18 @@ AVD_NAME="${AVD_NAME:-tie}"
 
 export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH"
 
+adb_has_emulator_device() {
+  adb devices 2>/dev/null | grep -qE '^emulator-[0-9]+[[:space:]]+device$'
+}
+
 if ! command -v emulator >/dev/null 2>&1; then
   echo "未找到 emulator。先运行: bash scripts/setup-android-emulator.sh" >&2
   exit 1
 fi
 
-if adb devices | rg -q "emulator.*device$"; then
-  echo "已有运行中的模拟器: $(adb devices | rg emulator)"
+if adb_has_emulator_device; then
+  echo "已有运行中的模拟器:"
+  adb devices | grep emulator || true
   exit 0
 fi
 
@@ -22,7 +27,7 @@ disown
 
 echo "等待 adb 连接…"
 for _ in $(seq 1 90); do
-  if adb devices | rg -q "emulator.*device$"; then
+  if adb_has_emulator_device; then
     echo "模拟器已就绪"
     adb devices
     exit 0

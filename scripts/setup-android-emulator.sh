@@ -19,7 +19,7 @@ echo "镜像: $IMAGE"
 
 yes | sdkmanager --install emulator "$IMAGE"
 
-if avdmanager list avd | rg -q "Name: ${AVD_NAME}"; then
+if avdmanager list avd | grep -q "Name: ${AVD_NAME}"; then
   echo "AVD ${AVD_NAME} 已存在，跳过创建"
 else
   echo no | avdmanager create avd -n "$AVD_NAME" -k "$IMAGE" -d pixel_6 --force
