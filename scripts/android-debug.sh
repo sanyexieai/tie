@@ -75,6 +75,46 @@ setup_adb_reverse() {
   done < <(adb devices 2>/dev/null | tail -n +2 | grep '[[:space:]]device$')
 }
 
+find_apksigner() {
+  local candidate
+  for candidate in \
+    "$ANDROID_HOME/build-tools"/*/apksigner \
+    "$ANDROID_HOME/cmdline-tools/latest/bin/apksigner"; do
+    if [[ -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+sign_apk_if_needed() {
+  local apk="$1"
+  if [[ "$apk" != *unsigned* ]]; then
+    echo "$apk"
+    return 0
+  fi
+  local keystore="${ANDROID_DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}"
+  if [[ ! -f "$keystore" ]]; then
+    echo "Release APK 未签名且未找到 debug.keystore：$keystore" >&2
+    return 1
+  fi
+  local apksigner
+  apksigner="$(find_apksigner)" || {
+    echo "未找到 apksigner，请安装 Android SDK build-tools" >&2
+    return 1
+  }
+  local signed="${TMPDIR:-/tmp}/tie-android-debug-signed.apk"
+  cp "$apk" "$signed"
+  "$apksigner" sign \
+    --ks "$keystore" \
+    --ks-pass pass:android \
+    --key-pass pass:android \
+    --out "$signed" \
+    "$signed"
+  echo "$signed"
+}
+
 find_release_apk() {
   local dir="$ROOT/src-tauri/gen/android/app/build/outputs/apk/universal/release"
   local apk=""
@@ -115,6 +155,7 @@ if "$INSTALL_ONLY"; then
     echo "未找到 APK，请检查 src-tauri/gen/android/app/build/outputs/apk/" >&2
     exit 1
   }
+  apk="$(sign_apk_if_needed "$apk")" || exit 1
   echo "安装: $apk"
   adb install -r "$apk"
   launch_app

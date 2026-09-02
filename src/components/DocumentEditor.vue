@@ -11,6 +11,7 @@ import { pageBoundToSource, pageSourceIds, sourceShortLabel } from '@/services/p
 import { isS3SourceId } from '@/services/s3'
 import { suggestTags, type TagSuggestion } from '@/services/tagging'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
+import { isMobileClient } from '@/services/platform'
 
 const store = useWorkspaceStore()
 const backend = useBackendStore()
@@ -215,7 +216,8 @@ async function loadConflictPreview() {
   finally { conflictLoading.value = false }
 }
 
-const emit = defineEmits<{ 'toggle-sidebar': []; 'toggle-focus': []; 'toggle-context': [] }>()
+const props = defineProps<{ mobileLayout?: boolean }>()
+const emit = defineEmits<{ 'toggle-sidebar': []; 'toggle-focus': []; 'toggle-context': []; 'mobile-back': [] }>()
 
 function draft() {
   if (!store.activePage) return null
@@ -634,9 +636,17 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
 </script>
 
 <template>
-  <main v-if="store.activePage" class="editor-pane">
+  <main v-if="store.activePage" class="editor-pane" :class="{ 'mobile-editor-pane': props.mobileLayout }">
     <header class="editor-header">
-      <nav class="breadcrumbs" aria-label="页面层级"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><template v-for="(page, index) in breadcrumbs" :key="page.id"><span>›</span><button :class="{ current: index === breadcrumbs.length - 1 }" :title="page.title" @click="store.openPage(page.id)">{{ page.title }}</button></template></nav>
+      <button
+        v-if="props.mobileLayout || isMobileClient"
+        type="button"
+        class="mobile-editor-back"
+        aria-label="返回列表"
+        @click="emit('mobile-back')"
+      >←</button>
+      <nav v-if="!props.mobileLayout" class="breadcrumbs" aria-label="页面层级"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><template v-for="(page, index) in breadcrumbs" :key="page.id"><span>›</span><button :class="{ current: index === breadcrumbs.length - 1 }" :title="page.title" @click="store.openPage(page.id)">{{ page.title }}</button></template></nav>
+      <h1 v-else class="mobile-editor-title">{{ store.activePage.title }}</h1>
       <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><button class="source-select-trigger" :aria-expanded="sourceMenuOpen" aria-haspopup="menu" :title="boundSourceCount > 1 ? `${activeSource.name}\n${activeSource.path}\n共绑定 ${boundSourceCount} 个存储源` : `${activeSource.name}\n${activeSource.path}`" :disabled="!canSwitchStorageSource || sourceBindingBusy" @click.stop="canSwitchStorageSource && (sourceMenuOpen = !sourceMenuOpen)">{{ sourceShortLabel(activeSource.name) }}</button><div v-if="sourceMenuOpen && activeSource && canSwitchStorageSource" class="source-select-menu source-bind-menu" role="menu"><p class="source-bind-hint">勾选绑定的存储源；保存时会同步写入每一项。主源用于树层级与默认附件位置。</p><button v-for="source in sourceChoices" :key="source.id" :class="{ unavailable: source.available === false, bound: boundSourceIds.includes(source.id), primary: source.id === activeSource.id }" role="menuitemcheckbox" :aria-checked="boundSourceIds.includes(source.id)" :disabled="source.available === false || sourceBindingBusy" @click="toggleSourceBinding(source.id)"><span><i :class="source.kind"></i>{{ sourceBadgeLabel(source.kind) }} · {{ source.name }}</span><small>{{ source.available === false ? '当前不可访问' : boundSourceIds.includes(source.id) ? (source.id === activeSource.id ? '已绑定 · 主源' : '已绑定') : source.path }}</small><em aria-hidden="true">{{ boundSourceIds.includes(source.id) ? '✓' : '' }}</em></button><div v-if="boundSourceCount > 1" class="source-primary-actions"><span>设为主源</span><button v-for="sourceId in boundSourceIds" :key="`primary-${sourceId}`" type="button" :class="{ active: sourceId === activeSource.id }" :disabled="sourceBindingBusy || sourceId === activeSource.id" @click="setPrimarySource(sourceId)">{{ store.allSources.find((item) => item.id === sourceId)?.name ?? sourceId }}</button></div></div></div><span class="save-dot" :class="{ saving: store.saving, error: Boolean(saveError) }"></span><span :title="saveError ?? undefined">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" title="重新尝试保存当前页面" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从存储源刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button class="copy-link-button" title="导出 Markdown" @click="exportMarkdown">⇩</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
     </header>
     <aside v-if="showingHistory" class="history-popover">
@@ -675,7 +685,7 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
       </article>
     </div>
     <footer class="editor-statusbar">
-      <button title="收起或展开左侧栏" @click="emit('toggle-sidebar')">▤ 侧栏</button>
+      <button v-if="!props.mobileLayout && !isMobileClient" title="收起或展开左侧栏" @click="emit('toggle-sidebar')">▤ 侧栏</button>
       <button class="statusbar-mobile-hide" title="切换专注模式（Ctrl/Cmd + Shift + Enter）" @click="emit('toggle-focus')">⛶ 专注</button>
       <template v-if="!store.sourceMode"><button class="statusbar-mobile-hide" title="撤销（Ctrl/Cmd + Z）" @click="undo">↶ 撤销</button><button class="statusbar-mobile-hide" title="重做（Ctrl/Cmd + Shift + Z）" @click="redo">↷ 重做</button></template>
       <button :class="{ active: store.sourceMode }" title="切换 Markdown 源码模式（Ctrl/Cmd + /）" @click="toggleSourceMode">&lt;/&gt; 源码</button>

@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AppSidebar from '@/components/AppSidebar.vue'
 import ContextPanel from '@/components/ContextPanel.vue'
 import DocumentEditor from '@/components/DocumentEditor.vue'
+import MobileHomeView from '@/components/MobileHomeView.vue'
+import MobileStackShell from '@/components/MobileStackShell.vue'
 import TrashView from '@/components/TrashView.vue'
 import SearchView from '@/components/SearchView.vue'
 import TagView from '@/components/TagView.vue'
@@ -17,7 +19,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 import { checkForAppUpdateOnStartup } from '@/services/app-updater'
-import { initPlatform, isMobileClient } from '@/services/platform'
+import { initPlatform, isMobileClient, usesMobileUi } from '@/services/platform'
 
 const PANEL_WIDTHS_KEY = 'tie:panel-widths'
 const SIDEBAR_DEFAULT = 256
@@ -46,7 +48,7 @@ let contextDrawerQuery: MediaQueryList | null = null
 let resizeStartX = 0
 let resizeStartWidth = 0
 
-const usesMobileShell = computed(() => isMobileLayout.value || isMobileClient.value)
+const usesMobileShell = computed(() => isMobileLayout.value || isMobileClient.value || usesMobileUi.value)
 
 const shellStyle = computed(() => {
   const mobileShell = usesMobileShell.value
@@ -58,6 +60,17 @@ const shellStyle = computed(() => {
 
 const showSidebarResize = computed(() => !focusMode.value && !sidebarCollapsed.value && !usesMobileShell.value)
 const showContextResize = computed(() => !focusMode.value && !contextCollapsed.value && !usesContextDrawer.value)
+
+const mobileOnHome = computed(() => (
+  !store.activePageId
+  && !store.showingSearch
+  && !store.showingTags
+  && !store.showingGraph
+  && !store.showingTrash
+  && !store.showingRecent
+  && !store.showingFavorites
+  && !store.showingSkills
+))
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, Math.round(value)))
@@ -136,9 +149,14 @@ function toggleContextPanel() {
   contextCollapsed.value = !contextCollapsed.value
 }
 
+function goMobileHome() {
+  store.openMobileHome()
+  mobileContextOpen.value = false
+}
+
 function syncMobileLayout() {
   if (!mobileLayoutQuery) return
-  const mobile = mobileLayoutQuery.matches || isMobileClient.value
+  const mobile = mobileLayoutQuery.matches || isMobileClient.value || usesMobileUi.value
   const wasMobile = isMobileLayout.value
   isMobileLayout.value = mobile
   if (mobile) sidebarCollapsed.value = true
@@ -146,7 +164,7 @@ function syncMobileLayout() {
 }
 
 function syncContextDrawer() {
-  const drawer = (contextDrawerQuery?.matches ?? false) || isMobileClient.value
+  const drawer = (contextDrawerQuery?.matches ?? false) || isMobileClient.value || usesMobileUi.value
   usesContextDrawer.value = drawer
   if (!usesContextDrawer.value) mobileContextOpen.value = false
 }
@@ -167,7 +185,7 @@ function onShortcut(event: KeyboardEvent) {
   }
   if ((event.ctrlKey || event.metaKey) && event.key === '\\') {
     event.preventDefault()
-    if (!focusMode.value) toggleSidebar()
+    if (!focusMode.value && !usesMobileShell.value) toggleSidebar()
   }
   if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === '\\') {
     event.preventDefault()
@@ -189,6 +207,7 @@ onMounted(async () => {
   syncContextDrawer()
   await backend.initialize()
   await store.initialize()
+  if (usesMobileShell.value) goMobileHome()
   const update = await checkForAppUpdateOnStartup()
   if (update) updateDialogOpen.value = true
 })
@@ -210,12 +229,52 @@ onBeforeUnmount(() => {
       'context-collapsed': contextCollapsed,
       'focus-mode': focusMode,
       'mobile-shell': usesMobileShell,
-      'mobile-client': isMobileClient,
+      'mobile-client': isMobileClient || usesMobileUi,
+      'mobile-notion': usesMobileShell,
     }"
     :style="shellStyle"
   >
+  <!-- 移动端：Notion 式列表 → 点开编辑器 -->
+  <template v-if="usesMobileShell && !focusMode">
+    <MobileHomeView v-if="mobileOnHome" @open-settings="storageSettingsOpen = true" />
+    <template v-else>
+      <MobileStackShell v-if="store.showingSearch" title="搜索" @back="goMobileHome">
+        <SearchView />
+      </MobileStackShell>
+      <MobileStackShell v-else-if="store.showingGraph" title="图谱" @back="goMobileHome">
+        <GraphView />
+      </MobileStackShell>
+      <MobileStackShell v-else-if="store.showingRecent" title="最近打开" @back="goMobileHome">
+        <LibraryView mode="recent" />
+      </MobileStackShell>
+      <MobileStackShell v-else-if="store.showingFavorites" title="收藏" @back="goMobileHome">
+        <LibraryView mode="favorites" />
+      </MobileStackShell>
+      <MobileStackShell v-else-if="store.showingSkills" title="Agent Skills" @back="goMobileHome">
+        <SkillsView />
+      </MobileStackShell>
+      <MobileStackShell v-else-if="store.showingTags" title="标签" @back="goMobileHome">
+        <TagView />
+      </MobileStackShell>
+      <MobileStackShell v-else-if="store.showingTrash" title="回收站" @back="goMobileHome">
+        <TrashView />
+      </MobileStackShell>
+      <DocumentEditor
+        v-else
+        mobile-layout
+        @mobile-back="goMobileHome"
+        @toggle-focus="toggleFocusMode"
+        @toggle-context="toggleContextPanel"
+      />
+    </template>
+    <div v-if="mobileContextOpen" class="mobile-context-scrim" @click="mobileContextOpen = false"></div>
+    <ContextPanel v-if="mobileContextOpen" class="mobile-context-panel" @close="mobileContextOpen = false" />
+  </template>
+
+  <!-- 桌面端：三栏布局 -->
+  <template v-else>
     <button v-if="sidebarCollapsed && !focusMode" class="mobile-sidebar-toggle" aria-label="打开侧边栏" @click="toggleSidebar">☰</button>
-    <div v-if="usesMobileShell && !sidebarCollapsed && !focusMode" class="mobile-sidebar-scrim" @click="toggleSidebar"></div>
+    <div v-if="isMobileLayout && !sidebarCollapsed && !focusMode" class="mobile-sidebar-scrim" @click="toggleSidebar"></div>
     <AppSidebar v-if="!focusMode" @close="toggleSidebar" @open-storage-settings="storageSettingsOpen = true" />
     <div
       v-if="showSidebarResize"
@@ -254,6 +313,8 @@ onBeforeUnmount(() => {
     <ContextPanel v-if="!focusMode && !contextCollapsed" @close="toggleContextPanel" />
     <div v-if="mobileContextOpen" class="mobile-context-scrim" @click="mobileContextOpen = false"></div>
     <ContextPanel v-if="mobileContextOpen" class="mobile-context-panel" @close="mobileContextOpen = false" />
+  </template>
+
     <CommandPalette v-if="store.showingCommandPalette" />
     <BackendConnectionDialog v-if="backendDialogOpen" @close="backendDialogOpen = false" />
     <StorageSettingsDialog v-if="storageSettingsOpen" @close="storageSettingsOpen = false" @connect-backend="backendDialogOpen = true; storageSettingsOpen = false" />

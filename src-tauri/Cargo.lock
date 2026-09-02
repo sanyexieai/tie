@@ -4858,9 +4858,8 @@ dependencies = [
 
 [[package]]
 name = "tie"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
- "futures-util",
  "keyring",
  "minio",
  "serde",
@@ -4872,6 +4871,44 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "tie-storage",
+]
+
+[[package]]
+name = "tie-common"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "tie-local"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tie-common",
+]
+
+[[package]]
+name = "tie-s3"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "minio",
+ "serde",
+ "serde_json",
+ "tie-common",
+ "tie-local",
+]
+
+[[package]]
+name = "tie-storage"
+version = "0.1.0"
+dependencies = [
+ "tie-common",
+ "tie-local",
+ "tie-s3",
 ]
 
 [[package]]

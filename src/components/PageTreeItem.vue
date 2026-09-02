@@ -1,11 +1,19 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { PageTreeNode, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { pageBoundToSource, pageSourceIds, sourceShortLabel } from '@/services/page-sources'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { pageTreeDragKey } from '@/composables/pageTreeDrag'
 
-const props = defineProps<{ node: PageTreeNode; activePageId: string | null; sourcesById: Record<string, StorageSource>; depth?: number }>()
+const props = defineProps<{
+  node: PageTreeNode
+  activePageId: string | null
+  sourcesById: Record<string, StorageSource>
+  depth?: number
+  touchReorder?: boolean
+  compact?: boolean
+}>()
 const emit = defineEmits<{
   select: [id: string]
   create: [parentId: string]
@@ -16,6 +24,8 @@ const emit = defineEmits<{
   reorder: [pageId: string, targetId: string, position: 'before' | 'after']
 }>()
 const store = useWorkspaceStore()
+const dragCtx = inject(pageTreeDragKey, null)
+const usesTouchReorder = computed(() => props.touchReorder || Boolean(dragCtx))
 const expanded = computed(() => !store.collapsedPageIds.includes(props.node.id))
 const hasChildren = computed(() => props.node.children.length > 0)
 const livePage = computed(() => store.pages.find((page) => page.id === props.node.id) ?? props.node)
@@ -30,14 +40,35 @@ function sourceBadgeTitle(item: StorageSource) {
 }
 const hasSyncConflict = computed(() => store.syncConflicts.has(props.node.id))
 const dropPosition = ref<'before' | 'inside' | 'after' | null>(null)
+const effectiveDropPosition = computed(() => {
+  if (!dragCtx || dragCtx.dropTargetId.value !== props.node.id) return dropPosition.value
+  return dragCtx.dropPosition.value
+})
+const isDragging = computed(() => (
+  dragCtx?.draggingPageId.value === props.node.id
+  || draggingSelf.value
+))
+const draggingSelf = ref(false)
 const actionsOpen = ref(false)
 const bindMenuOpen = ref(false)
 const bindBusy = ref(false)
 const actionsRoot = ref<HTMLElement | null>(null)
 
 function startDrag(event: DragEvent) {
+  if (usesTouchReorder.value) return
   event.dataTransfer?.setData('text/plain', props.node.id)
   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+  draggingSelf.value = true
+}
+
+function endDrag() {
+  draggingSelf.value = false
+  dropPosition.value = null
+}
+
+function onDragHandlePointerDown(event: PointerEvent) {
+  if (!dragCtx) return
+  dragCtx.startPointerDrag(event, props.node.id)
 }
 
 function updateDropPosition(event: DragEvent) {
@@ -148,9 +179,16 @@ onBeforeUnmount(() => document.removeEventListener('click', closeActionsOnOutsid
   <div class="tree-node">
     <div
       class="tree-row"
-      :class="{ active: node.id === activePageId, 'drag-over': dropPosition === 'inside', 'drop-before': dropPosition === 'before', 'drop-after': dropPosition === 'after' }"
+      :class="{
+        active: node.id === activePageId,
+        dragging: isDragging,
+        'drag-over': effectiveDropPosition === 'inside',
+        'drop-before': effectiveDropPosition === 'before',
+        'drop-after': effectiveDropPosition === 'after',
+      }"
       :style="{ paddingLeft: `${12 + (depth ?? 0) * 16}px` }"
-      :draggable="true"
+      :draggable="!usesTouchReorder"
+      :data-page-tree-id="node.id"
       role="treeitem"
       :aria-level="(depth ?? 0) + 1"
       :aria-expanded="hasChildren ? expanded : undefined"
@@ -158,18 +196,27 @@ onBeforeUnmount(() => document.removeEventListener('click', closeActionsOnOutsid
       @click="selectPage"
       @keydown="onTreeKeydown"
       @dragstart="startDrag"
+      @dragend="endDrag"
       @dragenter.prevent="updateDropPosition"
       @dragover.prevent="updateDropPosition"
       @dragleave="dropPosition = null"
       @drop.prevent="dropOnPage"
     >
+      <button
+        v-if="usesTouchReorder"
+        type="button"
+        class="tree-drag-handle"
+        aria-label="拖动调整层级"
+        @pointerdown="onDragHandlePointerDown"
+        @click.stop
+      >◇</button>
       <button class="disclosure" :class="{ invisible: !hasChildren }" @click.stop="toggleExpanded" :aria-label="expanded ? '收起子页面' : '展开子页面'">
         {{ expanded ? '▾' : '▸' }}
       </button>
       <span class="page-glyph">{{ DEFAULT_PAGE_ICON }}</span>
       <span class="tree-title">{{ node.title || '无标题' }}</span>
       <span v-if="hasSyncConflict" class="page-sync-conflict-badge" title="同步冲突，打开页面后可查看差异">!</span>
-      <span v-if="boundSources.length" class="page-source-badges">
+      <span v-if="boundSources.length && !compact" class="page-source-badges">
         <span
           v-for="item in boundSources"
           :key="item.id"
@@ -178,7 +225,7 @@ onBeforeUnmount(() => document.removeEventListener('click', closeActionsOnOutsid
           :title="sourceBadgeTitle(item)"
         >{{ sourceShortLabel(item.name) }}</span>
       </span>
-      <span ref="actionsRoot" class="tree-actions" :class="{ open: actionsOpen }" @click.stop>
+      <span v-if="!compact" ref="actionsRoot" class="tree-actions" :class="{ open: actionsOpen }" @click.stop>
         <button class="tree-more-button" :aria-expanded="actionsOpen" aria-label="页面操作" @click="actionsOpen = !actionsOpen; bindMenuOpen = false">⋯</button>
         <span v-if="actionsOpen" class="tree-action-menu">
           <button title="新建子页面" @click="actionsOpen = false; emit('create', node.id)">+ 新建子页面</button>
@@ -211,6 +258,8 @@ onBeforeUnmount(() => document.removeEventListener('click', closeActionsOnOutsid
         :active-page-id="activePageId"
         :sources-by-id="sourcesById"
         :depth="(depth ?? 0) + 1"
+        :touch-reorder="touchReorder"
+        :compact="compact"
         @select="emit('select', $event)"
         @create="emit('create', $event)"
         @duplicate="emit('duplicate', $event)"

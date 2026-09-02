@@ -1,11 +1,13 @@
 use crate::common::{
-    archive_page_revision, copy_page_assets, copy_page_history, ensure_demo, frontmatter, load_settings,
-    markdown_path, merge_loaded_pages, normalize_page_sources, page_asset_dir, page_has_changed, parse_page, remove_page_assets,
-    revision_dir, sanitize_asset_name, save_settings, source_from_path, workspace_sources, Page, PageRevision,
-    StorageSource, Workspace, WorkspaceSettings, WorkspaceSnapshot,
+    app_data_dir, copy_page_assets, copy_page_history, frontmatter, load_settings, markdown_path,
+    normalize_page_sources, page_asset_dir, parse_page, remove_page_assets, revision_dir,
+    sanitize_asset_name, save_settings, source_from_path, workspace_sources, Page,
+    StorageSource, WorkspaceSettings, WorkspaceSnapshot,
 };
-use crate::s3::{
-    list_s3_object_keys, s3_asset_object, s3_asset_prefix, s3_client, s3_history_object, s3_history_prefix,
+use tie_storage::local::load_file_workspace;
+use crate::s3::s3_client_for_app;
+use tie_storage::s3::{
+    list_s3_object_keys, s3_asset_object, s3_asset_prefix, s3_history_object, s3_history_prefix,
     trim_s3_history, S3Connection,
 };
 use minio::s3::{builders::ObjectContent, types::S3Api};
@@ -16,8 +18,9 @@ use std::{
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
+use tauri::AppHandle;
 
-fn source_root(app: &tauri::AppHandle, storage_source_id: &str) -> Result<PathBuf, String> {
+fn source_root(app: &AppHandle, storage_source_id: &str) -> Result<PathBuf, String> {
     let (sources, _) = workspace_sources(app)?;
     let source = sources
         .iter()
@@ -68,6 +71,7 @@ fn remap_imported_links(markdown: String, page_ids: &HashMap<String, String>) ->
         )
     })
 }
+
 fn path_is_markdown(path: &Path) -> bool {
     path.is_file()
         && path.extension().is_some_and(|extension| {
@@ -115,10 +119,7 @@ fn find_source_covering_path<'a>(
     })
 }
 
-fn ensure_local_source_at(
-    app: &tauri::AppHandle,
-    root: PathBuf,
-) -> Result<(StorageSource, bool), String> {
+fn ensure_local_source_at(app: &AppHandle, root: PathBuf) -> Result<(StorageSource, bool), String> {
     let root = root
         .canonicalize()
         .map_err(|error| format!("无法打开工作区目录：{error}"))?;
@@ -164,7 +165,6 @@ fn try_existing_page_id(root: &Path, file: &Path) -> Option<String> {
     if expected.canonicalize().ok().as_ref() == Some(&canon_file) {
         return Some(page.id);
     }
-    // Still prefer frontmatter id when the file already lives under pages/.
     Some(page.id)
 }
 
@@ -235,238 +235,11 @@ fn import_single_markdown_file(
     fs::write(destination, frontmatter(&page)).map_err(|error| error.to_string())?;
     Ok(page_id)
 }
-#[tauri::command]
-pub(crate) fn list_file_page_assets(app: tauri::AppHandle, page: Page) -> Result<Vec<String>, String> {
-    let root = source_root(&app, &page.storage_source_id)?;
-    let directory = page_asset_dir(&root, &page.id);
-    if !directory.exists() {
-        return Ok(Vec::new());
-    }
-    let mut names = Vec::new();
-    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
-        let path = entry.map_err(|error| error.to_string())?.path();
-        if path.is_file() {
-            if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
-                names.push(name.to_owned());
-            }
-        }
-    }
-    Ok(names)
-}
-#[tauri::command]
-pub(crate) fn load_workspace(app: tauri::AppHandle) -> Result<WorkspaceSnapshot, String> {
-    let workspace_name = load_settings(&app)?.name;
-    let (mut sources, is_default_source) = workspace_sources(&app)?;
-    if is_default_source {
-        let root = PathBuf::from(&sources[0].path);
-        fs::create_dir_all(root.join("pages")).map_err(|error| error.to_string())?;
-        ensure_demo(&root, &sources[0].id)?;
-    }
-    let mut pages = Vec::new();
-    for source in &mut sources {
-        let root = PathBuf::from(&source.path);
-        let pages_dir = root.join("pages");
-        if fs::create_dir_all(&pages_dir).is_err() {
-            source.available = false;
-            continue;
-        }
-        source.available = true;
-        for entry in fs::read_dir(pages_dir).map_err(|error| error.to_string())? {
-            let path = entry.map_err(|error| error.to_string())?.path();
-            if path.extension().is_some_and(|extension| extension == "md") {
-                let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-                let mut page =
-                    parse_page(&content).map_err(|error| format!("{}: {error}", path.display()))?;
-                if page.storage_source_id.is_empty() {
-                    page.storage_source_id = source.id.clone();
-                }
-                if !page
-                    .storage_source_ids
-                    .iter()
-                    .any(|id| id == &source.id)
-                {
-                    page.storage_source_ids.push(source.id.clone());
-                }
-                pages.push(normalize_page_sources(page));
-            }
-        }
-    }
-    Ok(WorkspaceSnapshot {
-        workspace: Workspace {
-            id: "tie-workspace".to_owned(),
-            name: if workspace_name.trim().is_empty() {
-                "我的知识库".to_owned()
-            } else {
-                workspace_name
-            },
-            sources,
-        },
-        pages: merge_loaded_pages(pages),
-    })
-}
-
-#[tauri::command]
-pub(crate) fn add_storage_source(
-    app: tauri::AppHandle,
-    path: String,
-    kind: Option<String>,
-) -> Result<WorkspaceSnapshot, String> {
-    let root = PathBuf::from(path)
-        .canonicalize()
-        .map_err(|error| format!("无法打开所选目录：{error}"))?;
-    if !root.is_dir() {
-        return Err("所选路径不是目录".to_owned());
-    }
-    let kind = kind.unwrap_or_else(|| "local".to_owned());
-    if !matches!(kind.as_str(), "local" | "smb") {
-        return Err("不支持的存储源类型".to_owned());
-    }
-    let existing_settings = load_settings(&app)?;
-    let (mut sources, _) = workspace_sources(&app)?;
-    let source = source_from_path(root, kind);
-    if !sources.iter().any(|item| item.id == source.id) {
-        sources.push(source);
-    }
-    let settings = WorkspaceSettings {
-        name: existing_settings.name,
-        path: String::new(),
-        kind: String::new(),
-        sources,
-        s3_providers: existing_settings.s3_providers,
-    };
-    save_settings(&app, &settings)?;
-    load_workspace(app)
-}
-
-#[tauri::command]
-pub(crate) fn save_page(
-    app: tauri::AppHandle,
-    page: Page,
-    expected_updated_at: Option<String>,
-    write_source_id: Option<String>,
-) -> Result<Page, String> {
-    let page = normalize_page_sources(page);
-    let (sources, _) = workspace_sources(&app)?;
-    let write_id = write_source_id
-        .as_deref()
-        .unwrap_or(page.storage_source_id.as_str());
-    let source = sources
-        .iter()
-        .find(|source| source.id == write_id)
-        .ok_or("页面所属存储源不存在")?;
-    let root = PathBuf::from(&source.path);
-    fs::create_dir_all(root.join("pages")).map_err(|error| error.to_string())?;
-    let path = markdown_path(&root, &page.id);
-    if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(previous) = parse_page(&content) {
-            if let Some(expected) = &expected_updated_at {
-                if previous.updated_at != *expected {
-                    return Err("页面已在其他设备更新，请重新载入后再保存".to_owned());
-                }
-            }
-            if page_has_changed(&previous, &page) {
-                archive_page_revision(&root, &previous)?;
-            }
-        }
-    }
-    fs::write(path, frontmatter(&page)).map_err(|error| error.to_string())?;
-    Ok(page)
-}
-
-#[tauri::command]
-pub(crate) fn list_page_revisions(
-    app: tauri::AppHandle,
-    page_id: String,
-    storage_source_id: String,
-) -> Result<Vec<PageRevision>, String> {
-    let (sources, _) = workspace_sources(&app)?;
-    let source = sources
-        .iter()
-        .find(|source| source.id == storage_source_id)
-        .ok_or("页面所属存储源不存在")?;
-    let directory = revision_dir(&PathBuf::from(&source.path), &page_id);
-    let mut revisions = Vec::new();
-    if !directory.exists() {
-        return Ok(revisions);
-    }
-    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
-        let path = entry.map_err(|error| error.to_string())?.path();
-        if !path.extension().is_some_and(|extension| extension == "md") {
-            continue;
-        }
-        let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-        let page = parse_page(&content).map_err(|error| format!("{}: {error}", path.display()))?;
-        let id = path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .ok_or("版本文件名无效")?
-            .to_owned();
-        revisions.push(PageRevision {
-            id,
-            saved_at: page.updated_at,
-            title: page.title,
-        });
-    }
-    revisions.sort_by(|a, b| b.id.cmp(&a.id));
-    Ok(revisions)
-}
-
-#[tauri::command]
-pub(crate) fn read_page_revision(
-    app: tauri::AppHandle,
-    page: Page,
-    revision_id: String,
-) -> Result<Page, String> {
-    let (sources, _) = workspace_sources(&app)?;
-    let source = sources
-        .iter()
-        .find(|source| source.id == page.storage_source_id)
-        .ok_or("页面所属存储源不存在")?;
-    let path =
-        revision_dir(&PathBuf::from(&source.path), &page.id).join(format!("{revision_id}.md"));
-    let content = fs::read_to_string(path).map_err(|error| format!("无法读取历史版本：{error}"))?;
-    parse_page(&content)
-}
-
-#[tauri::command]
-pub(crate) fn restore_page_revision(
-    app: tauri::AppHandle,
-    page: Page,
-    revision_id: String,
-) -> Result<Page, String> {
-    let (sources, _) = workspace_sources(&app)?;
-    let source = sources
-        .iter()
-        .find(|source| source.id == page.storage_source_id)
-        .ok_or("页面所属存储源不存在")?;
-    let path =
-        revision_dir(&PathBuf::from(&source.path), &page.id).join(format!("{revision_id}.md"));
-    let content = fs::read_to_string(path).map_err(|error| format!("无法读取历史版本：{error}"))?;
-    let revision = parse_page(&content)?;
-    let restored = Page {
-        id: page.id,
-        storage_source_id: page.storage_source_id.clone(),
-        storage_source_ids: if page.storage_source_ids.is_empty() {
-            revision.storage_source_ids.clone()
-        } else {
-            page.storage_source_ids.clone()
-        },
-        created_at: page.created_at.clone(),
-        updated_at: page.updated_at,
-        ..revision
-    };
-    save_page(app, restored, None, None)
-}
 
 #[derive(serde::Deserialize)]
 pub(crate) struct ExportAssetPayload {
     name: String,
     data: Vec<u8>,
-}
-
-#[tauri::command]
-pub(crate) fn export_page_markdown(page: Page, target_path: String) -> Result<(), String> {
-    export_page_markdown_bundle(page.markdown, target_path, Vec::new())
 }
 
 #[tauri::command]
@@ -505,29 +278,8 @@ pub(crate) fn export_page_markdown_bundle(
 }
 
 #[tauri::command]
-pub(crate) fn permanently_delete_pages(app: tauri::AppHandle, pages: Vec<Page>) -> Result<(), String> {
-    let (sources, _) = workspace_sources(&app)?;
-    for page in pages {
-        let source = sources
-            .iter()
-            .find(|source| source.id == page.storage_source_id)
-            .ok_or("页面所属存储源不存在")?;
-        let root = PathBuf::from(&source.path);
-        let markdown = markdown_path(&root, &page.id);
-        if markdown.exists() {
-            fs::remove_file(markdown).map_err(|error| format!("无法彻底删除页面：{error}"))?;
-        }
-        let history = revision_dir(&root, &page.id);
-        if history.exists() {
-            fs::remove_dir_all(history).map_err(|error| format!("无法移除页面历史：{error}"))?;
-        }
-    }
-    Ok(())
-}
-
-#[tauri::command]
 pub(crate) fn transfer_page_storage(
-    app: tauri::AppHandle,
+    app: AppHandle,
     page: Page,
     target_source_id: String,
 ) -> Result<Page, String> {
@@ -583,9 +335,10 @@ pub(crate) fn transfer_page_storage(
     let _ = remove_page_assets(&source_root, &transferred.id);
     Ok(transferred)
 }
+
 #[tauri::command]
 pub(crate) fn import_markdown_files(
-    app: tauri::AppHandle,
+    app: AppHandle,
     paths: Vec<String>,
     target_source_id: String,
     created_at: String,
@@ -693,7 +446,7 @@ pub(crate) fn import_markdown_files(
         };
         fs::write(candidate.destination, frontmatter(&page)).map_err(|error| error.to_string())?;
     }
-    load_workspace(app)
+    load_file_workspace(&app_data_dir(&app)?, "tie-workspace")
 }
 
 #[derive(Serialize)]
@@ -704,10 +457,9 @@ pub(crate) struct OpenMarkdownFilesResult {
     created_source_ids: Vec<String>,
 }
 
-
 #[tauri::command]
 pub(crate) fn open_markdown_files(
-    app: tauri::AppHandle,
+    app: AppHandle,
     paths: Vec<String>,
     created_at: String,
 ) -> Result<OpenMarkdownFilesResult, String> {
@@ -749,97 +501,13 @@ pub(crate) fn open_markdown_files(
     }
 
     Ok(OpenMarkdownFilesResult {
-        snapshot: load_workspace(app)?,
+        snapshot: load_file_workspace(&app_data_dir(&app)?, "tie-workspace")?,
         opened_page_ids,
         created_source_ids,
     })
 }
 
-#[tauri::command]
-pub(crate) fn remove_storage_source(
-    app: tauri::AppHandle,
-    source_id: String,
-) -> Result<WorkspaceSnapshot, String> {
-    let existing_settings = load_settings(&app)?;
-    let (mut sources, _) = workspace_sources(&app)?;
-    if sources.len() <= 1 {
-        return Err("至少需要保留一个存储源".to_owned());
-    }
-    if !sources.iter().any(|source| source.id == source_id) {
-        return Err("存储源不存在".to_owned());
-    }
-    for source in &sources {
-        if source.id != source_id {
-            continue;
-        }
-        let pages_dir = PathBuf::from(&source.path).join("pages");
-        let entries = fs::read_dir(pages_dir)
-            .map_err(|error| format!("无法确认该存储源是否为空，请恢复访问后重试：{error}"))?;
-        if entries.filter_map(Result::ok).any(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "md")
-        }) {
-            return Err("该存储源仍包含页面，请先迁移页面后再断开".to_owned());
-        }
-    }
-    sources.retain(|source| source.id != source_id);
-    save_settings(
-        &app,
-        &WorkspaceSettings {
-            name: existing_settings.name,
-            path: String::new(),
-            kind: String::new(),
-            sources,
-            s3_providers: existing_settings.s3_providers,
-        },
-    )?;
-    load_workspace(app)
-}
-
-#[tauri::command]
-pub(crate) fn rename_storage_source(
-    app: tauri::AppHandle,
-    source_id: String,
-    name: String,
-) -> Result<WorkspaceSnapshot, String> {
-    let clean_name = name.trim();
-    if clean_name.is_empty() || clean_name.chars().count() > 80 {
-        return Err("存储源名称需为 1 至 80 个字符".to_owned());
-    }
-    let existing_settings = load_settings(&app)?;
-    let (mut sources, _) = workspace_sources(&app)?;
-    let source = sources
-        .iter_mut()
-        .find(|source| source.id == source_id)
-        .ok_or("存储源不存在")?;
-    source.name = clean_name.to_owned();
-    save_settings(
-        &app,
-        &WorkspaceSettings {
-            name: existing_settings.name,
-            path: String::new(),
-            kind: String::new(),
-            sources,
-            s3_providers: existing_settings.s3_providers,
-        },
-    )?;
-    load_workspace(app)
-}
-
-#[tauri::command]
-pub(crate) fn rename_workspace(app: tauri::AppHandle, name: String) -> Result<WorkspaceSnapshot, String> {
-    let clean_name = name.trim();
-    if clean_name.is_empty() || clean_name.chars().count() > 80 {
-        return Err("工作区名称需为 1 至 80 个字符".to_owned());
-    }
-    let mut settings = load_settings(&app)?;
-    settings.name = clean_name.to_owned();
-    save_settings(&app, &settings)?;
-    load_workspace(app)
-}
-fn file_source_root(app: &tauri::AppHandle, source_id: &str) -> Result<PathBuf, String> {
+fn file_source_root(app: &AppHandle, source_id: &str) -> Result<PathBuf, String> {
     let (sources, _) = workspace_sources(app)?;
     let source = sources
         .iter()
@@ -847,9 +515,10 @@ fn file_source_root(app: &tauri::AppHandle, source_id: &str) -> Result<PathBuf, 
         .ok_or("存储源不存在")?;
     Ok(PathBuf::from(&source.path))
 }
+
 #[tauri::command]
 pub(crate) async fn copy_file_history_to_s3(
-    app: tauri::AppHandle,
+    app: AppHandle,
     page_id: String,
     file_source_id: String,
     connection: S3Connection,
@@ -859,7 +528,7 @@ pub(crate) async fn copy_file_history_to_s3(
     if !source_directory.exists() {
         return Ok(());
     }
-    let (client, bucket) = s3_client(&app, &connection)?;
+    let (client, bucket) = s3_client_for_app(&app, &connection)?;
     for entry in fs::read_dir(source_directory).map_err(|error| error.to_string())? {
         let path = entry.map_err(|error| error.to_string())?.path();
         if !path.extension().is_some_and(|extension| extension == "md") {
@@ -883,9 +552,10 @@ pub(crate) async fn copy_file_history_to_s3(
     }
     trim_s3_history(&client, bucket, &page_id).await
 }
+
 #[tauri::command]
 pub(crate) async fn copy_s3_history_to_file(
-    app: tauri::AppHandle,
+    app: AppHandle,
     connection: S3Connection,
     page_id: String,
     file_source_id: String,
@@ -895,7 +565,7 @@ pub(crate) async fn copy_s3_history_to_file(
     if target_directory.exists() {
         return Err("目标存储源中已存在该页面的历史记录，无法迁移".to_owned());
     }
-    let (client, bucket) = s3_client(&app, &connection)?;
+    let (client, bucket) = s3_client_for_app(&app, &connection)?;
     let keys = list_s3_object_keys(&client, bucket.clone(), &s3_history_prefix(&page_id)).await?;
     if keys.is_empty() {
         return Ok(());
@@ -925,9 +595,10 @@ pub(crate) async fn copy_s3_history_to_file(
     }
     Ok(())
 }
+
 #[tauri::command]
 pub(crate) async fn copy_file_assets_to_s3(
-    app: tauri::AppHandle,
+    app: AppHandle,
     page_id: String,
     file_source_id: String,
     connection: S3Connection,
@@ -937,7 +608,7 @@ pub(crate) async fn copy_file_assets_to_s3(
     if !source_directory.exists() {
         return Ok(());
     }
-    let (client, bucket) = s3_client(&app, &connection)?;
+    let (client, bucket) = s3_client_for_app(&app, &connection)?;
     for entry in fs::read_dir(source_directory).map_err(|error| error.to_string())? {
         let path = entry.map_err(|error| error.to_string())?.path();
         if !path.is_file() {
@@ -962,16 +633,17 @@ pub(crate) async fn copy_file_assets_to_s3(
     }
     Ok(())
 }
+
 #[tauri::command]
 pub(crate) async fn copy_s3_assets_to_file(
-    app: tauri::AppHandle,
+    app: AppHandle,
     connection: S3Connection,
     page_id: String,
     file_source_id: String,
 ) -> Result<(), String> {
     let root = file_source_root(&app, &file_source_id)?;
     let target_directory = page_asset_dir(&root, &page_id);
-    let (client, bucket) = s3_client(&app, &connection)?;
+    let (client, bucket) = s3_client_for_app(&app, &connection)?;
     let keys = list_s3_object_keys(&client, bucket.clone(), &s3_asset_prefix(&page_id)).await?;
     if keys.is_empty() {
         return Ok(());
@@ -994,9 +666,10 @@ pub(crate) async fn copy_s3_assets_to_file(
     }
     Ok(())
 }
+
 #[tauri::command]
 pub(crate) fn copy_page_sidecars(
-    app: tauri::AppHandle,
+    app: AppHandle,
     page_id: String,
     from_source_id: String,
     to_source_id: String,
@@ -1009,32 +682,4 @@ pub(crate) fn copy_page_sidecars(
     copy_page_history(&from_root, &to_root, &page_id)?;
     copy_page_assets(&from_root, &to_root, &page_id)?;
     Ok(())
-}
-
-#[tauri::command]
-pub(crate) fn save_file_page_asset(
-    app: tauri::AppHandle,
-    page: Page,
-    file_name: String,
-    data: Vec<u8>,
-) -> Result<String, String> {
-    if data.is_empty() {
-        return Err("附件内容为空".to_owned());
-    }
-    if data.len() > 20 * 1024 * 1024 {
-        return Err("附件超过 20 MB".to_owned());
-    }
-    let root = source_root(&app, &page.storage_source_id)?;
-    let asset_name = sanitize_asset_name(&file_name)?;
-    let directory = page_asset_dir(&root, &page.id);
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    fs::write(directory.join(&asset_name), data).map_err(|error| error.to_string())?;
-    Ok(asset_name)
-}
-
-#[tauri::command]
-pub(crate) fn read_file_page_asset(app: tauri::AppHandle, page: Page, asset_name: String) -> Result<Vec<u8>, String> {
-    let root = source_root(&app, &page.storage_source_id)?;
-    let asset_name = sanitize_asset_name(&asset_name)?;
-    fs::read(page_asset_dir(&root, &page.id).join(asset_name)).map_err(|error| error.to_string())
 }

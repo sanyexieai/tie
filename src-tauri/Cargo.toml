@@ -1,6 +1,10 @@
+[workspace]
+members = [".", "crates/tie-common", "crates/tie-local", "crates/tie-s3", "crates/tie-storage"]
+resolver = "2"
+
 [package]
 name = "tie"
-version = "1.0.6"
+version = "1.0.7"
 description = "A local-first knowledge editor"
 authors = ["Tie contributors"]
 edition = "2021"
@@ -20,8 +24,8 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-process = "2"
+tie-storage = { path = "crates/tie-storage", features = ["local", "s3"] }
 minio = { version = "0.4", default-features = false, features = ["rustls-tls", "default-crypto", "http2"] }
-futures-util = "0.3"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }

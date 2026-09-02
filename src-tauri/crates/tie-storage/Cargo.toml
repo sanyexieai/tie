@@ -1,0 +1,15 @@
+[package]
+name = "tie-storage"
+version = "0.1.0"
+description = "Tie storage backends facade (optional local + S3)"
+edition = "2021"
+
+[features]
+default = []
+local = ["dep:tie-local"]
+s3 = ["dep:tie-s3"]
+
+[dependencies]
+tie-common = { path = "../tie-common" }
+tie-local = { path = "../tie-local", optional = true }
+tie-s3 = { path = "../tie-s3", optional = true }

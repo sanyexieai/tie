@@ -5,7 +5,7 @@ import { mergePagesById, normalizePageSources, pageBoundToSource, pageSourceIds,
 import { loadLocalS3Providers, refreshS3Providers, s3StorageSource } from '@/services/s3'
 import { sourceStatusStore, syncQueue, storageRegistry } from '@/services/storage'
 import { transferPreservesHistory } from '@/services/transfer-policy'
-import { isMobileClient } from '@/services/platform'
+import { isMobileSupportedStorageKind, isMobileSupportedStorageSource, usesMobileUi } from '@/services/platform'
 import { workspaceService } from '@/services/workspace'
 import { useBackendStore } from '@/stores/backend'
 import type { SyncConflict, SyncResult } from '@/services/storage/types'
@@ -89,7 +89,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     void syncQueueVersion.value
     return sourceStatusStore.get(sourceId)
   }
-  const defaultStorageSourceId = computed(() => allSources.value.find((source) => source.available !== false)?.id ?? allSources.value[0]?.id ?? null)
+  const defaultStorageSourceId = computed(() => {
+    const candidates = usesMobileUi.value
+      ? allSources.value.filter((source) => isMobileSupportedStorageSource(source))
+      : allSources.value
+    return candidates.find((source) => source.available !== false)?.id ?? candidates[0]?.id ?? null
+  })
   const activeStorageSourceId = defaultStorageSourceId
   const activeSkill = computed(() => skillConnections.value.find((item) => item.id === activeSkillId.value) ?? null)
   const skillsWorkspaceSource = computed(() => {
@@ -274,7 +279,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       }
       const { snapshot, syncResults } = await workspaceService.loadWithSync(pages.value)
       workspace.value = snapshot.workspace
-      setPages(snapshot.pages)
+      setPages([...snapshot.pages, ...pages.value])
       applySyncResults(syncResults)
       syncStorageSourceOrder()
       await reconcileChildPageLinksFromParentIds()
@@ -286,14 +291,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function applyWorkspaceReload() {
     const { snapshot, syncResults } = await workspaceService.loadWithSync(pages.value)
     workspace.value = snapshot.workspace
-    setPages(snapshot.pages)
+    setPages([...snapshot.pages, ...pages.value])
     applySyncResults(syncResults)
-    const availablePageIds = new Set(snapshot.pages.filter((page) => !page.deletedAt).map((page) => page.id))
+    const availablePageIds = new Set(pages.value.filter((page) => !page.deletedAt).map((page) => page.id))
     favoritePageIds.value = favoritePageIds.value.filter((pageId) => availablePageIds.has(pageId))
     recentPageIds.value = recentPageIds.value.filter((pageId) => availablePageIds.has(pageId))
     collapsedPageIds.value = collapsedPageIds.value.filter((pageId) => availablePageIds.has(pageId))
     if (!activePageId.value || !availablePageIds.has(activePageId.value)) {
-      activePageId.value = snapshot.pages.find((page) => !page.deletedAt)?.id ?? null
+      activePageId.value = pages.value.find((page) => !page.deletedAt)?.id ?? null
     }
     syncStorageSourceOrder()
     await reconcileChildPageLinksFromParentIds()
@@ -371,7 +376,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function addStorageSource(kind: StorageKind = 'local') {
-    if (isMobileClient.value && kind !== 's3') return false
+    if (usesMobileUi.value && kind === 'smb') {
+      throw new Error('移动端不支持 SMB 挂载目录')
+    }
+    if (usesMobileUi.value && !isMobileSupportedStorageKind(kind)) {
+      throw new Error('移动端仅支持本地目录、S3 与自定义后台')
+    }
     const snapshot = await workspaceService.addStorageSource(kind)
     if (!snapshot) return false
     workspace.value = snapshot.workspace
@@ -517,15 +527,23 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function createPage(parentId: PageId | null) {
     const parent = parentId ? pages.value.find((item) => item.id === parentId) : null
-    const storageSourceId = parent?.storageSourceId ?? defaultStorageSourceId.value
-    if (!storageSourceId) throw new Error('请先连接一个存储源')
+    const fallbackPage = pages.value.find((item) => {
+      if (item.deletedAt) return false
+      if (!usesMobileUi.value) return true
+      const source = allSources.value.find((candidate) => candidate.id === item.storageSourceId)
+      return source && isMobileSupportedStorageSource(source)
+    })
+    const storageSourceId = parent?.storageSourceId
+      ?? defaultStorageSourceId.value
+      ?? fallbackPage?.storageSourceId
+    if (!storageSourceId) {
+      throw new Error(usesMobileUi.value ? '请先添加本地目录、S3 或后台存储源' : '请先连接一个存储源')
+    }
     const page = await workspaceService.createPage(parentId, storageSourceId)
-    pages.value.push(page)
+    pages.value = mergePagesById([...pages.value, page])
     activePageId.value = page.id
     markRecentlyOpened(page.id)
-    showingTrash.value = false
-    showingSearch.value = false
-    showingTags.value = false
+    clearSpecialViews()
     return page
   }
 
@@ -1078,6 +1096,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     showingSkillManager.value = false
   }
 
+  function openMobileHome() {
+    activePageId.value = null
+    clearSpecialViews()
+  }
+
   function openPage(pageId: PageId) {
     activePageId.value = pageId
     expandPageAncestors(pageId)
@@ -1178,5 +1201,5 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, canBindPageTo, bindPageToSource, unbindPageFromSource, setPagePrimarySource, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, canBindPageTo, bindPageToSource, unbindPageFromSource, setPagePrimarySource, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })

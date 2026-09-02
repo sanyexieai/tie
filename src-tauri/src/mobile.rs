@@ -1,36 +1,34 @@
-use crate::common::{load_settings, StorageSource, Workspace, WorkspaceSnapshot};
-
-#[cfg(any(target_os = "android", target_os = "ios"))]
-use crate::common::app_data_dir;
+use crate::common::{app_data_dir, load_settings, StorageSource, WorkspaceSnapshot};
+use tie_storage::local::load_file_workspace;
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use std::fs;
 
 pub fn load_mobile_workspace(app: &tauri::AppHandle) -> Result<WorkspaceSnapshot, String> {
+    let data_dir = app_data_dir(app)?;
+    let mut snapshot = load_file_workspace(&data_dir, "tie-mobile")?;
     let settings = load_settings(app)?;
-    let sources = settings
-        .s3_providers
-        .iter()
-        .map(|provider| StorageSource {
-            id: format!("s3:{}", provider.id),
+    for provider in &settings.s3_providers {
+        let id = format!("s3:{}", provider.id);
+        if snapshot.workspace.sources.iter().any(|source| source.id == id) {
+            continue;
+        }
+        snapshot.workspace.sources.push(StorageSource {
+            id,
             name: provider.name.clone(),
             kind: "s3".to_owned(),
             path: provider.endpoint.clone(),
             available: true,
-        })
-        .collect();
-    Ok(WorkspaceSnapshot {
-        workspace: Workspace {
-            id: "tie-mobile".to_owned(),
-            name: if settings.name.trim().is_empty() {
-                "我的知识库".to_owned()
-            } else {
-                settings.name
-            },
-            sources,
-        },
-        pages: Vec::new(),
-    })
+        });
+    }
+    if snapshot.workspace.name.trim().is_empty() {
+        snapshot.workspace.name = if settings.name.trim().is_empty() {
+            "我的知识库".to_owned()
+        } else {
+            settings.name
+        };
+    }
+    Ok(snapshot)
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]

@@ -1,9 +1,39 @@
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageKind {
+    Local,
+    Smb,
+    S3,
+    Backend,
+}
+
+impl StorageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Smb => "smb",
+            Self::S3 => "s3",
+            Self::Backend => "backend",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "local" => Some(Self::Local),
+            "smb" => Some(Self::Smb),
+            "s3" => Some(Self::S3),
+            "backend" => Some(Self::Backend),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct Workspace {
+pub struct Workspace {
     pub id: String,
     pub name: String,
     pub sources: Vec<StorageSource>,
@@ -11,7 +41,7 @@ pub(crate) struct Workspace {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StorageSource {
+pub struct StorageSource {
     pub id: String,
     pub name: String,
     pub kind: String,
@@ -26,7 +56,7 @@ fn default_source_available() -> bool {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct Page {
+pub struct Page {
     pub id: String,
     pub title: String,
     #[serde(default)]
@@ -44,25 +74,26 @@ pub(crate) struct Page {
     pub storage_source_ids: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct WorkspaceSnapshot {
+pub struct WorkspaceSnapshot {
     pub workspace: Workspace,
     pub pages: Vec<Page>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct PageRevision {
+pub struct PageRevision {
     pub id: String,
     pub saved_at: String,
     pub title: String,
 }
 
-pub(crate) const MAX_PAGE_REVISIONS: usize = 80;
+pub const MAX_PAGE_REVISIONS: usize = 80;
 
-#[derive(Deserialize, Serialize)]
-pub(crate) struct WorkspaceSettings {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSettings {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -75,7 +106,7 @@ pub(crate) struct WorkspaceSettings {
     pub s3_providers: Vec<S3ProviderConfig>,
 }
 
-pub(crate) fn default_created_at() -> String {
+pub fn default_created_at() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs().to_string())
@@ -84,7 +115,7 @@ pub(crate) fn default_created_at() -> String {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct S3ProviderConfig {
+pub struct S3ProviderConfig {
     pub id: String,
     pub name: String,
     pub endpoint: String,

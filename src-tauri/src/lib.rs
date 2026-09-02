@@ -1,4 +1,5 @@
 mod common;
+mod local;
 mod mobile;
 mod s3;
 
@@ -68,12 +69,20 @@ pub fn run() {
             s3::list_s3_page_assets,
             s3::save_s3_page_asset,
             s3::read_s3_page_asset,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::load_workspace,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::save_page,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::add_storage_source,
+            local::commands::load_workspace,
+            local::commands::save_page,
+            local::commands::add_storage_source,
+            local::commands::remove_storage_source,
+            local::commands::rename_storage_source,
+            local::commands::rename_workspace,
+            local::commands::list_file_page_assets,
+            local::commands::save_file_page_asset,
+            local::commands::read_file_page_asset,
+            local::commands::list_page_revisions,
+            local::commands::read_page_revision,
+            local::commands::restore_page_revision,
+            local::commands::export_page_markdown,
+            local::commands::permanently_delete_pages,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             desktop::transfer_page_storage,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -83,12 +92,6 @@ pub fn run() {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             desktop::copy_page_sidecars,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::remove_storage_source,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::rename_storage_source,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::rename_workspace,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             desktop::copy_file_history_to_s3,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             desktop::copy_s3_history_to_file,
@@ -97,23 +100,7 @@ pub fn run() {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             desktop::copy_s3_assets_to_file,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::list_file_page_assets,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::save_file_page_asset,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::read_file_page_asset,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::list_page_revisions,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::read_page_revision,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::restore_page_revision,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::export_page_markdown,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             desktop::export_page_markdown_bundle,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            desktop::permanently_delete_pages,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             ai_cli::ai_cli_status,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
