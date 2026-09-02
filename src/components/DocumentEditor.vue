@@ -676,8 +676,8 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
     </div>
     <footer class="editor-statusbar">
       <button title="收起或展开左侧栏" @click="emit('toggle-sidebar')">▤ 侧栏</button>
-      <button title="切换专注模式（Ctrl/Cmd + Shift + Enter）" @click="emit('toggle-focus')">⛶ 专注</button>
-      <template v-if="!store.sourceMode"><button title="撤销（Ctrl/Cmd + Z）" @click="undo">↶ 撤销</button><button title="重做（Ctrl/Cmd + Shift + Z）" @click="redo">↷ 重做</button></template>
+      <button class="statusbar-mobile-hide" title="切换专注模式（Ctrl/Cmd + Shift + Enter）" @click="emit('toggle-focus')">⛶ 专注</button>
+      <template v-if="!store.sourceMode"><button class="statusbar-mobile-hide" title="撤销（Ctrl/Cmd + Z）" @click="undo">↶ 撤销</button><button class="statusbar-mobile-hide" title="重做（Ctrl/Cmd + Shift + Z）" @click="redo">↷ 重做</button></template>
       <button :class="{ active: store.sourceMode }" title="切换 Markdown 源码模式（Ctrl/Cmd + /）" @click="toggleSourceMode">&lt;/&gt; 源码</button>
       <span class="status-divider"></span>
       <button :class="{ active: store.spellcheckEnabled }" :title="store.spellcheckEnabled ? '关闭拼写检查' : '开启拼写检查'" @click="store.toggleSpellcheck">✓ 拼写检查</button>

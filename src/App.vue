@@ -17,7 +17,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 import { checkForAppUpdateOnStartup } from '@/services/app-updater'
-import { initPlatform } from '@/services/platform'
+import { initPlatform, isMobileClient } from '@/services/platform'
 
 const PANEL_WIDTHS_KEY = 'tie:panel-widths'
 const SIDEBAR_DEFAULT = 256
@@ -46,12 +46,17 @@ let contextDrawerQuery: MediaQueryList | null = null
 let resizeStartX = 0
 let resizeStartWidth = 0
 
-const shellStyle = computed(() => ({
-  '--sidebar-width': `${sidebarWidth.value}px`,
-  '--context-width': `${contextWidth.value}px`,
-}))
+const usesMobileShell = computed(() => isMobileLayout.value || isMobileClient.value)
 
-const showSidebarResize = computed(() => !focusMode.value && !sidebarCollapsed.value && !isMobileLayout.value)
+const shellStyle = computed(() => {
+  const mobileShell = usesMobileShell.value
+  return {
+    '--sidebar-width': mobileShell ? `${SIDEBAR_DEFAULT}px` : `${sidebarWidth.value}px`,
+    '--context-width': mobileShell ? `${CONTEXT_DEFAULT}px` : `${contextWidth.value}px`,
+  }
+})
+
+const showSidebarResize = computed(() => !focusMode.value && !sidebarCollapsed.value && !usesMobileShell.value)
 const showContextResize = computed(() => !focusMode.value && !contextCollapsed.value && !usesContextDrawer.value)
 
 function clamp(value: number, min: number, max: number) {
@@ -133,7 +138,7 @@ function toggleContextPanel() {
 
 function syncMobileLayout() {
   if (!mobileLayoutQuery) return
-  const mobile = mobileLayoutQuery.matches
+  const mobile = mobileLayoutQuery.matches || isMobileClient.value
   const wasMobile = isMobileLayout.value
   isMobileLayout.value = mobile
   if (mobile) sidebarCollapsed.value = true
@@ -141,8 +146,8 @@ function syncMobileLayout() {
 }
 
 function syncContextDrawer() {
-  if (!contextDrawerQuery) return
-  usesContextDrawer.value = contextDrawerQuery.matches
+  const drawer = (contextDrawerQuery?.matches ?? false) || isMobileClient.value
+  usesContextDrawer.value = drawer
   if (!usesContextDrawer.value) mobileContextOpen.value = false
 }
 function toggleFocusMode() {
@@ -180,6 +185,8 @@ onMounted(async () => {
   window.addEventListener('keydown', onShortcut)
   window.addEventListener('tie:toggle-focus-mode', toggleFocusMode)
   await initPlatform()
+  syncMobileLayout()
+  syncContextDrawer()
   await backend.initialize()
   await store.initialize()
   const update = await checkForAppUpdateOnStartup()
@@ -202,11 +209,13 @@ onBeforeUnmount(() => {
       'sidebar-collapsed': sidebarCollapsed,
       'context-collapsed': contextCollapsed,
       'focus-mode': focusMode,
+      'mobile-shell': usesMobileShell,
+      'mobile-client': isMobileClient,
     }"
     :style="shellStyle"
   >
     <button v-if="sidebarCollapsed && !focusMode" class="mobile-sidebar-toggle" aria-label="打开侧边栏" @click="toggleSidebar">☰</button>
-    <div v-if="isMobileLayout && !sidebarCollapsed && !focusMode" class="mobile-sidebar-scrim" @click="toggleSidebar"></div>
+    <div v-if="usesMobileShell && !sidebarCollapsed && !focusMode" class="mobile-sidebar-scrim" @click="toggleSidebar"></div>
     <AppSidebar v-if="!focusMode" @close="toggleSidebar" @open-storage-settings="storageSettingsOpen = true" />
     <div
       v-if="showSidebarResize"
