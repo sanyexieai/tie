@@ -261,10 +261,28 @@ CI=true npx tauri android init --ci
 
 生成目录：`src-tauri/gen/android/`（勿手改；升级 Tauri 或改包名时可重新 init）。
 
-**开发调试（需连接设备或模拟器）：**
+**开发调试（必须先有 adb 设备，无需 Android Studio）：**
 
 ```bash
+adb devices   # 应看到一行 xxx	device（不能是 unauthorized 或空列表）
 npm run tauri:android:dev
+```
+
+未连接手机/模拟器时，Tauri 会尝试执行 `Android Studio` 命令；若未安装 Studio 会报 `No such file or directory`。脚本会在启动前检查 `adb devices` 并提示。
+
+无模拟器时可安装命令行 emulator：
+
+```bash
+sdkmanager "emulator" "system-images;android-35;google_apis;arm64-v8a"
+avdmanager create avd -n tie -k "system-images;android-35;google_apis;arm64-v8a" -d pixel_6
+emulator -avd tie &
+```
+
+仅安装 APK 到已连接手机（不跑 dev server）：
+
+```bash
+npm run tauri:android:build
+adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
 ```
 
 **构建 APK：**
