@@ -15,16 +15,16 @@ class MainActivity : TauriActivity() {
       override fun handleOnBackPressed() {
         val view = webView
         if (view == null) {
-          isEnabled = false
-          onBackPressedDispatcher.onBackPressed()
+          // WebView 尚未就绪时不要 finish，避免左滑直接退出。
+          moveTaskToBack(true)
           return
         }
         view.evaluateJavascript(
           "(function(){try{return !!(window.__tieHandleAndroidBack&&window.__tieHandleAndroidBack());}catch(e){return false;}})()",
           { result ->
+            // true = 已在应用根界面，回到桌面（保留进程）；false = 前端已做后退。
             if (result == "true") {
-              isEnabled = false
-              onBackPressedDispatcher.onBackPressed()
+              moveTaskToBack(true)
             }
           },
         )

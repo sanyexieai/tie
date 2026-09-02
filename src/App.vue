@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppSidebar from '@/components/AppSidebar.vue'
 import ContextPanel from '@/components/ContextPanel.vue'
 import DocumentEditor from '@/components/DocumentEditor.vue'
@@ -19,7 +19,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 import { checkForAppUpdateOnStartup } from '@/services/app-updater'
-import { installMobileBackHandler, uninstallMobileBackHandler } from '@/services/mobile-back'
+import { installMobileBackHandler, resetMobileBackLeaveArm, uninstallMobileBackHandler } from '@/services/mobile-back'
 import { initPlatform, isMobileClient, usesMobileUi } from '@/services/platform'
 
 const PANEL_WIDTHS_KEY = 'tie:panel-widths'
@@ -71,6 +71,7 @@ const mobileOnHome = computed(() => (
   && !store.showingRecent
   && !store.showingFavorites
   && !store.showingSkills
+  && !store.showingSkillManager
 ))
 
 function clamp(value: number, min: number, max: number) {
@@ -174,32 +175,59 @@ function isMobileBackAtHome() {
     && !updateDialogOpen.value
     && !store.showingCommandPalette
     && !mobileContextOpen.value
+    && !focusMode.value
+}
+
+/** 分发可选层关闭；子组件可把 detail.handled 设为 true。 */
+function dispatchMobileOverlayBack() {
+  const detail = { handled: false }
+  window.dispatchEvent(new CustomEvent('tie:mobile-back', { detail }))
+  return detail.handled
 }
 
 function handleMobileBackNavigation() {
+  if (dispatchMobileOverlayBack()) return true
   if (storageSettingsOpen.value) {
     storageSettingsOpen.value = false
-    return
+    return true
   }
   if (backendDialogOpen.value) {
     backendDialogOpen.value = false
-    return
+    return true
   }
   if (updateDialogOpen.value) {
     updateDialogOpen.value = false
-    return
+    return true
   }
   if (store.showingCommandPalette) {
     store.closeCommandPalette()
-    return
+    return true
   }
   if (mobileContextOpen.value) {
     mobileContextOpen.value = false
-    return
+    return true
+  }
+  if (focusMode.value) {
+    focusMode.value = false
+    return true
   }
   if (!mobileOnHome.value) {
     goMobileHome()
+    return true
   }
+  return false
+}
+
+function ensureMobileBackHandler() {
+  if (!usesMobileShell.value) {
+    uninstallMobileBackHandler()
+    return
+  }
+  installMobileBackHandler({
+    onHome: () => isMobileBackAtHome(),
+    goBack: () => handleMobileBackNavigation(),
+    showLeaveHint: () => showMobileBackHint('再滑一次返回桌面'),
+  })
 }
 
 function syncMobileLayout() {
@@ -256,16 +284,28 @@ onMounted(async () => {
   await backend.initialize()
   await store.initialize()
   if (usesMobileShell.value) goMobileHome()
-  if (usesMobileShell.value) {
-    installMobileBackHandler({
-      onHome: () => isMobileBackAtHome(),
-      goBack: () => handleMobileBackNavigation(),
-      showExitHint: () => showMobileBackHint('再按一次退出应用'),
-    })
-  }
+  ensureMobileBackHandler()
   const update = await checkForAppUpdateOnStartup()
   if (update) updateDialogOpen.value = true
 })
+
+watch(usesMobileShell, () => ensureMobileBackHandler())
+watch(
+  [
+    mobileOnHome,
+    storageSettingsOpen,
+    backendDialogOpen,
+    updateDialogOpen,
+    () => store.showingCommandPalette,
+    mobileContextOpen,
+    focusMode,
+  ],
+  () => {
+    // 离开根界面或打开浮层后清掉「再滑一次」，避免之后单次滑动被当成退出。
+    if (!isMobileBackAtHome()) resetMobileBackLeaveArm()
+  },
+)
+
 onBeforeUnmount(() => {
   document.body.classList.remove('panel-resizing')
   mobileLayoutQuery?.removeEventListener('change', syncMobileLayout)

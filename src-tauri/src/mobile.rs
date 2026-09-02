@@ -1,26 +1,30 @@
-use crate::common::{app_data_dir, load_settings, StorageSource, WorkspaceSnapshot};
+use crate::common::{app_data_dir, load_settings, save_settings, WorkspaceSnapshot};
 use tie_storage::local::load_file_workspace;
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use std::fs;
 
+fn is_s3_source_entry(kind: &str, id: &str) -> bool {
+    kind == "s3" || id.starts_with("s3:")
+}
+
 pub fn load_mobile_workspace(app: &tauri::AppHandle) -> Result<WorkspaceSnapshot, String> {
     let data_dir = app_data_dir(app)?;
-    let mut snapshot = load_file_workspace(&data_dir, "tie-mobile")?;
-    let settings = load_settings(app)?;
-    for provider in &settings.s3_providers {
-        let id = format!("s3:{}", provider.id);
-        if snapshot.workspace.sources.iter().any(|source| source.id == id) {
-            continue;
-        }
-        snapshot.workspace.sources.push(StorageSource {
-            id,
-            name: provider.name.clone(),
-            kind: "s3".to_owned(),
-            path: provider.endpoint.clone(),
-            available: true,
-        });
+    let mut settings = load_settings(app)?;
+    // 历史版本曾把 S3 注入 workspace.sources，会与前端 providers 列表重复；顺带清掉落盘脏数据。
+    let before = settings.sources.len();
+    settings
+        .sources
+        .retain(|source| !is_s3_source_entry(&source.kind, &source.id));
+    if settings.sources.len() != before {
+        save_settings(app, &settings)?;
     }
+
+    let mut snapshot = load_file_workspace(&data_dir, "tie-mobile")?;
+    snapshot
+        .workspace
+        .sources
+        .retain(|source| !is_s3_source_entry(&source.kind, &source.id));
     if snapshot.workspace.name.trim().is_empty() {
         snapshot.workspace.name = if settings.name.trim().is_empty() {
             "我的知识库".to_owned()

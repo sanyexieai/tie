@@ -272,7 +272,9 @@ export const workspaceService = {
         collapsedPageIds: Array.isArray(parsed.collapsedPageIds) ? parsed.collapsedPageIds : [],
         spellcheckEnabled: typeof parsed.spellcheckEnabled === 'boolean' ? parsed.spellcheckEnabled : true,
         sourceMode: typeof parsed.sourceMode === 'boolean' ? parsed.sourceMode : false,
-        storageSourceOrder: Array.isArray(parsed.storageSourceOrder) ? parsed.storageSourceOrder.filter((id): id is string => typeof id === 'string') : [],
+      storageSourceOrder: Array.isArray(parsed.storageSourceOrder)
+          ? [...new Set(parsed.storageSourceOrder.filter((id): id is string => typeof id === 'string'))]
+          : [],
         skillsSectionCollapsed: typeof parsed.skillsSectionCollapsed === 'boolean' ? parsed.skillsSectionCollapsed : true,
       }
     } catch { return defaultPreferences() }

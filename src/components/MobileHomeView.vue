@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, provide, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, provide, ref } from 'vue'
 import AppIcon from '@/components/AppIcon.vue'
 import PageTreeItem from '@/components/PageTreeItem.vue'
 import { pageTreeDragKey } from '@/composables/pageTreeDrag'
@@ -21,6 +21,32 @@ const renameDraft = ref('')
 const bindPageId = ref<string | null>(null)
 const bindBusy = ref(false)
 const bindError = ref('')
+
+function onMobileBack(event: Event) {
+  const detail = (event as CustomEvent<{ handled?: boolean }>).detail
+  if (!detail || detail.handled) return
+  if (renamePageId.value) {
+    renamePageId.value = null
+    detail.handled = true
+    return
+  }
+  if (bindPageId.value) {
+    bindPageId.value = null
+    detail.handled = true
+    return
+  }
+  if (openSwipePageId.value) {
+    openSwipePageId.value = null
+    detail.handled = true
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('tie:mobile-back', onMobileBack)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('tie:mobile-back', onMobileBack)
+})
 
 const activePageCount = computed(() => store.pages.filter((page) => !page.deletedAt).length)
 const sourcesById = computed(() => Object.fromEntries(store.allSources.map((source) => [source.id, source])))

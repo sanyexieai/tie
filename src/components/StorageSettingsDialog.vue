@@ -709,11 +709,7 @@ function startSourceDrag(event: PointerEvent, sourceId: string) {
 }
 
 function canMoveSource(sourceId: string, direction: -1 | 1) {
-  const order = store.storageSourceOrder
-  const index = order.indexOf(sourceId)
-  if (index === -1) return false
-  const target = index + direction
-  return target >= 0 && target < order.length
+  return store.canMoveStorageSource(sourceId, direction)
 }
 
 function moveSource(sourceId: string, direction: -1 | 1) {

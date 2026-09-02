@@ -6,6 +6,7 @@ import { reconcileSaveAgainstRemote } from '@/services/save-reconcile'
 import { isLocalWinningConflict } from '@/services/storage/sync-merge'
 import { loadLocalS3Providers, refreshS3Providers, s3StorageSource, takeS3SourceIdRemap, buildS3SourceIdHealingRemap } from '@/services/s3'
 import { isCloudStorageSourceId } from '@/services/storage-identity'
+import { dedupeStorageSources, isWorkspaceFileSource, uniqueSourceIds } from '@/services/storage-sources'
 import { sourceStatusStore, syncQueue, storageRegistry } from '@/services/storage'
 import { transferPreservesHistory } from '@/services/transfer-policy'
 import { isMobileSupportedStorageKind, isMobileSupportedStorageSource, usesMobileUi } from '@/services/platform'
@@ -75,12 +76,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     })
     .filter((item): item is NonNullable<typeof item> => Boolean(item)))
 
-  const rawSources = computed(() => [
-    ...(workspace.value?.sources ?? []),
+  const rawSources = computed(() => dedupeStorageSources([
+    ...(workspace.value?.sources ?? []).filter(isWorkspaceFileSource),
     ...(backend.connected ? backend.workspaces.map((item) => backendWorkspaceSource(item, backend.profile.endpoint)) : []),
     ...(backend.connected ? backend.providers.filter((provider) => provider.kind === 's3').map((provider) => backendS3ProviderSource(provider, backend.providerAvailability[provider.id] !== false)) : []),
     ...(s3ProvidersVersion.value >= 0 ? loadLocalS3Providers().map(s3StorageSource) : []),
-  ])
+  ]))
 
   if (typeof window !== 'undefined') {
     window.addEventListener('tie:s3-providers-changed', () => { s3ProvidersVersion.value += 1 })
@@ -181,21 +182,45 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   function syncStorageSourceOrder(sources: StorageSource[] = rawSources.value) {
     const ids = new Set(sources.map((source) => source.id))
-    const next = storageSourceOrder.value.filter((id) => ids.has(id))
+    const next = uniqueSourceIds(storageSourceOrder.value.filter((id) => ids.has(id)))
     sources.forEach((source) => {
       if (!next.includes(source.id)) next.push(source.id)
     })
     storageSourceOrder.value = next
   }
 
-  function moveStorageSource(sourceId: string, direction: -1 | 1) {
+  /** 设置页可见的源顺序（移动端会过滤不支持的 kind）。 */
+  function visibleStorageSourceOrder() {
+    const byId = new Map(rawSources.value.map((source) => [source.id, source]))
+    return storageSourceOrder.value.filter((id) => {
+      const source = byId.get(id)
+      if (!source) return false
+      if (usesMobileUi.value && !isMobileSupportedStorageSource(source)) return false
+      return true
+    })
+  }
+
+  function canMoveStorageSource(sourceId: string, direction: -1 | 1) {
     syncStorageSourceOrder()
-    const index = storageSourceOrder.value.indexOf(sourceId)
+    const order = visibleStorageSourceOrder()
+    const index = order.indexOf(sourceId)
     if (index === -1) return false
     const target = index + direction
-    if (target < 0 || target >= storageSourceOrder.value.length) return false
+    return target >= 0 && target < order.length
+  }
+
+  function moveStorageSource(sourceId: string, direction: -1 | 1) {
+    syncStorageSourceOrder()
+    const visible = visibleStorageSourceOrder()
+    const index = visible.indexOf(sourceId)
+    if (index === -1) return false
+    const swapWith = visible[index + direction]
+    if (!swapWith) return false
     const next = [...storageSourceOrder.value]
-    ;[next[index], next[target]] = [next[target], next[index]]
+    const from = next.indexOf(sourceId)
+    const to = next.indexOf(swapWith)
+    if (from === -1 || to === -1) return false
+    ;[next[from], next[to]] = [next[to], next[from]]
     storageSourceOrder.value = next
     persistPreferences()
     return true
@@ -211,7 +236,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     order.splice(from, 1)
     const insertAt = order.indexOf(targetId)
     order.splice(position === 'after' ? insertAt + 1 : insertAt, 0, sourceId)
-    storageSourceOrder.value = order
+    storageSourceOrder.value = uniqueSourceIds(order)
     persistPreferences()
     return true
   }
@@ -1406,5 +1431,5 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, canBindPageTo, bindPageToSource, unbindPageFromSource, setPagePrimarySource, pushPageToMirrors, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, canBindPageTo, bindPageToSource, unbindPageFromSource, setPagePrimarySource, pushPageToMirrors, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })

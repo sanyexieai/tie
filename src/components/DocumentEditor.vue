@@ -729,6 +729,30 @@ function onWorkspaceCommand(event: Event) {
   else if (event.type === 'tie:refresh-page') void refreshCurrentPage()
 }
 
+function onMobileBack(event: Event) {
+  const detail = (event as CustomEvent<{ handled?: boolean }>).detail
+  if (!detail || detail.handled) return
+  if (conflictRemotePage.value) {
+    conflictRemotePage.value = null
+    detail.handled = true
+    return
+  }
+  if (showingHistory.value) {
+    showingHistory.value = false
+    detail.handled = true
+    return
+  }
+  if (showingFind.value) {
+    showingFind.value = false
+    detail.handled = true
+    return
+  }
+  if (sourceMenuOpen.value) {
+    sourceMenuOpen.value = false
+    detail.handled = true
+  }
+}
+
 function saveWhenHidden() {
   if (document.visibilityState === 'hidden' && hasUnsavedChanges.value) void saveNow()
 }
@@ -741,6 +765,7 @@ onMounted(() => {
   window.addEventListener('tie:toggle-source-mode', onWorkspaceCommand)
   window.addEventListener('tie:open-page-history', onWorkspaceCommand)
   window.addEventListener('tie:refresh-page', onWorkspaceCommand)
+  window.addEventListener('tie:mobile-back', onMobileBack)
 })
 onBeforeUnmount(() => {
   if (hasUnsavedChanges.value) void saveNow()
@@ -751,6 +776,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('tie:toggle-source-mode', onWorkspaceCommand)
   window.removeEventListener('tie:open-page-history', onWorkspaceCommand)
   window.removeEventListener('tie:refresh-page', onWorkspaceCommand)
+  window.removeEventListener('tie:mobile-back', onMobileBack)
   if (manualSaveTimer) window.clearTimeout(manualSaveTimer)
   if (copiedLinkTimer) window.clearTimeout(copiedLinkTimer)
   if (exportedTimer) window.clearTimeout(exportedTimer)
