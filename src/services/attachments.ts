@@ -7,7 +7,7 @@ import {
   parseBackendProviderId,
   parseBackendWorkspaceId,
 } from '@/services/backend'
-import { isS3SourceId, s3ConnectionForSource } from '@/services/s3'
+import { isS3SourceId, loadLocalS3Providers, s3ConnectionForSource, s3SourceId } from '@/services/s3'
 import { pageCloudSourceIds, pageSourceIds } from '@/services/page-sources'
 import { isFileSourceId } from '@/services/storage/types'
 
@@ -121,12 +121,18 @@ function mimeFromAssetName(assetName: string) {
   return 'application/octet-stream'
 }
 
+function toUint8Array(bytes: unknown): Uint8Array {
+  if (bytes instanceof Uint8Array) return new Uint8Array(bytes)
+  if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes)
+  if (ArrayBuffer.isView(bytes)) {
+    return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  }
+  if (Array.isArray(bytes)) return new Uint8Array(bytes)
+  throw new Error('附件数据格式无效')
+}
+
 function bytesToObjectUrl(bytes: ArrayBuffer | Uint8Array | number[], mime: string) {
-  const copy = bytes instanceof ArrayBuffer
-    ? new Uint8Array(bytes)
-    : bytes instanceof Uint8Array
-      ? new Uint8Array(bytes)
-      : new Uint8Array(bytes)
+  const copy = toUint8Array(bytes)
   return URL.createObjectURL(new Blob([copy], { type: mime }))
 }
 
@@ -181,25 +187,31 @@ async function readPageAssetFromSource(page: Page, sourceId: string, assetName: 
     )
   }
   if (isS3SourceId(sourceId)) {
-    const bytes = await invoke<number[]>('read_s3_page_asset', {
+    const bytes = await invoke<unknown>('read_s3_page_asset', {
       connection: s3ConnectionForSource(sourceId),
       page: scoped,
       assetName,
     })
-    return new Uint8Array(bytes).buffer
+    return toUint8Array(bytes).buffer
   }
   if (isFileSourceId(sourceId)) {
-    const bytes = await invoke<number[]>('read_file_page_asset', { page: scoped, assetName })
-    return new Uint8Array(bytes).buffer
+    const bytes = await invoke<unknown>('read_file_page_asset', { page: scoped, assetName })
+    return toUint8Array(bytes).buffer
   }
   throw new Error('该存储源不支持附件')
 }
 
 async function readPageAsset(page: Page, assetName: string) {
-  const sourceIds = pageSourceIds(page)
+  const tried = new Set<string>()
+  // 页面绑定源优先；再兜底本机已配置的全部 S3（跨端旧 id / 仅指纹源时也能读到）。
+  const candidates = [
+    ...pageSourceIds(page),
+    ...loadLocalS3Providers().map((provider) => s3SourceId(provider.id)),
+  ]
   let lastError: unknown = null
-  for (const sourceId of sourceIds) {
-    if (!canStoreAssetsOnSource(sourceId)) continue
+  for (const sourceId of candidates) {
+    if (tried.has(sourceId) || !canStoreAssetsOnSource(sourceId)) continue
+    tried.add(sourceId)
     try {
       return await readPageAssetFromSource(page, sourceId, assetName)
     } catch (error) {
@@ -515,10 +527,21 @@ export function inlineImageSrcFromHtml(html: string) {
   return src
 }
 
-export async function resolveAssetDisplayUrl(pages: Page[], src: string) {
+export async function resolveAssetDisplayUrl(
+  pages: Page[],
+  src: string,
+  options?: { fallbackPage?: Page | null },
+) {
   const parsed = parseAssetUrl(src)
   if (!parsed) return src
   const page = pages.find((item) => item.id === parsed.pageId)
+    ?? (options?.fallbackPage && options.fallbackPage.id === parsed.pageId ? options.fallbackPage : null)
+    ?? (options?.fallbackPage
+      ? {
+          ...options.fallbackPage,
+          id: parsed.pageId,
+        }
+      : null)
   if (!page) return src
   try {
     const bytes = await readPageAsset(page, parsed.assetName)

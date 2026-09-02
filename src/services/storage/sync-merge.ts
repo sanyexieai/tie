@@ -1,5 +1,5 @@
 import type { Page } from '@/types'
-import { pageBoundToSource } from '@/services/page-sources'
+import { pageBoundToSource, pageContentEqual } from '@/services/page-sources'
 import type { SyncConflict, SyncResult } from '@/services/storage/types'
 
 export function emptySyncResult(sourceId: string, error?: string): SyncResult {
@@ -43,12 +43,17 @@ export function mergeSyncPages(
       merged.push(remote)
       return
     }
-    if (local.updatedAt === remote.updatedAt && local.markdown === remote.markdown) {
+    // 正文实质相同（含忽略末尾空行）时绝不报冲突，只收敛到较新时间戳。
+    if (pageContentEqual(local, remote)) {
       unchanged += 1
-      merged.push(local)
+      merged.push(local.updatedAt >= remote.updatedAt ? local : {
+        ...remote,
+        storageSourceId: local.storageSourceId || remote.storageSourceId,
+        storageSourceIds: local.storageSourceIds?.length ? local.storageSourceIds : remote.storageSourceIds,
+      })
       return
     }
-    if (local.updatedAt > remote.updatedAt && local.markdown !== remote.markdown) {
+    if (local.updatedAt > remote.updatedAt) {
       conflicts.push({
         pageId,
         localUpdatedAt: local.updatedAt,
@@ -57,17 +62,22 @@ export function mergeSyncPages(
       merged.push(local)
       return
     }
-    if (local.updatedAt < remote.updatedAt && local.markdown !== remote.markdown) {
+    if (local.updatedAt < remote.updatedAt) {
       conflicts.push({
         pageId,
         localUpdatedAt: local.updatedAt,
         remoteUpdatedAt: remote.updatedAt,
       })
-      // 远程更新：采纳远程以便多客户端收敛；冲突标记留给编辑器脏草稿处理。
       updated.push(pageId)
       merged.push(remote)
       return
     }
+    // 时间戳相同但正文不同：以远程为准并标冲突，便于编辑器提示。
+    conflicts.push({
+      pageId,
+      localUpdatedAt: local.updatedAt,
+      remoteUpdatedAt: remote.updatedAt,
+    })
     updated.push(pageId)
     merged.push(remote)
   })

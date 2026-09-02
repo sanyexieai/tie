@@ -98,7 +98,9 @@ function createAssetImageExtension() {
         broken.className = 'tie-image-broken'
         broken.hidden = true
         let displayObjectUrl: string | null = null
-        let currentSrc = String(currentNode.attrs.src ?? '')
+        let currentSrc = ''
+        let appliedSrc = ''
+        let loadToken = 0
         let demoting = false
 
         const setBroken = (assetSrc: string, message: string) => {
@@ -141,37 +143,61 @@ function createAssetImageExtension() {
 
         const applySrc = (nextSrc: string) => {
           currentSrc = nextSrc
+          // 同一 src 已显示或正在加载时不要重置成「加载中」（NodeView update 很频繁）。
+          if (nextSrc && nextSrc === appliedSrc) return
+          appliedSrc = nextSrc
+          const token = ++loadToken
           if (displayObjectUrl) {
             URL.revokeObjectURL(displayObjectUrl)
             displayObjectUrl = null
           }
           if (parseAssetUrl(nextSrc)) {
             img.dataset.tieAsset = nextSrc
-            // Never assign tie:// to <img src> — browsers can't load it and it
-            // looks like frozen "text" you cannot click into (atom node).
             img.removeAttribute('src')
             img.hidden = true
             broken.hidden = false
             broken.textContent = '图片加载中…'
-            wrap.classList.remove('is-broken')
-            void resolveAssetDisplayUrl(props.pages, nextSrc).then((url) => {
-              if (img.dataset.tieAsset !== nextSrc) return
-              if (!url.startsWith('blob:')) {
+            // 加载中也允许点击降级成可编辑文本，避免一直卡住。
+            wrap.classList.add('is-broken')
+            void resolveAssetDisplayUrl(props.pages, nextSrc, { fallbackPage: activePage() })
+              .then((url) => {
+                if (token !== loadToken || img.dataset.tieAsset !== nextSrc) return
+                if (!url.startsWith('blob:')) {
+                  const name = parseAssetUrl(nextSrc)?.assetName ?? nextSrc
+                  setBroken(nextSrc, `缺少图片 ${name}`)
+                  return
+                }
+                displayObjectUrl = url
+                img.onload = () => {
+                  if (token !== loadToken) return
+                  setLoaded()
+                }
+                img.onerror = () => {
+                  if (token !== loadToken) return
+                  setBroken(nextSrc, `无法显示 ${parseAssetUrl(nextSrc)?.assetName ?? '图片'}`)
+                }
+                img.src = url
+                img.hidden = false
+              })
+              .catch(() => {
+                if (token !== loadToken) return
                 const name = parseAssetUrl(nextSrc)?.assetName ?? nextSrc
                 setBroken(nextSrc, `缺少图片 ${name}`)
-                return
-              }
-              displayObjectUrl = url
-              img.src = url
-              setLoaded()
-            })
+              })
             return
           }
           delete img.dataset.tieAsset
-          setLoaded()
-          img.onload = () => setLoaded()
-          img.onerror = () => setBroken(nextSrc, nextSrc || '图片无法显示')
+          img.onload = () => {
+            if (token !== loadToken) return
+            setLoaded()
+          }
+          img.onerror = () => {
+            if (token !== loadToken) return
+            setBroken(nextSrc, nextSrc || '图片无法显示')
+          }
           img.src = nextSrc
+          img.hidden = false
+          broken.hidden = true
         }
 
         wrap.addEventListener('mousedown', (event) => {
@@ -182,7 +208,7 @@ function createAssetImageExtension() {
           demoteToEditableText()
         })
 
-        applySrc(currentSrc)
+        applySrc(String(currentNode.attrs.src ?? ''))
         wrap.appendChild(img)
         wrap.appendChild(broken)
         return {
@@ -196,7 +222,6 @@ function createAssetImageExtension() {
             applySrc(String(updated.attrs.src ?? ''))
             return true
           },
-          // Display uses a temporary blob URL; never let that mutate node attrs.
           ignoreMutation: (mutation) => {
             if (mutation.type === 'attributes' && mutation.attributeName === 'src') return true
             return mutation.target === img
@@ -205,6 +230,7 @@ function createAssetImageExtension() {
               || broken.contains(mutation.target as Node)
           },
           destroy: () => {
+            loadToken += 1
             if (displayObjectUrl) URL.revokeObjectURL(displayObjectUrl)
           },
         }
@@ -325,11 +351,58 @@ function stripAssetAutolinks(currentEditor: Editor) {
     if (!node.isText) return
     const mark = node.marks.find((item) => item.type === linkType)
     const href = String(mark?.attrs.href ?? '')
-    if (!mark || !href.startsWith('tie://') || href.startsWith('tie://page/')) return
+    const text = node.text ?? ''
+    const isAssetLink = href.startsWith('tie://asset/')
+      || href.startsWith('tie://') && !href.startsWith('tie://page/')
+      || text.includes('tie://asset/')
+    if (!mark || !isAssetLink) return
     tr.removeMark(pos, pos + node.nodeSize, linkType)
     changed = true
   })
   if (changed) currentEditor.view.dispatch(tr)
+}
+
+/**
+ * 若 markdown 解析失败把 `![](tie://asset/...)` 留成纯文本，这里补成 image 节点。
+ * 同时拆掉 asset URL 上的 link mark，避免光标点不进。
+ */
+function hydrateAssetMarkdownImages(currentEditor: Editor) {
+  const imageType = currentEditor.schema.nodes.image
+  if (!imageType) return
+  const pattern = /!\[([^\]]*)\]\((tie:\/\/asset\/[^)\s]+)(?:\s+"([^"]*)")?\)/g
+  type Replacement = { from: number; to: number; alt: string; src: string; title: string | null }
+  const replacements: Replacement[] = []
+
+  currentEditor.state.doc.descendants((node, pos) => {
+    if (!node.isText || !node.text?.includes('tie://asset/')) return
+    pattern.lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(node.text)) !== null) {
+      const [raw, alt = '', src, title = null] = match
+      if (!parseAssetUrl(src)) continue
+      replacements.push({
+        from: pos + match.index,
+        to: pos + match.index + raw.length,
+        alt,
+        src,
+        title,
+      })
+    }
+  })
+
+  stripAssetAutolinks(currentEditor)
+  if (!replacements.length) return
+
+  let tr = currentEditor.state.tr
+  for (const item of [...replacements].sort((a, b) => b.from - a.from)) {
+    const imageNode = imageType.create({
+      src: item.src,
+      alt: item.alt,
+      title: item.title,
+    })
+    tr = tr.replaceWith(item.from, item.to, imageNode)
+  }
+  if (tr.docChanged) currentEditor.view.dispatch(tr)
 }
 
 let rewritingInlineImages = false
@@ -502,6 +575,18 @@ const editor = useEditor({
     attributes: { class: 'tiptap-content', spellcheck: String(props.spellcheck) },
     transformPastedHTML: (html) => stripInlineImageHtml(html),
     transformPastedText: (text) => text.replace(/!\[[^\]]*\]\((blob:[^)\s]+|data:image\/[^)\s]+)\)/g, ''),
+    handlePaste: (_view, event) => {
+      const text = event.clipboardData?.getData('text/plain') ?? ''
+      if (!/!\[[^\]]*\]\(tie:\/\/asset\//.test(text)) return false
+      queueMicrotask(() => {
+        const current = editor.value
+        if (!current) return
+        syncingExternalValue = true
+        hydrateAssetMarkdownImages(current)
+        syncingExternalValue = false
+      })
+      return false
+    },
     handleDOMEvents: {
       // Child cards: navigate on mousedown so contenteditable selection doesn't swallow the click.
       mousedown: (_view, event) => {
@@ -576,7 +661,7 @@ const editor = useEditor({
   onCreate: ({ editor: currentEditor }) => {
     // 初始化清理不要当成用户编辑，避免一打开页面就触发自动保存刷 updatedAt。
     syncingExternalValue = true
-    stripAssetAutolinks(currentEditor)
+    hydrateAssetMarkdownImages(currentEditor)
     syncingExternalValue = false
     scheduleDecorateChildPageLinks()
   },
@@ -594,7 +679,7 @@ watch(() => props.modelValue, (markdown) => {
   const selection = editor.value.state.selection
   syncingExternalValue = true
   editor.value.commands.setContent(markdown, { contentType: 'markdown', emitUpdate: false })
-  stripAssetAutolinks(editor.value)
+  hydrateAssetMarkdownImages(editor.value)
   const maxPos = editor.value.state.doc.content.size
   const from = Math.min(selection.from, maxPos)
   const to = Math.min(selection.to, maxPos)

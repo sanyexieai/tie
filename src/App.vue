@@ -48,7 +48,6 @@ let mobileLayoutQuery: MediaQueryList | null = null
 let contextDrawerQuery: MediaQueryList | null = null
 let resizeStartX = 0
 let resizeStartWidth = 0
-let visibilitySyncTimer: ReturnType<typeof setTimeout> | null = null
 
 const usesMobileShell = computed(() => isMobileLayout.value || isMobileClient.value || usesMobileUi.value)
 
@@ -203,15 +202,6 @@ function handleMobileBackNavigation() {
   }
 }
 
-function onVisibilityChange() {
-  if (document.visibilityState !== 'visible' || !store.initialized || store.reloading) return
-  if (visibilitySyncTimer) clearTimeout(visibilitySyncTimer)
-  visibilitySyncTimer = setTimeout(() => {
-    void store.syncRemoteSources()
-    visibilitySyncTimer = null
-  }, 500)
-}
-
 function syncMobileLayout() {
   if (!mobileLayoutQuery) return
   const mobile = mobileLayoutQuery.matches || isMobileClient.value || usesMobileUi.value
@@ -260,7 +250,6 @@ onMounted(async () => {
   contextDrawerQuery.addEventListener('change', syncContextDrawer)
   window.addEventListener('keydown', onShortcut)
   window.addEventListener('tie:toggle-focus-mode', toggleFocusMode)
-  document.addEventListener('visibilitychange', onVisibilityChange)
   await initPlatform()
   syncMobileLayout()
   syncContextDrawer()
@@ -283,8 +272,6 @@ onBeforeUnmount(() => {
   contextDrawerQuery?.removeEventListener('change', syncContextDrawer)
   window.removeEventListener('keydown', onShortcut)
   window.removeEventListener('tie:toggle-focus-mode', toggleFocusMode)
-  document.removeEventListener('visibilitychange', onVisibilityChange)
-  if (visibilitySyncTimer) clearTimeout(visibilitySyncTimer)
   uninstallMobileBackHandler()
   if (mobileBackHintTimer) clearTimeout(mobileBackHintTimer)
 })

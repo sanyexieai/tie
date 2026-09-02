@@ -66,6 +66,15 @@ describe('mergeSyncPages', () => {
     expect(result.conflicts).toHaveLength(0)
   })
 
+  it('ignores trailing blank-line-only differences', () => {
+    const local = [page('a', sourceId, '2026-01-03T00:00:00.000Z', '# same\n')]
+    const remote = [page('a', sourceId, '2026-01-02T00:00:00.000Z', '# same\n\n')]
+    const result = mergeSyncPages(sourceId, local, remote, new Set(['a']))
+    expect(result.unchanged).toBe(1)
+    expect(result.conflicts).toHaveLength(0)
+    expect(result.pages[0]?.markdown).toBe('# same\n')
+  })
+
   it('identifies local-winning conflicts', () => {
     expect(isLocalWinningConflict({
       pageId: 'a',

@@ -1274,10 +1274,43 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function openPage(pageId: PageId) {
+    const switching = activePageId.value !== pageId
     activePageId.value = pageId
     expandPageAncestors(pageId)
     markRecentlyOpened(pageId)
     clearSpecialViews()
+    // 仅在切入该页时拉一次最新版；不做窗口聚焦全量同步。
+    if (switching) void refreshPageOnOpen(pageId)
+  }
+
+  /** 打开页面时安静刷新：正文实质相同则只消假冲突，有更新才写入内存。 */
+  async function refreshPageOnOpen(pageId: PageId) {
+    if (reloading.value || saving.value) return
+    const current = pages.value.find((item) => item.id === pageId && !item.deletedAt)
+    if (!current || !isCloudStorageSourceId(current.storageSourceId)) return
+    try {
+      const latest = await workspaceService.readLatestPage(current).catch(() => null)
+      if (!latest) return
+      if (pageContentEqual(latest, current)) {
+        clearSyncConflict(pageId)
+        if (latest.updatedAt !== current.updatedAt) {
+          pages.value = pages.value.map((page) => (
+            page.id === pageId ? { ...page, updatedAt: latest.updatedAt } : page
+          ))
+        }
+        return
+      }
+      pages.value = pages.value.map((page) => (page.id === pageId
+        ? prunePageSources({
+          ...latest,
+          storageSourceId: current.storageSourceId || latest.storageSourceId,
+          storageSourceIds: mergePageSourceIds(current, latest, { knownSourceIds: knownStorageSourceIds() }),
+        }, knownStorageSourceIds())
+        : page))
+      if (latest.updatedAt >= current.updatedAt) clearSyncConflict(pageId)
+    } catch (error) {
+      console.warn('打开页面时刷新失败', error)
+    }
   }
   function openCommandPalette() { commandQuery.value = ''; showingCommandPalette.value = true }
   function closeCommandPalette() { showingCommandPalette.value = false }

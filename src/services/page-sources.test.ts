@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Page } from '@/types'
-import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageCloudSourceIds, pageForStorageWrite, pageMirrorSourceIds, pageSourceIds, pageSourceRoleLabel, prunePageSources, remapPageSourceIds, resolveCollaborationPrimary, sourceShortLabel, withPageSources } from '@/services/page-sources'
+import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageCloudSourceIds, pageContentEqual, pageForStorageWrite, pageMirrorSourceIds, pageSourceIds, pageSourceRoleLabel, prunePageSources, remapPageSourceIds, resolveCollaborationPrimary, sourceShortLabel, withPageSources } from '@/services/page-sources'
 
 function page(partial: Partial<Page> & Pick<Page, 'id' | 'storageSourceId'>): Page {
   return {
@@ -141,5 +141,12 @@ describe('page-sources', () => {
     expect(sourceShortLabel('工作区 A')).toBe('工')
     expect(sourceShortLabel('Notes')).toBe('N')
     expect(sourceShortLabel('  ')).toBe('?')
+  })
+
+  it('pageContentEqual ignores trailing blank lines', () => {
+    const a = page({ id: 'a', storageSourceId: 's1', markdown: '# hi\n' })
+    const b = page({ id: 'a', storageSourceId: 's1', markdown: '# hi\n\n\n' })
+    expect(pageContentEqual(a, b)).toBe(true)
+    expect(pageContentEqual(a, page({ id: 'a', storageSourceId: 's1', markdown: '# bye\n' }))).toBe(false)
   })
 })

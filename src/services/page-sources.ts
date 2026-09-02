@@ -132,13 +132,19 @@ export function pageBoundToSource(page: Pick<Page, 'storageSourceId' | 'storageS
   return pageSourceIds(page).includes(sourceId)
 }
 
+/** 比较用正文归一化：吃掉文末多余空行，避免 TipTap/存储差一行空白就报冲突。 */
+export function normalizePageMarkdown(markdown: string) {
+  const trimmed = markdown.replace(/[ \t]+$/gm, '').replace(/\s+$/u, '')
+  return trimmed ? `${trimmed}\n` : '\n'
+}
+
 /** 比较页面正文是否一致（不含 updatedAt / 元数据漂移）。 */
 export function pageContentEqual(
   a: Pick<Page, 'title' | 'markdown' | 'tags'>,
   b: Pick<Page, 'title' | 'markdown' | 'tags'>,
 ) {
   return a.title === b.title
-    && a.markdown === b.markdown
+    && normalizePageMarkdown(a.markdown) === normalizePageMarkdown(b.markdown)
     && a.tags.length === b.tags.length
     && a.tags.every((tag, index) => tag === b.tags[index])
 }
