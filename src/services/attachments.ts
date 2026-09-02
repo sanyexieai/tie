@@ -61,7 +61,7 @@ export async function preparePageExportBundle(page: Page): Promise<PageExportBun
   const assets: Record<string, Uint8Array> = {}
   for (const assetName of assetNames) {
     try {
-      assets[assetName] = new Uint8Array(await readPageAsset(page, assetName))
+      assets[assetName] = await readPageAsset(page, assetName)
     } catch {
       // 跳过无法读取的附件，导出 Markdown 仍会重写为相对路径
     }
@@ -121,19 +121,19 @@ function mimeFromAssetName(assetName: string) {
   return 'application/octet-stream'
 }
 
-function toUint8Array(bytes: unknown): Uint8Array {
-  if (bytes instanceof Uint8Array) return new Uint8Array(bytes)
-  if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes)
+/** 归一化为独立副本，返回类型钉死 ArrayBuffer，避免 TS 5.9 的 ArrayBufferLike/BlobPart 冲突。 */
+function toUint8Array(bytes: unknown): Uint8Array<ArrayBuffer> {
+  if (bytes instanceof Uint8Array) return Uint8Array.from(bytes)
+  if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes.slice(0))
   if (ArrayBuffer.isView(bytes)) {
-    return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    return Uint8Array.from(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength))
   }
-  if (Array.isArray(bytes)) return new Uint8Array(bytes)
+  if (Array.isArray(bytes)) return Uint8Array.from(bytes)
   throw new Error('附件数据格式无效')
 }
 
-function bytesToObjectUrl(bytes: ArrayBuffer | Uint8Array | number[], mime: string) {
-  const copy = toUint8Array(bytes)
-  return URL.createObjectURL(new Blob([copy], { type: mime }))
+function bytesToObjectUrl(bytes: unknown, mime: string) {
+  return URL.createObjectURL(new Blob([toUint8Array(bytes)], { type: mime }))
 }
 
 async function isTauri() {
@@ -164,27 +164,27 @@ export function assetWriteSourceIds(page: Pick<Page, 'storageSourceId' | 'storag
   return pageSourceIds(page).filter((id) => canStoreAssetsOnSource(id))
 }
 
-async function readPageAssetFromSource(page: Page, sourceId: string, assetName: string) {
+async function readPageAssetFromSource(page: Page, sourceId: string, assetName: string): Promise<Uint8Array> {
   const scoped = { ...page, storageSourceId: sourceId }
   if (isBackendSourceId(sourceId)) {
     const profile = backendService.loadProfile()
     if (!profile.accessToken) throw new Error('请先连接自定义后台')
-    return backendService.readWorkspacePageAsset(
+    return toUint8Array(await backendService.readWorkspacePageAsset(
       profile,
       parseBackendWorkspaceId(sourceId),
       page.id,
       assetName,
-    )
+    ))
   }
   if (isBackendManagedS3SourceId(sourceId)) {
     const profile = backendService.loadProfile()
     if (!profile.accessToken) throw new Error('请先连接自定义后台')
-    return backendService.readProviderPageAsset(
+    return toUint8Array(await backendService.readProviderPageAsset(
       profile,
       parseBackendProviderId(sourceId),
       page.id,
       assetName,
-    )
+    ))
   }
   if (isS3SourceId(sourceId)) {
     const bytes = await invoke<unknown>('read_s3_page_asset', {
@@ -192,16 +192,16 @@ async function readPageAssetFromSource(page: Page, sourceId: string, assetName: 
       page: scoped,
       assetName,
     })
-    return toUint8Array(bytes).buffer
+    return toUint8Array(bytes)
   }
   if (isFileSourceId(sourceId)) {
     const bytes = await invoke<unknown>('read_file_page_asset', { page: scoped, assetName })
-    return toUint8Array(bytes).buffer
+    return toUint8Array(bytes)
   }
   throw new Error('该存储源不支持附件')
 }
 
-async function readPageAsset(page: Page, assetName: string) {
+async function readPageAsset(page: Page, assetName: string): Promise<Uint8Array> {
   const tried = new Set<string>()
   // 页面绑定源优先；再兜底本机已配置的全部 S3（跨端旧 id / 仅指纹源时也能读到）。
   const candidates = [
@@ -300,7 +300,7 @@ export async function ensurePageAssetsOnSource(page: Page, targetSourceId: strin
     } catch {
       // missing on target — try heal from other bindings
     }
-    let bytes: ArrayBuffer | null = null
+    let bytes: Uint8Array | null = null
     for (const sourceId of pageSourceIds(page)) {
       if (sourceId === targetSourceId || !canStoreAssetsOnSource(sourceId)) continue
       try {
@@ -311,7 +311,7 @@ export async function ensurePageAssetsOnSource(page: Page, targetSourceId: strin
       }
     }
     if (!bytes) continue
-    await writePageAssetToSource(page, targetSourceId, assetName, new Uint8Array(bytes))
+    await writePageAssetToSource(page, targetSourceId, assetName, bytes)
   }
 }
 
@@ -347,7 +347,7 @@ export async function copyPageAssets(page: Page, fromSourceId: string, toSourceI
   if (!canStoreAssetsOnSource(toSourceId)) throw new Error('目标存储源不支持附件')
   const assetNames = await listPageAssetNames(page, fromSourceId)
   for (const assetName of assetNames) {
-    const data = new Uint8Array(await readPageAssetFromSource(page, fromSourceId, assetName))
+    const data = await readPageAssetFromSource(page, fromSourceId, assetName)
     await writePageAssetToSource(page, toSourceId, assetName, data)
   }
 }
