@@ -229,7 +229,7 @@ Android 版**不包含**本地目录、SMB、Agent Skills、MCP 接入、应用�
 export JAVA_HOME="$HOME/.local/jdk"
 export ANDROID_HOME="$HOME/Android/Sdk"
 export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
-export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH"
 ```
 
 - Rust Android targets：
@@ -270,11 +270,19 @@ npm run tauri:android:dev
 
 未连接手机/模拟器时，Tauri 会尝试执行 `Android Studio` 命令；若未安装 Studio 会报 `No such file or directory`。脚本会在启动前检查 `adb devices` 并提示。
 
-无模拟器时可安装命令行 emulator：
+无模拟器时可安装命令行 emulator（**Linux x86_64 电脑请用 x86_64 镜像，比 arm 快**）：
 
 ```bash
-sdkmanager "emulator" "system-images;android-35;google_apis;arm64-v8a"
-avdmanager create avd -n tie -k "system-images;android-35;google_apis;arm64-v8a" -d pixel_6
+npm run android:emulator:setup   # 安装 emulator + 系统镜像并创建 AVD「tie」
+npm run android:emulator         # 启动模拟器并等待 adb
+npm run tauri:android:dev
+```
+
+或手动：
+
+```bash
+sdkmanager "emulator" "system-images;android-35;google_apis;x86_64"
+avdmanager create avd -n tie -k "system-images;android-35;google_apis;x86_64" -d pixel_6 --force
 emulator -avd tie &
 ```
 
