@@ -440,6 +440,39 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   border-color: var(--accent);
   background: var(--accent);
 }
+.app-update-config-row {
+  align-items: stretch;
+}
+.app-update-config-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.app-update-config-panel textarea {
+  width: 100%;
+  min-height: 96px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--bg-elevated);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical;
+}
+.app-update-config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.app-update-config-actions button {
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  font-size: 11px;
+}
 .app-update-dialog .app-update-notes {
   margin: 0;
   color: var(--text-secondary);

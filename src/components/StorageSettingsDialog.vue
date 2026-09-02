@@ -35,12 +35,20 @@ import type { S3ConnectionInput } from '@/services/storage/types'
 import { loadThemeMode, resolveTheme, setThemeMode, type ThemeMode } from '@/services/theme'
 import {
   appUpdateState,
+  appUpdateModeHint,
   appUpdaterUnavailableReason,
   canUseAppUpdater,
   checkForAppUpdate,
   downloadAndInstallAppUpdate,
+  downloadAppUpdateToLocal,
+  hasCustomUpdateEndpoints,
+  loadUpdateEndpoints,
+  openDownloadedAppUpdate,
+  resetUpdateEndpoints,
+  saveUpdateEndpoints,
 } from '@/services/app-updater'
-import { isTauriDesktop, isMobileSupportedStorageSource, supportsAgentSkills, supportsLocalFileStorage, supportsSmbStorage, tieRuntimeKind, tieRuntimeLabel, usesMobileUi } from '@/services/platform'
+import { parseUpdateEndpointInput } from '@/services/app-update-config'
+import { isTauriDesktop, isMobileClient, isMobileSupportedStorageSource, supportsAgentSkills, supportsLocalFileStorage, supportsSmbStorage, tieRuntimeKind, tieRuntimeLabel, usesMobileUi } from '@/services/platform'
 
 const emit = defineEmits<{ close: []; 'connect-backend': [] }>()
 const store = useWorkspaceStore()
@@ -103,21 +111,45 @@ const codexNotice = ref('')
 const agentClientOptions = AGENT_CLIENT_OPTIONS
 const appVersion = ref('—')
 const checkingAppUpdate = ref(false)
+const updateConfigVisible = ref(false)
+const updateEndpointDraft = ref(loadUpdateEndpoints().join('\n'))
+const updateConfigNotice = ref('')
+const updateTitleTapCount = ref(0)
+let updateTitleTapTimer: ReturnType<typeof setTimeout> | null = null
 
 const appUpdateSummary = computed(() => {
   const unavailableReason = appUpdaterUnavailableReason()
   if (unavailableReason) return unavailableReason
   if (appUpdateState.phase === 'available') {
-    return `发现新版本 ${appUpdateState.availableVersion}`
+    const mode = appUpdateState.installMode === 'auto' ? '可自动更新' : '可下载手动安装'
+    return `发现新版本 ${appUpdateState.availableVersion} · ${mode}`
   }
   if (appUpdateState.phase === 'uptodate') return '已是最新版本'
+  if (appUpdateState.phase === 'downloaded') {
+    return appUpdateState.downloadedPath
+      ? `安装包已下载：${appUpdateState.downloadedPath}`
+      : '安装包已下载，可手动安装'
+  }
   if (appUpdateState.phase === 'downloading' || appUpdateState.phase === 'installing') {
     return appUpdateState.progress == null
       ? '正在下载更新…'
       : `正在下载更新… ${appUpdateState.progress}%`
   }
   if (appUpdateState.phase === 'error') return appUpdateState.error ?? '检查更新失败'
-  return `当前版本 ${appVersion.value} · ${tieRuntimeLabel()}`
+  const customHint = hasCustomUpdateEndpoints() ? ' · 自定义更新源' : ''
+  return `当前版本 ${appVersion.value} · ${tieRuntimeLabel()} · ${appUpdateModeHint()}${customHint}`
+})
+
+const showManualDownloadActions = computed(() => (
+  appUpdateState.phase === 'available'
+  || appUpdateState.phase === 'error'
+  || appUpdateState.phase === 'downloaded'
+))
+
+const primaryUpdateLabel = computed(() => {
+  if (appUpdateState.phase === 'downloaded') return '打开安装包'
+  if (appUpdateState.installMode === 'auto') return '立即更新'
+  return isMobileClient.value ? '下载并安装' : '下载到本地'
 })
 
 const aiModeOptions: { value: AiTaggingMode; label: string }[] = [
@@ -520,6 +552,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener('click', closeAiModeMenu)
   finishSourceDrag()
+  if (updateTitleTapTimer) clearTimeout(updateTitleTapTimer)
 })
 
 async function syncSource(sourceId: string) {
@@ -715,7 +748,45 @@ async function checkAppUpdate() {
 }
 
 async function installAppUpdate() {
+  if (appUpdateState.phase === 'downloaded') {
+    await openDownloadedAppUpdate()
+    return
+  }
   await downloadAndInstallAppUpdate()
+}
+
+async function downloadAppUpdateOnly() {
+  await downloadAppUpdateToLocal()
+}
+
+function onUpdateTitleTap() {
+  updateTitleTapCount.value += 1
+  if (updateTitleTapTimer) clearTimeout(updateTitleTapTimer)
+  updateTitleTapTimer = setTimeout(() => {
+    updateTitleTapCount.value = 0
+  }, 2000)
+  if (updateTitleTapCount.value >= 8) {
+    updateTitleTapCount.value = 0
+    updateConfigVisible.value = true
+    updateEndpointDraft.value = loadUpdateEndpoints().join('\n')
+    updateConfigNotice.value = ''
+  }
+}
+
+function saveUpdateEndpointConfig() {
+  const endpoints = parseUpdateEndpointInput(updateEndpointDraft.value)
+  if (!endpoints.length) {
+    updateConfigNotice.value = '至少保留一个有效的 HTTPS/HTTP latest.json 地址'
+    return
+  }
+  saveUpdateEndpoints(endpoints)
+  updateConfigNotice.value = '更新源已保存，下次检查时将优先使用自定义地址'
+}
+
+function restoreDefaultUpdateEndpoints() {
+  resetUpdateEndpoints()
+  updateEndpointDraft.value = loadUpdateEndpoints().join('\n')
+  updateConfigNotice.value = '已恢复默认 GitHub 更新源'
 }
 </script>
 
@@ -748,7 +819,7 @@ async function installAppUpdate() {
       </div>
 
       <div class="theme-mode-row app-update-row">
-        <span>
+        <span @click="onUpdateTitleTap">
           <strong>应用更新</strong>
           <small>{{ appUpdateSummary }}</small>
         </span>
@@ -761,13 +832,40 @@ async function installAppUpdate() {
             {{ checkingAppUpdate ? '检查中…' : '检查更新' }}
           </button>
           <button
-            v-if="appUpdateState.phase === 'available'"
+            v-if="appUpdateState.phase === 'available' || appUpdateState.phase === 'downloaded'"
             type="button"
             class="primary"
             @click="installAppUpdate"
           >
-            立即更新
+            {{ primaryUpdateLabel }}
           </button>
+          <button
+            v-if="showManualDownloadActions && appUpdateState.phase !== 'downloaded'"
+            type="button"
+            :disabled="appUpdateState.phase === 'downloading' || appUpdateState.phase === 'installing'"
+            @click="downloadAppUpdateOnly"
+          >
+            仅下载
+          </button>
+        </div>
+      </div>
+
+      <div v-if="updateConfigVisible" class="theme-mode-row app-update-config-row">
+        <div class="app-update-config-panel">
+          <strong>更新服务地址</strong>
+          <small>每行一个 latest.json 地址，按顺序尝试；支持 MinIO / 自建 HTTPS 静态站</small>
+          <textarea
+            v-model="updateEndpointDraft"
+            rows="4"
+            spellcheck="false"
+            placeholder="https://example.com/tie/latest.json"
+          />
+          <div class="app-update-config-actions">
+            <button type="button" @click="saveUpdateEndpointConfig">保存</button>
+            <button type="button" @click="restoreDefaultUpdateEndpoints">恢复默认</button>
+            <button type="button" @click="updateConfigVisible = false">收起</button>
+          </div>
+          <p v-if="updateConfigNotice" class="backend-notice">{{ updateConfigNotice }}</p>
         </div>
       </div>
 

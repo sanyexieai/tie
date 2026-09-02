@@ -2,6 +2,7 @@ mod common;
 mod local;
 mod mobile;
 mod s3;
+mod update;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod ai_cli;
@@ -49,6 +50,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            update::download_update_file,
             load_mobile_workspace,
             s3::load_s3_providers,
             s3::save_s3_providers,

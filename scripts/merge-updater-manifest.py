@@ -14,6 +14,7 @@ from pathlib import Path
 PLATFORM_PICKS: tuple[tuple[str, str], ...] = (
     ("linux-x86_64", ".deb"),
     ("windows-x86_64", ".exe"),
+    ("android-aarch64", ".apk"),
 )
 
 
@@ -39,21 +40,28 @@ def version_from_artifacts(artifacts_dir: Path) -> str | None:
     return None
 
 
-def pick_platform_artifacts(artifacts_dir: Path) -> dict[str, tuple[Path, Path]]:
-    by_ext: dict[str, tuple[Path, Path]] = {}
+def pick_platform_artifacts(artifacts_dir: Path) -> dict[str, tuple[Path, Path | None]]:
+    signed_by_ext: dict[str, tuple[Path, Path]] = {}
+    unsigned_by_ext: dict[str, Path] = {}
     for path in sorted(artifacts_dir.iterdir()):
         if not path.is_file() or path.suffix == ".sig":
             continue
         sig_path = path.with_name(path.name + ".sig")
-        if not sig_path.is_file():
-            continue
-        by_ext[path.suffix.lower()] = (path, sig_path)
+        if sig_path.is_file():
+            signed_by_ext[path.suffix.lower()] = (path, sig_path)
+        else:
+            unsigned_by_ext[path.suffix.lower()] = path
 
-    platforms: dict[str, tuple[Path, Path]] = {}
+    platforms: dict[str, tuple[Path, Path | None]] = {}
     for platform_key, ext in PLATFORM_PICKS:
-        pair = by_ext.get(ext)
-        if pair:
-            platforms[platform_key] = pair
+        signed = signed_by_ext.get(ext)
+        if signed:
+            platforms[platform_key] = signed
+            continue
+        if ext == ".apk":
+            apk = unsigned_by_ext.get(ext)
+            if apk:
+                platforms[platform_key] = (apk, None)
     return platforms
 
 
@@ -94,10 +102,13 @@ def main() -> int:
 
     for platform_key, (bundle_path, sig_path) in platform_pairs.items():
         url = release_base + bundle_path.name if release_base else bundle_path.name
-        manifest["platforms"][platform_key] = {
-            "signature": read_signature(sig_path),
-            "url": url,
-        }
+        entry: dict[str, str] = {"url": url}
+        if platform_key.startswith("android") or sig_path is None:
+            # Android sideload updates are downloaded and installed manually.
+            entry["signature"] = ""
+        else:
+            entry["signature"] = read_signature(sig_path)
+        manifest["platforms"][platform_key] = entry
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

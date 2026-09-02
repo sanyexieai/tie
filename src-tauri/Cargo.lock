@@ -4858,10 +4858,12 @@ dependencies = [
 
 [[package]]
 name = "tie"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
+ "futures-util",
  "keyring",
  "minio",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",
@@ -4872,6 +4874,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tie-storage",
+ "tokio",
 ]
 
 [[package]]
