@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { Page, PageRevision, StorageSource, WorkspaceSnapshot } from '@/types'
 import { isBackendRemoteSourceId } from '@/services/backend'
 import { copyPageAssets as copyPageAssetsBetweenSources } from '@/services/attachments'
-import { mergePagesById, normalizePageSources, pageBoundToSource, pageSourceIds, withPageSources } from '@/services/page-sources'
+import { mergePagesById, normalizePageSources, pageBoundToSource, pageContentEqual, pageSourceIds, withPageSources } from '@/services/page-sources'
 import { canTransferBetweenSources, transferBlockedMessage } from '@/services/transfer-policy'
 import { isS3SourceId, s3ConnectionForSource } from '@/services/s3'
 import { backendStorageAdapter, loadAllBackendPages } from '@/services/storage/backend-adapter'
@@ -125,6 +125,16 @@ export const storageRegistry = {
 
   async savePage(page: Page, options?: SavePageOptions): Promise<Page> {
     const normalized = normalizePageSources(page)
+    if (!options?.force) {
+      const latest = await this.readLatestPage(normalized).catch(() => null)
+      if (latest && pageContentEqual(latest, normalized)) {
+        return normalizePageSources({
+          ...latest,
+          storageSourceId: normalized.storageSourceId,
+          storageSourceIds: pageSourceIds(normalized),
+        })
+      }
+    }
     const targets = pageSourceIds(normalized)
     const primaryWrite = options?.writeSourceId ?? normalized.storageSourceId
     let saved = await this.resolve(primaryWrite).savePage(normalized, {
@@ -138,11 +148,16 @@ export const storageRegistry = {
     })
     for (const sourceId of targets) {
       if (sourceId === primaryWrite) continue
-      await this.resolve(sourceId).savePage(saved, {
-        force: true,
-        queueOnFailure: options?.queueOnFailure,
-        writeSourceId: sourceId,
-      })
+      try {
+        await this.resolve(sourceId).savePage(saved, {
+          force: true,
+          queueOnFailure: options?.queueOnFailure,
+          writeSourceId: sourceId,
+        })
+      } catch (error) {
+        if (!options?.force) throw error
+        console.warn(`绑定源 ${sourceId} 强制同步写入失败`, error)
+      }
     }
     return saved
   },
@@ -359,7 +374,21 @@ export const storageRegistry = {
     for (const item of items) {
       try {
         if (item.operation === 'save') {
-          const saved = await this.savePage(item.page, { expectedUpdatedAt: item.expectedUpdatedAt, queueOnFailure: false })
+          const latest = await this.readLatestPage(item.page).catch(() => null)
+          if (latest && pageContentEqual(latest, item.page)) {
+            savedPages.push(normalizePageSources({
+              ...latest,
+              storageSourceId: item.page.storageSourceId,
+              storageSourceIds: pageSourceIds(item.page),
+            }))
+            syncQueue.remove(item.id)
+            continue
+          }
+          let expectedUpdatedAt = item.expectedUpdatedAt
+          if (latest && expectedUpdatedAt && latest.updatedAt !== expectedUpdatedAt && pageContentEqual(latest, item.page)) {
+            expectedUpdatedAt = latest.updatedAt
+          }
+          const saved = await this.savePage(item.page, { expectedUpdatedAt, queueOnFailure: false })
           savedPages.push(saved)
         } else if (item.operation === 'delete' && item.pageIds?.length) {
           await this.resolve(item.sourceId).permanentlyDeletePages(

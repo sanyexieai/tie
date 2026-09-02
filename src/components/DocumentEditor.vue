@@ -11,7 +11,7 @@ import { pageBoundToSource, pageSourceIds, sourceShortLabel } from '@/services/p
 import { isS3SourceId } from '@/services/s3'
 import { suggestTags, type TagSuggestion } from '@/services/tagging'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
-import { isMobileClient } from '@/services/platform'
+import { isMobileClient, usesMobileUi } from '@/services/platform'
 
 const store = useWorkspaceStore()
 const backend = useBackendStore()
@@ -85,10 +85,7 @@ const sourceChoices = computed(() => (
 ))
 const canSwitchStorageSource = computed(() => sourceChoices.value.length > 0)
 const sourceBindingBusy = ref(false)
-const supportsRemoteConflict = computed(() => Boolean(
-  activeSource.value && (isBackendRemoteSourceId(activeSource.value.id) || isS3SourceId(activeSource.value.id)),
-))
-const hasRemoteSaveConflict = computed(() => supportsRemoteConflict.value && saveError.value?.includes('其他设备更新'))
+const hasRemoteSaveConflict = computed(() => saveError.value?.includes('其他设备更新'))
 const hasSyncConflict = computed(() => Boolean(store.activePage && store.syncConflicts.has(store.activePage.id)))
 const hasRemoteConflict = computed(() => hasRemoteSaveConflict.value || hasSyncConflict.value)
 const remoteConflictLabel = computed(() => {
@@ -208,8 +205,22 @@ function saveFailureMessage(reason: unknown) {
     : '无法写入页面，请检查存储源连接或目录权限。'
 }
 
+function conflictConfirm(message: string) {
+  if (usesMobileUi.value) return true
+  return window.confirm(message)
+}
+
+function cancelAutoSave() {
+  changeRevision += 1
+  if (autoSaveTimer) {
+    window.clearTimeout(autoSaveTimer)
+    autoSaveTimer = undefined
+  }
+}
+
 async function loadConflictPreview() {
-  if (conflictLoading.value || !supportsRemoteConflict.value || !store.activePage) return
+  if (conflictLoading.value || !store.activePage) return
+  if (!hasRemoteConflict.value && !saveError.value?.includes('其他设备')) return
   conflictLoading.value = true
   try { conflictRemotePage.value = await store.readLatestPage(store.activePage.id) }
   catch (reason) { saveError.value = saveFailureMessage(reason) }
@@ -254,14 +265,20 @@ async function saveNow() {
 }
 
 async function reloadRemotePage() {
-  if (!supportsRemoteConflict.value) return
-  if (!window.confirm(`将重新载入${remoteConflictLabel.value}版本，当前未保存的本地修改会丢失。是否继续？`)) return
+  const pageId = store.activePage?.id
+  if (!pageId) return
+  if (!conflictConfirm(`将重新载入${remoteConflictLabel.value}版本，当前未保存的本地修改会丢失。是否继续？`)) return
+  cancelAutoSave()
   try {
-    await store.reloadWorkspace()
+    const current = store.pages.find((item) => item.id === pageId)
+    if (conflictRemotePage.value?.id === pageId && current) {
+      store.adoptRemotePage(conflictRemotePage.value, current)
+    } else {
+      await store.resolveConflictLoadRemote(pageId)
+    }
     loadActivePage()
     saveError.value = null
     conflictRemotePage.value = null
-    store.clearSyncConflict(store.activePage?.id)
   } catch (reason) {
     saveError.value = saveFailureMessage(reason)
   }
@@ -269,10 +286,11 @@ async function reloadRemotePage() {
 
 async function forceOverwriteRemote() {
   const page = draft()
-  if (!page || !supportsRemoteConflict.value) return
-  if (!window.confirm(`将用本地草稿覆盖${remoteConflictLabel.value}版本，其他设备上的修改会丢失。是否继续？`)) return
+  if (!page) return
+  if (!conflictConfirm(`将用本地草稿覆盖${remoteConflictLabel.value}版本，其他设备上的修改会丢失。是否继续？`)) return
+  cancelAutoSave()
   try {
-    await store.persist(page, { force: true })
+    await store.resolveConflictOverwriteLocal(page)
     hasUnsavedChanges.value = false
     saveError.value = null
     conflictRemotePage.value = null

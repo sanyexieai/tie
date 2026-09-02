@@ -19,6 +19,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 import { checkForAppUpdateOnStartup } from '@/services/app-updater'
+import { installMobileBackHandler, uninstallMobileBackHandler } from '@/services/mobile-back'
 import { initPlatform, isMobileClient, usesMobileUi } from '@/services/platform'
 
 const PANEL_WIDTHS_KEY = 'tie:panel-widths'
@@ -47,6 +48,7 @@ let mobileLayoutQuery: MediaQueryList | null = null
 let contextDrawerQuery: MediaQueryList | null = null
 let resizeStartX = 0
 let resizeStartWidth = 0
+let visibilitySyncTimer: ReturnType<typeof setTimeout> | null = null
 
 const usesMobileShell = computed(() => isMobileLayout.value || isMobileClient.value || usesMobileUi.value)
 
@@ -149,9 +151,65 @@ function toggleContextPanel() {
   contextCollapsed.value = !contextCollapsed.value
 }
 
+const mobileBackHint = ref('')
+let mobileBackHintTimer: ReturnType<typeof setTimeout> | null = null
+
+function showMobileBackHint(message: string) {
+  mobileBackHint.value = message
+  if (mobileBackHintTimer) clearTimeout(mobileBackHintTimer)
+  mobileBackHintTimer = setTimeout(() => {
+    mobileBackHint.value = ''
+    mobileBackHintTimer = null
+  }, 2200)
+}
+
 function goMobileHome() {
   store.openMobileHome()
   mobileContextOpen.value = false
+}
+
+function isMobileBackAtHome() {
+  return mobileOnHome.value
+    && !storageSettingsOpen.value
+    && !backendDialogOpen.value
+    && !updateDialogOpen.value
+    && !store.showingCommandPalette
+    && !mobileContextOpen.value
+}
+
+function handleMobileBackNavigation() {
+  if (storageSettingsOpen.value) {
+    storageSettingsOpen.value = false
+    return
+  }
+  if (backendDialogOpen.value) {
+    backendDialogOpen.value = false
+    return
+  }
+  if (updateDialogOpen.value) {
+    updateDialogOpen.value = false
+    return
+  }
+  if (store.showingCommandPalette) {
+    store.closeCommandPalette()
+    return
+  }
+  if (mobileContextOpen.value) {
+    mobileContextOpen.value = false
+    return
+  }
+  if (!mobileOnHome.value) {
+    goMobileHome()
+  }
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState !== 'visible' || !store.initialized || store.reloading) return
+  if (visibilitySyncTimer) clearTimeout(visibilitySyncTimer)
+  visibilitySyncTimer = setTimeout(() => {
+    void store.syncRemoteSources()
+    visibilitySyncTimer = null
+  }, 500)
 }
 
 function syncMobileLayout() {
@@ -202,12 +260,20 @@ onMounted(async () => {
   contextDrawerQuery.addEventListener('change', syncContextDrawer)
   window.addEventListener('keydown', onShortcut)
   window.addEventListener('tie:toggle-focus-mode', toggleFocusMode)
+  document.addEventListener('visibilitychange', onVisibilityChange)
   await initPlatform()
   syncMobileLayout()
   syncContextDrawer()
   await backend.initialize()
   await store.initialize()
   if (usesMobileShell.value) goMobileHome()
+  if (usesMobileShell.value) {
+    installMobileBackHandler({
+      onHome: () => isMobileBackAtHome(),
+      goBack: () => handleMobileBackNavigation(),
+      showExitHint: () => showMobileBackHint('再按一次退出应用'),
+    })
+  }
   const update = await checkForAppUpdateOnStartup()
   if (update) updateDialogOpen.value = true
 })
@@ -217,6 +283,10 @@ onBeforeUnmount(() => {
   contextDrawerQuery?.removeEventListener('change', syncContextDrawer)
   window.removeEventListener('keydown', onShortcut)
   window.removeEventListener('tie:toggle-focus-mode', toggleFocusMode)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  if (visibilitySyncTimer) clearTimeout(visibilitySyncTimer)
+  uninstallMobileBackHandler()
+  if (mobileBackHintTimer) clearTimeout(mobileBackHintTimer)
 })
 </script>
 
@@ -319,6 +389,7 @@ onBeforeUnmount(() => {
     <BackendConnectionDialog v-if="backendDialogOpen" @close="backendDialogOpen = false" />
     <StorageSettingsDialog v-if="storageSettingsOpen" @close="storageSettingsOpen = false" @connect-backend="backendDialogOpen = true; storageSettingsOpen = false" />
     <AppUpdateDialog v-if="updateDialogOpen" @close="updateDialogOpen = false" />
+    <p v-if="mobileBackHint && usesMobileShell" class="mobile-back-hint" role="status">{{ mobileBackHint }}</p>
   </div>
   <div v-else class="loading-screen"><AppIcon class="loading-mark" :size="30" /><p>正在打开知识库…</p></div>
 </template>

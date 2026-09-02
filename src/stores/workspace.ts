@@ -2,6 +2,7 @@ import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { backendWorkspaceSource, backendS3ProviderSource, isBackendRemoteSourceId } from '@/services/backend'
 import { mergePagesById, normalizePageSources, pageBoundToSource, pageSourceIds, withPageSources } from '@/services/page-sources'
+import { reconcileSaveAgainstRemote } from '@/services/save-reconcile'
 import { loadLocalS3Providers, refreshS3Providers, s3StorageSource } from '@/services/s3'
 import { sourceStatusStore, syncQueue, storageRegistry } from '@/services/storage'
 import { transferPreservesHistory } from '@/services/transfer-policy'
@@ -687,28 +688,83 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return true
   }
 
+  function registerSyncConflict(pageId: PageId, sourceId: string, localUpdatedAt: string, remoteUpdatedAt: string) {
+    const next = new Map(syncConflicts.value)
+    next.set(pageId, { pageId, localUpdatedAt, remoteUpdatedAt, sourceId })
+    syncConflicts.value = next
+  }
+
+  function adoptRemotePage(remote: Page, previous: Page) {
+    pages.value = pages.value.map((item) => (
+      item.id === remote.id
+        ? normalizePageSources({ ...remote, storageSourceIds: pageSourceIds(previous) })
+        : item
+    ))
+    clearSyncConflict(remote.id)
+  }
+
   async function persist(page: Page, options?: { force?: boolean }) {
     saving.value = true
     try {
       const previous = pages.value.find((item) => item.id === page.id)
-      const saved = await workspaceService.savePage(
-        { ...page, markdown: withChildPageLinks(page), updatedAt: new Date().toISOString() },
-        { expectedUpdatedAt: options?.force ? undefined : previous?.updatedAt, force: options?.force },
-      )
-      const index = pages.value.findIndex((item) => item.id === saved.id)
-      if (index === -1) pages.value.push(saved)
-      else pages.value[index] = saved
-      clearSyncConflict(saved.id)
-      if (previous && previous.title !== saved.title) {
-        const linkPattern = pageLinkPattern(saved.id)
-        const targetUrl = `tie://page/${saved.id}`
-        const updates = pages.value.filter((item) => item.id !== saved.id && !item.deletedAt && item.markdown.includes(targetUrl)).map((item) => ({ ...item, markdown: item.markdown.replace(linkPattern, markdownLink(saved.title, saved.id)), updatedAt: new Date().toISOString() }))
-        if (updates.length) {
-          const savedLinks = await Promise.all(updates.map((item) => workspaceService.savePage(item)))
-          pages.value = pages.value.map((item) => savedLinks.find((candidate) => candidate.id === item.id) ?? item)
+      const draft = { ...page, markdown: withChildPageLinks(page), updatedAt: new Date().toISOString() }
+      let expectedUpdatedAt = options?.force ? undefined : previous?.updatedAt
+
+      if (!options?.force && previous) {
+        const latest = await workspaceService.readLatestPage(previous).catch(() => null)
+        if (latest) {
+          const result = reconcileSaveAgainstRemote(previous, draft, latest)
+          if (result.action === 'skip') {
+            adoptRemotePage(result.page, previous)
+            return
+          }
+          if (result.action === 'conflict') {
+            registerSyncConflict(page.id, previous.storageSourceId, draft.updatedAt, result.remote.updatedAt)
+            throw new Error('页面已在其他设备更新，请重新载入后再保存')
+          }
+          expectedUpdatedAt = result.expectedUpdatedAt
+          if (result.adoptRemoteTimestamp) {
+            pages.value = pages.value.map((item) => (
+              item.id === page.id ? { ...item, updatedAt: result.adoptRemoteTimestamp! } : item
+            ))
+          }
         }
       }
+
+      try {
+        const saved = await workspaceService.savePage(
+          draft,
+          { expectedUpdatedAt, force: options?.force },
+        )
+        const index = pages.value.findIndex((item) => item.id === saved.id)
+        if (index === -1) pages.value.push(saved)
+        else pages.value[index] = saved
+        clearSyncConflict(saved.id)
+        if (previous && previous.title !== saved.title) {
+          const linkPattern = pageLinkPattern(saved.id)
+          const targetUrl = `tie://page/${saved.id}`
+          const updates = pages.value.filter((item) => item.id !== saved.id && !item.deletedAt && item.markdown.includes(targetUrl)).map((item) => ({ ...item, markdown: item.markdown.replace(linkPattern, markdownLink(saved.title, saved.id)), updatedAt: new Date().toISOString() }))
+          if (updates.length) {
+            const savedLinks = await Promise.all(updates.map((item) => workspaceService.savePage(item, { force: options?.force })))
+            pages.value = pages.value.map((item) => savedLinks.find((candidate) => candidate.id === item.id) ?? item)
+          }
+        }
+      } catch (error) {
+        if (!options?.force && previous && error instanceof Error && error.message.includes('其他设备')) {
+          const latest = await workspaceService.readLatestPage(previous).catch(() => null)
+          if (latest) registerSyncConflict(page.id, previous.storageSourceId, draft.updatedAt, latest.updatedAt)
+        }
+        throw error
+      }
     } finally { saving.value = false }
+  }
+
+  async function resolveConflictOverwriteLocal(page: Page) {
+    await persist(page, { force: true })
+  }
+
+  async function resolveConflictLoadRemote(pageId: PageId) {
+    return refreshPage(pageId)
   }
 
   function canTransferPageTo(targetSourceId: string, fromSourceId = activePage.value?.storageSourceId) {
@@ -1201,5 +1257,5 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, canBindPageTo, bindPageToSource, unbindPageFromSource, setPagePrimarySource, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, canBindPageTo, bindPageToSource, unbindPageFromSource, setPagePrimarySource, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })

@@ -32,6 +32,17 @@ export function pageBoundToSource(page: Pick<Page, 'storageSourceId' | 'storageS
   return pageSourceIds(page).includes(sourceId)
 }
 
+/** 比较页面正文是否一致（不含 updatedAt / 元数据漂移）。 */
+export function pageContentEqual(
+  a: Pick<Page, 'title' | 'markdown' | 'tags'>,
+  b: Pick<Page, 'title' | 'markdown' | 'tags'>,
+) {
+  return a.title === b.title
+    && a.markdown === b.markdown
+    && a.tags.length === b.tags.length
+    && a.tags.every((tag, index) => tag === b.tags[index])
+}
+
 /** 页面树与编辑器顶栏用的单字标签；完整名称放 title。 */
 export function sourceShortLabel(name: string) {
   const first = Array.from(name.trim())[0]

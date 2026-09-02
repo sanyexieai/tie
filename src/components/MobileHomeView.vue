@@ -3,7 +3,9 @@ import { computed, provide, ref } from 'vue'
 import AppIcon from '@/components/AppIcon.vue'
 import PageTreeItem from '@/components/PageTreeItem.vue'
 import { pageTreeDragKey } from '@/composables/pageTreeDrag'
+import { mobilePageSwipeKey } from '@/composables/mobilePageSwipe'
 import { usePageTreePointerDrag } from '@/composables/usePageTreePointerDrag'
+import { pageBoundToSource, pageSourceIds, sourceShortLabel } from '@/services/page-sources'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 const store = useWorkspaceStore()
@@ -12,9 +14,27 @@ const emit = defineEmits<{ 'open-settings': [] }>()
 const creating = ref(false)
 const createError = ref('')
 const treeRoot = ref<HTMLElement | null>(null)
+const openSwipePageId = ref<string | null>(null)
+const renamePageId = ref<string | null>(null)
+const renameDraft = ref('')
+const bindPageId = ref<string | null>(null)
+const bindBusy = ref(false)
+const bindError = ref('')
 
 const activePageCount = computed(() => store.pages.filter((page) => !page.deletedAt).length)
 const sourcesById = computed(() => Object.fromEntries(store.allSources.map((source) => [source.id, source])))
+
+const bindPage = computed(() => store.pages.find((page) => page.id === bindPageId.value) ?? null)
+const bindSourceChoices = computed(() => {
+  if (!bindPage.value) return []
+  return store.allSources.filter((source) => store.canBindPageTo(source.id, bindPage.value!) || pageBoundToSource(bindPage.value!, source.id))
+})
+const bindSourceIds = computed(() => bindPage.value ? pageSourceIds(bindPage.value) : [])
+
+provide(mobilePageSwipeKey, {
+  openPageId: openSwipePageId,
+  setOpen: (pageId) => { openSwipePageId.value = pageId },
+})
 
 const {
   draggingPageId,
@@ -67,10 +87,83 @@ async function move(pageId: string, parentId: string) {
 async function reorder(pageId: string, targetId: string, position: 'before' | 'after') {
   await store.reorderPage(pageId, targetId, position)
 }
+
+async function createChild(parentId: string) {
+  await store.createChildPage(parentId)
+}
+
+async function duplicate(pageId: string) {
+  await store.duplicatePage(pageId)
+}
+
+function openRename(pageId: string) {
+  const page = store.pages.find((item) => item.id === pageId)
+  if (!page) return
+  renamePageId.value = pageId
+  renameDraft.value = page.title
+}
+
+async function confirmRename() {
+  const pageId = renamePageId.value
+  if (!pageId) return
+  const title = renameDraft.value.trim()
+  if (!title) return
+  const page = store.pages.find((item) => item.id === pageId)
+  if (!page || title === page.title) {
+    renamePageId.value = null
+    return
+  }
+  await store.renamePage(pageId, title)
+  renamePageId.value = null
+}
+
+async function remove(pageId: string) {
+  if (store.pages.filter((page) => !page.deletedAt).length <= 1) return
+  await store.trashPage(pageId)
+}
+
+function openBind(pageId: string) {
+  bindPageId.value = pageId
+  bindError.value = ''
+}
+
+async function toggleBindSource(targetSourceId: string) {
+  if (!bindPage.value || bindBusy.value) return
+  const page = bindPage.value
+  const bound = pageBoundToSource(page, targetSourceId)
+  bindBusy.value = true
+  bindError.value = ''
+  try {
+    if (bound) {
+      if (pageSourceIds(page).length <= 1) return
+      await store.unbindPageFromSource(page.id, targetSourceId, true)
+    } else {
+      await store.bindPageToSource(page.id, targetSourceId, true)
+    }
+  } catch (error) {
+    bindError.value = error instanceof Error ? error.message : '无法更新存储源绑定'
+  } finally {
+    bindBusy.value = false
+  }
+}
+
+async function setBindPrimary(sourceId: string) {
+  if (!bindPage.value || bindBusy.value) return
+  bindBusy.value = true
+  bindError.value = ''
+  try {
+    await store.setPagePrimarySource(bindPage.value.id, sourceId)
+  } catch (error) {
+    bindError.value = error instanceof Error ? error.message : '无法设置主源'
+  } finally {
+    bindBusy.value = false
+  }
+}
 </script>
 
 <template>
   <div class="mobile-home">
+    <div class="mobile-home-top">
     <header class="mobile-home-header">
       <div class="mobile-home-brand">
         <AppIcon class="mobile-home-mark" :size="28" />
@@ -100,13 +193,15 @@ async function reorder(pageId: string, targetId: string, position: 'before' | 'a
       </div>
     </div>
 
-    <p class="mobile-home-tree-hint">按住 ◇ 拖动：上/下调整顺序，中间设为子页面</p>
+    <p class="mobile-home-tree-hint">左滑页面可编辑；按住 ◇ 拖动调整层级</p>
 
     <p v-if="createError" class="mobile-home-error" role="alert">
       {{ createError }}
       <button v-if="createError.includes('存储源')" type="button" class="mobile-home-error-action" @click="emit('open-settings')">去设置添加</button>
     </p>
+    </div>
 
+    <div class="mobile-home-scroll">
     <div
       ref="treeRoot"
       class="mobile-home-list page-tree mobile-page-tree"
@@ -126,12 +221,86 @@ async function reorder(pageId: string, targetId: string, position: 'before' | 'a
         touch-reorder
         compact
         @select="store.openPage($event)"
+        @create="createChild"
+        @duplicate="duplicate"
+        @rename="openRename"
+        @remove="remove"
+        @open-bind="openBind"
         @move="move"
         @reorder="reorder"
       />
       <p v-if="!store.tree.length" class="mobile-home-empty">还没有页面，点右下角 ＋ 新建，或先在设置里连接存储源。</p>
     </div>
+    </div>
 
     <button type="button" class="mobile-home-fab" aria-label="新建页面" :disabled="creating" @click="createPage">{{ creating ? '…' : '＋' }}</button>
+
+    <div v-if="renamePageId" class="mobile-sheet-backdrop" @click="renamePageId = null">
+      <section class="mobile-sheet" role="dialog" aria-modal="true" aria-label="重命名页面" @click.stop>
+        <header class="mobile-sheet-header">
+          <strong>重命名页面</strong>
+          <button type="button" aria-label="关闭" @click="renamePageId = null">×</button>
+        </header>
+        <input
+          v-model="renameDraft"
+          class="mobile-sheet-input"
+          type="text"
+          aria-label="页面标题"
+          @keydown.enter.prevent="confirmRename"
+        />
+        <footer class="mobile-sheet-footer">
+          <button type="button" @click="renamePageId = null">取消</button>
+          <button type="button" class="primary" @click="confirmRename">保存</button>
+        </footer>
+      </section>
+    </div>
+
+    <div v-if="bindPageId && bindPage" class="mobile-sheet-backdrop" @click="bindPageId = null">
+      <section class="mobile-sheet mobile-bind-sheet" role="dialog" aria-modal="true" aria-label="绑定存储源" @click.stop>
+        <header class="mobile-sheet-header">
+          <div>
+            <strong>绑定存储源</strong>
+            <small>{{ bindPage.title || '无标题' }}</small>
+          </div>
+          <button type="button" aria-label="关闭" @click="bindPageId = null">×</button>
+        </header>
+        <p class="mobile-sheet-hint">勾选要同步写入的存储源；主源决定树层级与默认附件位置。</p>
+        <div class="mobile-bind-list">
+          <button
+            v-for="source in bindSourceChoices"
+            :key="source.id"
+            type="button"
+            class="mobile-bind-row"
+            :class="{
+              bound: bindSourceIds.includes(source.id),
+              primary: source.id === bindPage.storageSourceId,
+              unavailable: source.available === false,
+            }"
+            :disabled="bindBusy || source.available === false"
+            @click="toggleBindSource(source.id)"
+          >
+            <span class="mobile-bind-check">{{ bindSourceIds.includes(source.id) ? '✓' : '○' }}</span>
+            <span class="mobile-bind-main">
+              <strong>{{ sourceShortLabel(source.name) }} · {{ source.name }}</strong>
+              <small>{{ source.available === false ? '当前不可访问' : source.path }}</small>
+            </span>
+            <span v-if="source.id === bindPage.storageSourceId" class="mobile-bind-tag">主源</span>
+          </button>
+          <p v-if="!bindSourceChoices.length" class="mobile-bind-empty">没有可绑定的存储源</p>
+        </div>
+        <div v-if="bindSourceIds.length > 1" class="mobile-bind-primary">
+          <span>设为主源</span>
+          <button
+            v-for="sourceId in bindSourceIds"
+            :key="sourceId"
+            type="button"
+            :class="{ active: sourceId === bindPage.storageSourceId }"
+            :disabled="bindBusy || sourceId === bindPage.storageSourceId"
+            @click="setBindPrimary(sourceId)"
+          >{{ store.allSources.find((item) => item.id === sourceId)?.name ?? sourceId }}</button>
+        </div>
+        <p v-if="bindError" class="mobile-sheet-error" role="alert">{{ bindError }}</p>
+      </section>
+    </div>
   </div>
 </template>
