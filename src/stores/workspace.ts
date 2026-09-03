@@ -191,6 +191,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     sources.forEach((source) => {
       if (!next.includes(source.id)) next.push(source.id)
     })
+    // 内容未变时不要赋新数组，否则设置页模板里 canMove 会在渲染期触发无限更新。
+    if (next.length === storageSourceOrder.value.length && next.every((id, index) => id === storageSourceOrder.value[index])) {
+      return
+    }
     storageSourceOrder.value = next
   }
 
@@ -206,7 +210,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function canMoveStorageSource(sourceId: string, direction: -1 | 1) {
-    syncStorageSourceOrder()
+    // 只读判断，禁止在渲染路径里写 storageSourceOrder。
     const order = visibleStorageSourceOrder()
     const index = order.indexOf(sourceId)
     if (index === -1) return false
