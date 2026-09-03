@@ -237,36 +237,20 @@ pub fn parse_page(content: &str) -> Result<Page, String> {
 
 pub fn demo_pages(storage_source_id: &str) -> Vec<Page> {
     let created = "2026-08-27T00:00:00.000Z".to_owned();
-    vec![
-        Page {
-            id: "pg_inbox".into(),
-            title: "收集箱".into(),
-            icon: "📥".into(),
-            parent_id: None,
-            sort_key: 0,
-            markdown: "# 收集箱\n\n把想法先放在这里，再慢慢整理。\n\n- 在页面内创建子页面\n- 直接用 Markdown 写作\n- 后续可通过链接、标签和图谱建立关联\n".into(),
-            tags: vec!["收集".into()],
-            created_at: created.clone(),
-            updated_at: created.clone(),
-            deleted_at: None,
-            storage_source_id: storage_source_id.to_owned(),
-            storage_source_ids: vec![storage_source_id.to_owned()],
-        },
-        Page {
-            id: "pg_welcome".into(),
-            title: "欢迎使用 Tie".into(),
-            icon: "👋".into(),
-            parent_id: Some("pg_inbox".into()),
-            sort_key: 0,
-            markdown: "# 欢迎使用 Tie\n\nTie 把 **Notion 的页面树**、**Typora 的写作感** 和 **Obsidian 的链接关系** 放在一起。\n\n## 从这里开始\n\n1. 在左侧创建页面或子页面\n2. 直接用 Markdown 写作\n3. 用标签与链接整理知识\n".into(),
-            tags: vec!["开始".into()],
-            created_at: created.clone(),
-            updated_at: created,
-            deleted_at: None,
-            storage_source_id: storage_source_id.to_owned(),
-            storage_source_ids: vec![storage_source_id.to_owned()],
-        },
-    ]
+    vec![Page {
+        id: "pg_welcome".into(),
+        title: "欢迎使用 Tie".into(),
+        icon: "👋".into(),
+        parent_id: None,
+        sort_key: 0,
+        markdown: "# 欢迎使用 Tie\n\nTie 把 **Notion 的页面树**、**Typora 的写作感** 和 **Obsidian 的链接关系** 放在一起。\n\n## 从这里开始\n\n1. 在左侧创建页面或子页面\n2. 直接用 Markdown 写作\n3. 用标签与链接整理知识\n".into(),
+        tags: vec!["开始".into()],
+        created_at: created.clone(),
+        updated_at: created,
+        deleted_at: None,
+        storage_source_id: storage_source_id.to_owned(),
+        storage_source_ids: vec![storage_source_id.to_owned()],
+    }]
 }
 
 pub fn ensure_demo(root: &Path, storage_source_id: &str) -> Result<(), String> {

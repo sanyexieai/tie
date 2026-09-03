@@ -145,6 +145,7 @@ export const storageRegistry = {
       }
     }
     // 方案 A：日常保存只写协作主源；写云端时剥离本机 sourceId。
+    // 成功标准：主源 adapter.savePage 完成（云端即 put 成功）；入队重试不算成功。
     const forWrite = pageForStorageWrite(normalized, primaryWrite)
     // 正文上云前先把引用到的附件补到目标源，避免另一端只有 markdown、没有图。
     if (isCloudStorageSourceId(primaryWrite)) {

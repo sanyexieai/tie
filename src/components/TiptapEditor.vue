@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import type { Editor } from '@tiptap/core'
 import { Extension } from '@tiptap/core'
@@ -38,8 +38,6 @@ const matchingPages = computed(() => {
   const query = (pagePickerMode.value === 'wiki' ? wikiQuery.value : pageQuery.value).trim().toLocaleLowerCase()
   return props.pages.filter((page) => !page.deletedAt && (!query || page.title.toLocaleLowerCase().includes(query))).slice(0, 8)
 })
-const childPageIds = computed(() => new Set(props.pages.filter((page) => page.parentId === props.pageId && !page.deletedAt).map((page) => page.id)))
-const pagesById = computed(() => new Map(props.pages.filter((page) => !page.deletedAt).map((page) => [page.id, page])))
 function sourceLabel(page: Page) {
   const source = props.sources.find((item) => item.id === page.storageSourceId)
   if (!source) return '未知来源'
@@ -588,14 +586,6 @@ const editor = useEditor({
       return false
     },
     handleDOMEvents: {
-      // Child cards: navigate on mousedown so contenteditable selection doesn't swallow the click.
-      mousedown: (_view, event) => {
-        if (event.button !== 0) return false
-        const target = event.target
-        if (!(target instanceof Element)) return false
-        if (!target.closest('a.child-page-link[href^="tie://page/"]')) return false
-        return openInternalLink(event)
-      },
       click: (_view, event) => handleEditorClick(event),
     },
     handleKeyDown: (_view, event) => {
@@ -663,12 +653,10 @@ const editor = useEditor({
     syncingExternalValue = true
     hydrateAssetMarkdownImages(currentEditor)
     syncingExternalValue = false
-    scheduleDecorateChildPageLinks()
   },
   onUpdate: ({ editor: currentEditor }) => {
     if (!syncingExternalValue && !rewritingInlineImages) emit('update:modelValue', currentEditor.getMarkdown())
     updateMenus(currentEditor)
-    scheduleDecorateChildPageLinks()
     void rewriteInlineImageNodes(currentEditor)
   },
   onSelectionUpdate: ({ editor: currentEditor }) => updateMenus(currentEditor),
@@ -689,11 +677,8 @@ watch(() => props.modelValue, (markdown) => {
     // ignore invalid selection after content swap
   }
   syncingExternalValue = false
-  scheduleDecorateChildPageLinks()
 })
 
-watch(childPageIds, () => scheduleDecorateChildPageLinks())
-watch(() => props.pages.map((page) => `${page.id}:${page.parentId ?? ''}:${page.deletedAt ?? ''}`).join('|'), () => scheduleDecorateChildPageLinks())
 watch(() => props.pages.map((page) => `${page.id}:${page.storageSourceId}:${(page.storageSourceIds ?? []).join(',')}`).join('|'), () => {
   refreshAssetImages()
 })
@@ -709,26 +694,6 @@ function refreshAssetImages() {
       if (img.dataset.tieAsset !== asset) return
       if (img.src !== url) img.src = url
     })
-  })
-}
-
-function scheduleDecorateChildPageLinks() {
-  void nextTick(() => {
-    requestAnimationFrame(() => decorateChildPageLinks())
-  })
-}
-
-function decorateChildPageLinks() {
-  const root = editor.value?.view.dom
-  if (!root) return
-  root.querySelectorAll<HTMLAnchorElement>('a[href^="tie://page/"]').forEach((link) => {
-    const targetId = link.getAttribute('href')?.slice('tie://page/'.length)
-    const page = targetId ? pagesById.value.get(targetId) : undefined
-    const isChild = Boolean(page && targetId && childPageIds.value.has(targetId))
-    link.classList.toggle('child-page-link', isChild)
-    // Icon is CSS-only (unified ▱); strip any leftover DOM chrome from older builds.
-    link.removeAttribute('data-page-icon')
-    link.querySelectorAll(':scope > .child-page-icon').forEach((node) => node.remove())
   })
 }
 

@@ -313,7 +313,7 @@ async function pushBindMirrors() {
           </div>
           <button type="button" aria-label="关闭" @click="bindPageId = null">×</button>
         </header>
-        <p class="mobile-sheet-hint">协作认云端主源；本机只是备份。日常只写主源，点「同步到备份」才更新镜像。</p>
+        <p class="mobile-sheet-hint">协作认云端主源；本机只是备份。只有写入云端成功才算保存成功；点「同步到备份」才更新镜像。</p>
         <div class="mobile-bind-list">
           <button
             v-for="source in bindSourceChoices"

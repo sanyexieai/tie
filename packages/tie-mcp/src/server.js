@@ -87,8 +87,8 @@ function main() {
       body: z.string().optional().describe('markdown 的别名'),
       pageId: z.string().optional().describe('已有页面 id；提供则更新'),
       tags: z.array(z.string()).optional().describe('标签列表；更新时若省略则保留原标签'),
-      parentId: z.string().nullable().optional().describe('父页面 id；传 null 变为顶层。树以 parent_id 为准，Tie 会按 id 补全父页子链接'),
-      parentTitle: z.string().optional().describe('按标题设置父页面（推荐）；只写 parent_id，不必手写子链接'),
+      parentId: z.string().nullable().optional().describe('父页面 id；传 null 变为顶层。树只认 frontmatter parent_id，不写父页正文子链接'),
+      parentTitle: z.string().optional().describe('按标题设置父页面（推荐）；只写 parent_id'),
       kind: z.enum(['decision', 'bug', 'preference', 'note']).optional()
         .describe('记忆类型，自动追加 memory 等相关标签'),
       matchTitle: z.boolean().optional().describe('若为 true 且未传 pageId，则按 title 匹配已有页并更新'),

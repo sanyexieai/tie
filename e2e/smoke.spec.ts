@@ -15,7 +15,7 @@ async function waitForWorkspace(page: import('@playwright/test').Page) {
 test('loads browser demo workspace', async ({ page }) => {
   await waitForWorkspace(page)
   await expect(page).toHaveTitle('Tie')
-  await expect(page.getByRole('tree', { name: '我的页面' }).getByRole('treeitem', { name: /收集箱/ })).toBeVisible()
+  await expect(page.getByRole('tree', { name: '我的页面' }).getByRole('treeitem', { name: /欢迎使用 Tie/ })).toBeVisible()
 })
 
 test('opens welcome page from sidebar', async ({ page }) => {
@@ -30,5 +30,5 @@ test('exports markdown in browser mode', async ({ page }) => {
   const downloadPromise = page.waitForEvent('download')
   await page.getByTitle('导出 Markdown').click()
   const download = await downloadPromise
-  expect(download.suggestedFilename()).toMatch(/收集箱\.md$/i)
+  expect(download.suggestedFilename()).toMatch(/欢迎使用 Tie\.md$/i)
 })

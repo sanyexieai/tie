@@ -38,6 +38,15 @@ export function saveS3SyncState(providerId: string, state: S3ProviderSyncState) 
   localStorage.setItem(`${KEY_PREFIX}${providerId}`, JSON.stringify(state))
 }
 
+/** 远端写入成功后丢掉该页索引缓存，下次同步必须重新拉 MinIO，避免信内存。 */
+export function invalidateS3PageSyncState(providerId: string, pageId: string) {
+  const state = loadS3SyncState(providerId)
+  if (!(pageId in state.objects)) return
+  const objects = { ...state.objects }
+  delete objects[pageId]
+  saveS3SyncState(providerId, { ...state, objects })
+}
+
 export function pageIdsNeedingDownload(index: S3PageIndexEntry[], cached: S3ProviderSyncState) {
   if (!cached.lastSyncAt) return index.map((entry) => entry.pageId)
   return index

@@ -61,24 +61,33 @@ let autoSaveFlushDone: Promise<void> = Promise.resolve()
 let resolveAutoSaveFlushDone: (() => void) | null = null
 
 const status = computed(() => {
-  const savedLabel = activeSource.value?.kind === 'backend' ? '已保存到后台' : '已保存到本地'
+  const kind = activeSource.value?.kind
+  const savedLabel = kind === 'backend' || kind === 's3'
+    ? (kind === 'backend' ? '已保存到后台' : '已保存到云端')
+    : '已保存到本地'
+  const awaitingRemote = Boolean(
+    store.activePage
+    && (store.pageHasPendingRemoteSave(store.activePage.id) || store.syncConflicts.has(store.activePage.id)),
+  )
   return store.saving
     ? '保存中…'
     : refreshing.value
       ? '刷新中…'
       : saveError.value
         ? '保存失败'
-        : hasUnsavedChanges.value
-          ? '未保存'
-          : refreshedNotice.value
-            ? '已从存储刷新'
-            : exportedNotice.value
-              ? '已导出 Markdown'
-              : copiedLinkNotice.value
-                ? '已复制页面链接'
-                : manualSaveNotice.value
-                  ? '已手动保存'
-                  : savedLabel
+        : awaitingRemote
+          ? '未写入远程'
+          : hasUnsavedChanges.value
+            ? '未保存'
+            : refreshedNotice.value
+              ? '已从存储刷新'
+              : exportedNotice.value
+                ? '已导出 Markdown'
+                : copiedLinkNotice.value
+                  ? '已复制页面链接'
+                  : manualSaveNotice.value
+                    ? '已手动保存'
+                    : savedLabel
 })
 const isFavorite = computed(() => Boolean(store.activePage && store.favoritePageIds.includes(store.activePage.id)))
 const activeSource = computed(() => store.allSources.find((source) => source.id === store.activePage?.storageSourceId) ?? null)
@@ -153,6 +162,13 @@ const breadcrumbs = computed(() => {
     page = page.parentId ? store.pages.find((candidate) => candidate.id === page!.parentId && !candidate.deletedAt) : undefined
   }
   return items
+})
+const childPages = computed(() => {
+  const parentId = store.activePage?.id
+  if (!parentId) return []
+  return store.pages
+    .filter((page) => page.parentId === parentId && !page.deletedAt)
+    .sort((a, b) => a.sortKey - b.sortKey || a.title.localeCompare(b.title, 'zh-CN'))
 })
 const wordCount = computed(() => bodyMarkdown.value
   .replace(/```[\s\S]*?```/g, '')
@@ -802,7 +818,7 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
       >←</button>
       <nav v-if="!props.mobileLayout" class="breadcrumbs" aria-label="页面层级"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><template v-for="(page, index) in breadcrumbs" :key="page.id"><span>›</span><button :class="{ current: index === breadcrumbs.length - 1 }" :title="page.title" @click="store.openPage(page.id)">{{ page.title }}</button></template></nav>
       <h1 v-else class="mobile-editor-title">{{ store.activePage.title }}</h1>
-      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><button class="source-select-trigger" :aria-expanded="sourceMenuOpen" aria-haspopup="menu" :title="boundSourceCount > 1 ? `${activeSource.name}\n${activeSource.path}\n共绑定 ${boundSourceCount} 个存储源` : `${activeSource.name}\n${activeSource.path}`" :disabled="!canSwitchStorageSource || sourceBindingBusy" @click.stop="canSwitchStorageSource && (sourceMenuOpen = !sourceMenuOpen)">{{ sourceShortLabel(activeSource.name) }}</button><div v-if="sourceMenuOpen && activeSource && canSwitchStorageSource" class="source-select-menu source-bind-menu" role="menu"><p class="source-bind-hint">协作与同步认「云端主源」（S3/后台）；本机目录只是本机备份。日常保存只写主源，本机 id 不会写进云端；需要时点「同步到备份」。</p><button v-for="source in sourceChoices" :key="source.id" :class="{ unavailable: source.available === false, bound: boundSourceIds.includes(source.id), primary: pageSourceRoleLabel(store.activePage, source.id) === 'primary' }" role="menuitemcheckbox" :aria-checked="boundSourceIds.includes(source.id)" :disabled="source.available === false || sourceBindingBusy" @click="toggleSourceBinding(source.id)"><span><i :class="source.kind"></i>{{ sourceBadgeLabel(source.kind) }} · {{ source.name }}</span><small>{{ source.available === false ? '当前不可访问' : boundSourceIds.includes(source.id) ? (pageSourceRoleLabel(store.activePage, source.id) === 'primary' ? '协作主源' : '备份镜像') : source.path }}</small><em aria-hidden="true">{{ boundSourceIds.includes(source.id) ? '✓' : '' }}</em></button><div v-if="boundCloudSourceIds.length > 1 || (boundCloudSourceIds.length === 1 && boundSourceCount > 1)" class="source-primary-actions"><span>设为协作主源（仅云端）</span><button v-for="sourceId in boundCloudSourceIds" :key="`primary-${sourceId}`" type="button" :class="{ active: sourceId === activeSource.id }" :disabled="sourceBindingBusy || sourceId === activeSource.id" @click="setPrimarySource(sourceId)">{{ store.allSources.find((item) => item.id === sourceId)?.name ?? sourceId }}</button><button type="button" class="source-mirror-sync" :disabled="sourceBindingBusy" @click="pushMirrors">同步到备份</button></div></div></div><span class="save-dot" :class="{ saving: store.saving, error: Boolean(saveError) }"></span><span :title="saveError ?? undefined">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" title="重新尝试保存当前页面" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从存储源刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button class="copy-link-button" title="导出 Markdown" @click="exportMarkdown">⇩</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
+      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><button class="source-select-trigger" :aria-expanded="sourceMenuOpen" aria-haspopup="menu" :title="boundSourceCount > 1 ? `${activeSource.name}\n${activeSource.path}\n共绑定 ${boundSourceCount} 个存储源` : `${activeSource.name}\n${activeSource.path}`" :disabled="!canSwitchStorageSource || sourceBindingBusy" @click.stop="canSwitchStorageSource && (sourceMenuOpen = !sourceMenuOpen)">{{ sourceShortLabel(activeSource.name) }}</button><div v-if="sourceMenuOpen && activeSource && canSwitchStorageSource" class="source-select-menu source-bind-menu" role="menu"><p class="source-bind-hint">协作与同步认「云端主源」（S3/后台）。日常保存只有写入云端成功才算成功；本机目录只是备份，需手动「同步到备份」。未写入远程时会显示失败或待同步，不会当成已保存。</p><button v-for="source in sourceChoices" :key="source.id" :class="{ unavailable: source.available === false, bound: boundSourceIds.includes(source.id), primary: pageSourceRoleLabel(store.activePage, source.id) === 'primary' }" role="menuitemcheckbox" :aria-checked="boundSourceIds.includes(source.id)" :disabled="source.available === false || sourceBindingBusy" @click="toggleSourceBinding(source.id)"><span><i :class="source.kind"></i>{{ sourceBadgeLabel(source.kind) }} · {{ source.name }}</span><small>{{ source.available === false ? '当前不可访问' : boundSourceIds.includes(source.id) ? (pageSourceRoleLabel(store.activePage, source.id) === 'primary' ? '协作主源' : '备份镜像') : source.path }}</small><em aria-hidden="true">{{ boundSourceIds.includes(source.id) ? '✓' : '' }}</em></button><div v-if="boundCloudSourceIds.length > 1 || (boundCloudSourceIds.length === 1 && boundSourceCount > 1)" class="source-primary-actions"><span>设为协作主源（仅云端）</span><button v-for="sourceId in boundCloudSourceIds" :key="`primary-${sourceId}`" type="button" :class="{ active: sourceId === activeSource.id }" :disabled="sourceBindingBusy || sourceId === activeSource.id" @click="setPrimarySource(sourceId)">{{ store.allSources.find((item) => item.id === sourceId)?.name ?? sourceId }}</button><button type="button" class="source-mirror-sync" :disabled="sourceBindingBusy" @click="pushMirrors">同步到备份</button></div></div></div><span class="save-dot" :class="{ saving: store.saving, error: Boolean(saveError) }"></span><span :title="saveError ?? undefined">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" title="重新尝试保存当前页面" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从存储源刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button class="copy-link-button" title="导出 Markdown" @click="exportMarkdown">⇩</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
     </header>
     <aside v-if="showingHistory" class="history-popover">
       <div class="history-popover-heading"><strong>页面历史</strong><button aria-label="关闭页面历史" @click="showingHistory = false">×</button></div>
@@ -837,6 +853,18 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
         <TiptapEditor v-else ref="richEditor" :model-value="bodyMarkdown" :pages="store.pages" :sources="store.allSources" :page-id="store.activePage.id" :spellcheck="store.spellcheckEnabled" :create-linked-page="createLinkedPage" @update:model-value="onBodyChange" @navigate="navigateToPage" @create-child="createChild">
           <template #meta><DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" /></template>
         </TiptapEditor>
+        <section v-if="childPages.length" class="document-child-pages" aria-label="子页面">
+          <h2 class="document-child-pages-title">子页面</h2>
+          <div class="document-child-pages-list">
+            <button
+              v-for="page in childPages"
+              :key="page.id"
+              type="button"
+              class="document-child-page-card"
+              @click="store.openPage(page.id)"
+            >{{ page.title || '无标题' }}</button>
+          </div>
+        </section>
       </article>
     </div>
     <footer class="editor-statusbar">

@@ -10,6 +10,13 @@ const headings = computed(() => (store.activePage?.markdown.match(/^#{2,6} .+$/g
 const outgoing = computed(() => store.activePage ? store.outgoingLinks(store.activePage.id) : [])
 const incoming = computed(() => store.activePage ? store.backlinks(store.activePage.id) : [])
 const mentions = computed(() => store.activePage ? store.unlinkedMentions(store.activePage.id) : [])
+const childPages = computed(() => {
+  const parentId = store.activePage?.id
+  if (!parentId) return []
+  return store.pages
+    .filter((page) => page.parentId === parentId && !page.deletedAt)
+    .sort((a, b) => a.sortKey - b.sortKey || a.title.localeCompare(b.title, 'zh-CN'))
+})
 const linkingMentionId = ref<string | null>(null)
 const storageLabel = computed(() => {
   const source = store.allSources.find((item) => item.id === store.activePage?.storageSourceId)
@@ -30,13 +37,9 @@ async function linkMention(sourcePageId: string) {
   }
 }
 
-function isChildLink(pageId: string) {
-  return store.pages.some((page) => page.id === pageId && page.parentId === store.activePage?.id && !page.deletedAt)
-}
-
 async function unlinkPage(pageId: string) {
   const source = store.activePage
-  if (!source || isChildLink(pageId)) return
+  if (!source) return
   await store.unlinkPageReference(source.id, pageId)
 }
 </script>
@@ -63,11 +66,16 @@ async function unlinkPage(pageId: string) {
     </div>
     <div v-else-if="tab === 'links'" class="context-content link-panel">
       <section>
+        <h3>子页面</h3>
+        <p v-if="!childPages.length" class="muted">无子页面。侧栏或「新建子页面」会按 parent_id 挂接，不写入正文。</p>
+        <button v-for="page in childPages" :key="`child-${page.id}`" @click="store.openPage(page.id)"><span>↳</span>{{ page.title }}</button>
+      </section>
+      <section>
         <h3>出链</h3>
         <p v-if="!outgoing.length" class="muted">还没有出链。输入 [[ 可创建页面链接。</p>
         <div v-for="page in outgoing" :key="`out-${page.id}`" class="mention-row">
           <button @click="store.openPage(page.id)"><span>↗</span>{{ page.title }}</button>
-          <button v-if="!isChildLink(page.id)" class="unlink-action" title="移除链接" @click="unlinkPage(page.id)">×</button>
+          <button class="unlink-action" title="移除正文中的链接" @click="unlinkPage(page.id)">×</button>
         </div>
       </section>
       <section>

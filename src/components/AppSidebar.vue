@@ -8,7 +8,6 @@ import { useBackendStore } from '@/stores/backend'
 
 const store = useWorkspaceStore()
 const backend = useBackendStore()
-const inboxPages = computed(() => store.tree.filter((node) => node.title === '收集箱'))
 const topLevelDragOver = ref(false)
 const emit = defineEmits<{ close: []; 'open-storage-settings': [] }>()
 const sourcesById = computed(() => Object.fromEntries(store.allSources.map((source) => [source.id, source])))
@@ -57,10 +56,6 @@ async function renameWorkspace() {
   if (name === null || name.trim() === store.workspace?.name) return
   await store.renameWorkspace(name)
 }
-function openFirstInbox() {
-  const inbox = inboxPages.value[0]
-  if (inbox) store.openPage(inbox.id)
-}
 </script>
 
 <template>
@@ -75,7 +70,6 @@ function openFirstInbox() {
     <button class="new-page-button" @click="createTopLevel"><span>+</span> 新建页面</button>
 
     <nav class="quick-nav" aria-label="快捷导航">
-      <button :class="{ selected: !store.showingTrash && inboxPages.some((page) => page.id === store.activePageId) }" @click="openFirstInbox"><span>⌑</span> 收集箱</button>
       <button :class="{ selected: store.showingRecent }" @click="store.openRecent()"><span>◷</span> 最近打开</button>
       <button :class="{ selected: store.showingFavorites }" @click="store.openFavorites()"><span>☆</span> 收藏</button>
       <button :class="{ selected: store.showingSearch }" @click="store.openSearch()"><span>⌕</span> 搜索</button>

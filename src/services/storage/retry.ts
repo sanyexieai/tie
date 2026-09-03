@@ -18,5 +18,6 @@ export function isRetryableStorageError(error: unknown, kind: StorageRetryKind =
 
 export function queueFailureMessage(error: unknown, action: string) {
   const message = error instanceof Error ? error.message : `${action}失败`
-  return `${message}，已加入离线同步队列`
+  // 入队 ≠ 成功：云端未确认写入前不得当作已保存。
+  return `${message}（未写入远程，已加入待同步队列）`
 }

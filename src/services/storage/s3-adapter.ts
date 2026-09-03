@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { Page } from '@/types'
 import {
+  invalidateS3PageSyncState,
   loadS3SyncState,
   nextS3SyncState,
   pageIdsMissingFromResult,
@@ -73,6 +74,12 @@ async function loadIndexedPages(sourceId: string, context?: SyncSourceContext) {
   const cached = loadS3SyncState(provider.id)
   const downloadIds = pageIdsNeedingDownload(index, cached)
   const remoteIds = new Set(index.map((entry) => entry.pageId))
+  // 待同步队列里的页：内存稿 ≠ 远程真相，禁止当「etag 未变」复用内存。
+  const queuedSaveIds = new Set(
+    syncQueue.list()
+      .filter((item) => item.operation === 'save' && item.sourceId === sourceId)
+      .map((item) => item.page.id),
+  )
 
   let downloaded: Page[] = []
   if (!cached.lastSyncAt || downloadIds.length === index.length) {
@@ -82,13 +89,21 @@ async function loadIndexedPages(sourceId: string, context?: SyncSourceContext) {
   }
 
   const unchangedPages = (context?.localPages ?? [])
-    .filter((page) => pageBoundToSource(page, sourceId) && remoteIds.has(page.id) && !downloadIds.includes(page.id))
+    .filter((page) => (
+      pageBoundToSource(page, sourceId)
+      && remoteIds.has(page.id)
+      && !downloadIds.includes(page.id)
+      && !queuedSaveIds.has(page.id)
+    ))
 
   // 增量缓存认为「未变」时不会进 downloadIds；若本机上下文也没有该页（冷启动、仅云端），必须补拉。
   const presentIds = new Set([...unchangedPages, ...downloaded].map((page) => page.id))
-  const missingIds = pageIdsMissingFromResult(index, presentIds)
+  const missingIds = [
+    ...pageIdsMissingFromResult(index, presentIds),
+    ...[...queuedSaveIds].filter((pageId) => remoteIds.has(pageId) && !presentIds.has(pageId)),
+  ]
   if (missingIds.length) {
-    const extras = await invoke<Page[]>('load_s3_pages_by_ids', { connection, pageIds: missingIds })
+    const extras = await invoke<Page[]>('load_s3_pages_by_ids', { connection, pageIds: [...new Set(missingIds)] })
     downloaded = [...downloaded, ...extras]
   }
 
@@ -133,6 +148,8 @@ export const s3StorageAdapter: StorageAdapter = {
         expectedUpdatedAt: options?.force ? null : (options?.expectedUpdatedAt ?? null),
       })
       syncQueue.removeForPage(page.id)
+      // 只有 put 成功才算成功；丢掉 etag 缓存，禁止后续用内存冒充远程。
+      if (provider) invalidateS3PageSyncState(provider.id, page.id)
       return { ...saved, storageSourceId: page.storageSourceId, storageSourceIds: page.storageSourceIds }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)

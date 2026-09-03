@@ -231,7 +231,7 @@ export function createWorkspace(workspacePath) {
 
     const file = path.join(pagesDir, `${page.id}.md`)
     fs.writeFileSync(file, frontmatter(page), 'utf8')
-    // parent_id 是树真相源；父页末尾子链接由 Tie 桌面端按父子 id 补全，MCP 不写
+    // 树只认 parent_id；正文 tie://page 链接只做关联，不维护子页列表
     return { page: summarize(page), path: file, created: !existing }
   }
 
