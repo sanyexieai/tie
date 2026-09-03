@@ -198,7 +198,12 @@ fn discover_skills_in_root(root: &Path) -> Vec<(String, String, PathBuf, PathBuf
     let direct = root.join("SKILL.md");
     if direct.is_file() {
         if let Ok((name, description, _)) = read_skill_at(&direct) {
-            found.push((name, description, canonicalize_path(&direct), canonicalize_path(root)));
+            found.push((
+                name,
+                description,
+                canonicalize_path(&direct),
+                canonicalize_path(root),
+            ));
         }
     }
 
@@ -275,7 +280,12 @@ fn ensure_skill_mirror(skill_dir: &Path, skill_path: &Path, target: &Path) -> Re
 
     if target.exists() || target.is_symlink() {
         let existing_skill = target.join("SKILL.md");
-        if existing_skill.is_file() && same_path(&existing_skill.to_string_lossy(), &skill_path.to_string_lossy()) {
+        if existing_skill.is_file()
+            && same_path(
+                &existing_skill.to_string_lossy(),
+                &skill_path.to_string_lossy(),
+            )
+        {
             return Ok(());
         }
         // Best-effort: refresh copied SKILL.md when the folder already exists.
@@ -306,7 +316,11 @@ fn ensure_skill_mirror(skill_dir: &Path, skill_path: &Path, target: &Path) -> Re
     }
 }
 
-fn ensure_codex_link(app: &AppHandle, name: &str, skill_path: &Path) -> Result<Option<PathBuf>, String> {
+fn ensure_codex_link(
+    app: &AppHandle,
+    name: &str,
+    skill_path: &Path,
+) -> Result<Option<PathBuf>, String> {
     let skill_dir = skill_path
         .parent()
         .ok_or_else(|| "无效的 Skill 路径".to_owned())?;
@@ -328,7 +342,12 @@ fn ensure_codex_link(app: &AppHandle, name: &str, skill_path: &Path) -> Result<O
 
     if primary.exists() || primary.is_symlink() {
         let existing_skill = primary.join("SKILL.md");
-        if !(existing_skill.is_file() && same_path(&existing_skill.to_string_lossy(), &skill_path.to_string_lossy())) {
+        if !(existing_skill.is_file()
+            && same_path(
+                &existing_skill.to_string_lossy(),
+                &skill_path.to_string_lossy(),
+            ))
+        {
             return Err(format!(
                 "技能目录已存在且指向其他内容：{}。请先断开或改名。",
                 primary.display()
@@ -377,7 +396,9 @@ fn remove_codex_link(path: &Path) -> Result<(), String> {
 #[tauri::command]
 pub fn list_skill_connections(app: AppHandle) -> Result<Vec<SkillConnection>, String> {
     let mut registry = load_registry(&app)?;
-    registry.connections.retain(|item| Path::new(&item.skill_path).is_file());
+    registry
+        .connections
+        .retain(|item| Path::new(&item.skill_path).is_file());
     save_registry(&app, &registry)?;
     Ok(registry.connections)
 }
@@ -388,7 +409,10 @@ pub fn list_extra_skill_scan_roots(app: AppHandle) -> Result<Vec<String>, String
 }
 
 #[tauri::command]
-pub fn list_skill_scan_roots(app: AppHandle, workspace_path: Option<String>) -> Result<Vec<String>, String> {
+pub fn list_skill_scan_roots(
+    app: AppHandle,
+    workspace_path: Option<String>,
+) -> Result<Vec<String>, String> {
     let mut roots = common_scan_roots(&app, workspace_path.as_deref())
         .into_iter()
         .map(|path| path.to_string_lossy().into_owned())
@@ -410,7 +434,11 @@ pub fn add_skill_scan_root(app: AppHandle, path: String) -> Result<Vec<String>, 
     }
     let mut registry = load_registry(&app)?;
     let rendered = root.to_string_lossy().into_owned();
-    if !registry.extra_scan_roots.iter().any(|item| item == &rendered) {
+    if !registry
+        .extra_scan_roots
+        .iter()
+        .any(|item| item == &rendered)
+    {
         registry.extra_scan_roots.push(rendered);
         save_registry(&app, &registry)?;
     }
@@ -428,7 +456,10 @@ pub fn remove_skill_scan_root(app: AppHandle, path: String) -> Result<Vec<String
 }
 
 #[tauri::command]
-pub fn scan_skills(app: AppHandle, workspace_path: Option<String>) -> Result<Vec<ScannedSkill>, String> {
+pub fn scan_skills(
+    app: AppHandle,
+    workspace_path: Option<String>,
+) -> Result<Vec<ScannedSkill>, String> {
     let registry = load_registry(&app)?;
     let roots = common_scan_roots(&app, workspace_path.as_deref());
     let mut by_path = std::collections::BTreeMap::<String, ScannedSkill>::new();
@@ -516,7 +547,10 @@ pub fn connect_skill(app: AppHandle, skill_path: String) -> Result<SkillConnecti
 }
 
 #[tauri::command]
-pub fn disconnect_skill(app: AppHandle, connection_id: String) -> Result<Vec<SkillConnection>, String> {
+pub fn disconnect_skill(
+    app: AppHandle,
+    connection_id: String,
+) -> Result<Vec<SkillConnection>, String> {
     let mut registry = load_registry(&app)?;
     let Some(index) = registry
         .connections
@@ -527,7 +561,9 @@ pub fn disconnect_skill(app: AppHandle, connection_id: String) -> Result<Vec<Ski
     };
     let removed = registry.connections.remove(index);
     // Only remove mirrors Tie created. Never delete the original skill_path.
-    let original_dir = Path::new(&removed.skill_path).parent().map(canonicalize_path);
+    let original_dir = Path::new(&removed.skill_path)
+        .parent()
+        .map(canonicalize_path);
     let mut candidates = Vec::new();
     if let Some(link) = removed.codex_link_path.as_deref() {
         candidates.push(PathBuf::from(link));
@@ -569,7 +605,11 @@ pub fn read_skill_file(app: AppHandle, skill_path: String) -> Result<SkillFile, 
 }
 
 #[tauri::command]
-pub fn write_skill_file(app: AppHandle, skill_path: String, content: String) -> Result<SkillFile, String> {
+pub fn write_skill_file(
+    app: AppHandle,
+    skill_path: String,
+    content: String,
+) -> Result<SkillFile, String> {
     if content.trim().is_empty() {
         return Err("Skill 内容不能为空".into());
     }

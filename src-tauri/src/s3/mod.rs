@@ -38,7 +38,11 @@ fn s3_provider_fingerprint(endpoint: &str, bucket: &str) -> String {
     format!("{hash:016x}")
 }
 
-fn write_s3_credential_payload(app: &tauri::AppHandle, provider_id: &str, payload: &str) -> Result<(), String> {
+fn write_s3_credential_payload(
+    app: &tauri::AppHandle,
+    provider_id: &str,
+    payload: &str,
+) -> Result<(), String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         return mobile::write_mobile_credential(app, provider_id, payload);
@@ -73,7 +77,10 @@ fn migrate_s3_credential_id(app: &tauri::AppHandle, from_id: &str, to_id: &str) 
 }
 
 /// 将随机 UUID provider id 规范为 endpoint+bucket 指纹，并迁移凭据。
-fn stabilize_s3_providers(app: &tauri::AppHandle, providers: Vec<S3ProviderConfig>) -> (Vec<S3ProviderConfig>, bool) {
+fn stabilize_s3_providers(
+    app: &tauri::AppHandle,
+    providers: Vec<S3ProviderConfig>,
+) -> (Vec<S3ProviderConfig>, bool) {
     let mut changed = false;
     let mut by_stable: HashMap<String, S3ProviderConfig> = HashMap::new();
 
@@ -116,7 +123,10 @@ fn stabilize_s3_providers(app: &tauri::AppHandle, providers: Vec<S3ProviderConfi
     (next, changed)
 }
 
-pub(crate) fn read_s3_credential_payload(app: &tauri::AppHandle, provider_id: &str) -> Result<String, String> {
+pub(crate) fn read_s3_credential_payload(
+    app: &tauri::AppHandle,
+    provider_id: &str,
+) -> Result<String, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         return mobile::read_mobile_credential(app, provider_id);
@@ -149,14 +159,20 @@ pub(crate) fn load_s3_providers(app: tauri::AppHandle) -> Result<Vec<S3ProviderC
 }
 
 #[tauri::command]
-pub(crate) fn save_s3_providers(app: tauri::AppHandle, providers: Vec<S3ProviderConfig>) -> Result<(), String> {
+pub(crate) fn save_s3_providers(
+    app: tauri::AppHandle,
+    providers: Vec<S3ProviderConfig>,
+) -> Result<(), String> {
     let mut settings = load_settings(&app)?;
     settings.s3_providers = providers;
     save_settings(&app, &settings)
 }
 
 #[tauri::command]
-pub(crate) fn upsert_s3_provider(app: tauri::AppHandle, provider: S3ProviderConfig) -> Result<Vec<S3ProviderConfig>, String> {
+pub(crate) fn upsert_s3_provider(
+    app: tauri::AppHandle,
+    provider: S3ProviderConfig,
+) -> Result<Vec<S3ProviderConfig>, String> {
     let mut settings = load_settings(&app)?;
     let mut next = provider;
     let stable_id = s3_provider_fingerprint(&next.endpoint, &next.bucket);
@@ -164,7 +180,11 @@ pub(crate) fn upsert_s3_provider(app: tauri::AppHandle, provider: S3ProviderConf
         migrate_s3_credential_id(&app, &next.id, &stable_id);
         next.id = stable_id;
     }
-    if let Some(existing) = settings.s3_providers.iter_mut().find(|item| item.id == next.id) {
+    if let Some(existing) = settings
+        .s3_providers
+        .iter_mut()
+        .find(|item| item.id == next.id)
+    {
         *existing = next;
     } else {
         settings.s3_providers.push(next);
@@ -176,9 +196,14 @@ pub(crate) fn upsert_s3_provider(app: tauri::AppHandle, provider: S3ProviderConf
 }
 
 #[tauri::command]
-pub(crate) fn remove_s3_provider_config(app: tauri::AppHandle, provider_id: String) -> Result<Vec<S3ProviderConfig>, String> {
+pub(crate) fn remove_s3_provider_config(
+    app: tauri::AppHandle,
+    provider_id: String,
+) -> Result<Vec<S3ProviderConfig>, String> {
     let mut settings = load_settings(&app)?;
-    settings.s3_providers.retain(|provider| provider.id != provider_id);
+    settings
+        .s3_providers
+        .retain(|provider| provider.id != provider_id);
     save_settings(&app, &settings)?;
     Ok(settings.s3_providers)
 }
@@ -213,7 +238,14 @@ pub(crate) async fn copy_s3_history_to_s3(
 ) -> Result<(), String> {
     let source_payload = read_s3_credential_payload(&app, &source.provider_id)?;
     let target_payload = read_s3_credential_payload(&app, &target.provider_id)?;
-    tie_storage::s3::copy_s3_history_to_s3(&source, &source_payload, &target, &target_payload, &page_id).await
+    tie_storage::s3::copy_s3_history_to_s3(
+        &source,
+        &source_payload,
+        &target,
+        &target_payload,
+        &page_id,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -225,7 +257,14 @@ pub(crate) async fn copy_s3_assets_to_s3(
 ) -> Result<(), String> {
     let source_payload = read_s3_credential_payload(&app, &source.provider_id)?;
     let target_payload = read_s3_credential_payload(&app, &target.provider_id)?;
-    tie_storage::s3::copy_s3_assets_to_s3(&source, &source_payload, &target, &target_payload, &page_id).await
+    tie_storage::s3::copy_s3_assets_to_s3(
+        &source,
+        &source_payload,
+        &target,
+        &target_payload,
+        &page_id,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -265,7 +304,10 @@ pub(crate) fn save_s3_credentials(
 }
 
 #[tauri::command]
-pub(crate) fn remove_s3_credentials(app: tauri::AppHandle, provider_id: String) -> Result<(), String> {
+pub(crate) fn remove_s3_credentials(
+    app: tauri::AppHandle,
+    provider_id: String,
+) -> Result<(), String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         return mobile::delete_mobile_credential(&app, &provider_id);
@@ -285,19 +327,30 @@ pub(crate) async fn test_s3_connection(
     bucket: String,
     region: Option<String>,
 ) -> Result<(), String> {
-    let connection = S3Connection { provider_id, endpoint, bucket, region };
+    let connection = S3Connection {
+        provider_id,
+        endpoint,
+        bucket,
+        region,
+    };
     let payload = read_s3_credential_payload(&app, &connection.provider_id)?;
     tie_storage::s3::test_s3_connection(&connection, &payload).await
 }
 
 #[tauri::command]
-pub(crate) async fn list_s3_page_index(app: tauri::AppHandle, connection: S3Connection) -> Result<Vec<S3PageIndexEntry>, String> {
+pub(crate) async fn list_s3_page_index(
+    app: tauri::AppHandle,
+    connection: S3Connection,
+) -> Result<Vec<S3PageIndexEntry>, String> {
     let payload = read_s3_credential_payload(&app, &connection.provider_id)?;
     tie_storage::s3::list_s3_page_index(&connection, &payload).await
 }
 
 #[tauri::command]
-pub(crate) async fn load_s3_pages(app: tauri::AppHandle, connection: S3Connection) -> Result<Vec<Page>, String> {
+pub(crate) async fn load_s3_pages(
+    app: tauri::AppHandle,
+    connection: S3Connection,
+) -> Result<Vec<Page>, String> {
     let payload = read_s3_credential_payload(&app, &connection.provider_id)?;
     tie_storage::s3::load_s3_pages(&connection, &payload).await
 }
@@ -320,13 +373,8 @@ pub(crate) async fn save_s3_page(
     expected_updated_at: Option<String>,
 ) -> Result<Page, String> {
     let payload = read_s3_credential_payload(&app, &connection.provider_id)?;
-    tie_storage::s3::save_s3_page(
-        &connection,
-        &payload,
-        &page,
-        expected_updated_at.as_deref(),
-    )
-    .await
+    tie_storage::s3::save_s3_page(&connection, &payload, &page, expected_updated_at.as_deref())
+        .await
 }
 
 #[tauri::command]

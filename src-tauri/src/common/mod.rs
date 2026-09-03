@@ -6,7 +6,7 @@ pub(crate) use tie_storage::{
 };
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) use tie_storage::{WorkspaceSettings};
+pub(crate) use tie_storage::WorkspaceSettings;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) use tie_storage::local::{

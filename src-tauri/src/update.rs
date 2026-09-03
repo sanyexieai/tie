@@ -69,10 +69,7 @@ pub async fn download_update_file(
         downloaded += chunk.len() as u64;
         let _ = app.emit(
             "app-update-download-progress",
-            DownloadProgressPayload {
-                downloaded,
-                total,
-            },
+            DownloadProgressPayload { downloaded, total },
         );
     }
 

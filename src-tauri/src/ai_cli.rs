@@ -170,7 +170,11 @@ fn search_directories(app: Option<&AppHandle>) -> Vec<PathBuf> {
         push_unique(&mut dirs, home.join("bin"));
         push_unique(&mut dirs, home.join(".codex").join("bin"));
         // Cursor agent versioned installs
-        let cursor_versions = home.join(".local").join("share").join("cursor-agent").join("versions");
+        let cursor_versions = home
+            .join(".local")
+            .join("share")
+            .join("cursor-agent")
+            .join("versions");
         if let Ok(entries) = fs::read_dir(&cursor_versions) {
             let mut version_dirs = entries
                 .filter_map(|entry| entry.ok().map(|item| item.path()))
@@ -247,7 +251,11 @@ fn first_line(text: &str) -> String {
         .collect()
 }
 
-fn run_probe(bin: &Path, args: &[&str], timeout: Duration) -> Result<(i32, String, String), String> {
+fn run_probe(
+    bin: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<(i32, String, String), String> {
     let mut command = Command::new(bin);
     command.args(args);
     if let Some(parent) = bin.parent() {
@@ -271,7 +279,11 @@ fn probe_version(bin: &Path) -> Option<String> {
     let Ok((code, stdout, stderr)) = run_probe(bin, &["--version"], Duration::from_secs(8)) else {
         return None;
     };
-    let text = if !stdout.trim().is_empty() { stdout } else { stderr };
+    let text = if !stdout.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
     if code != 0 && text.trim().is_empty() {
         return None;
     }
@@ -286,7 +298,11 @@ fn probe_version(bin: &Path) -> Option<String> {
 fn probe_claude_connected(bin: &Path) -> (bool, String) {
     match run_probe(bin, &["auth", "status"], Duration::from_secs(12)) {
         Ok((_code, stdout, stderr)) => {
-            let text = if !stdout.trim().is_empty() { stdout } else { stderr };
+            let text = if !stdout.trim().is_empty() {
+                stdout
+            } else {
+                stderr
+            };
             if let Ok(value) = serde_json::from_str::<Value>(text.trim()) {
                 let logged_in = value
                     .get("loggedIn")
@@ -301,7 +317,9 @@ fn probe_claude_connected(bin: &Path) -> (bool, String) {
                 }
                 return (false, "已找到 CLI，但未登录（claude auth login）".into());
             }
-            if text.to_ascii_lowercase().contains("logged") && text.to_ascii_lowercase().contains("in") {
+            if text.to_ascii_lowercase().contains("logged")
+                && text.to_ascii_lowercase().contains("in")
+            {
                 return (true, first_line(&text));
             }
             (false, first_line(&text).if_empty("无法解析登录状态"))
@@ -325,9 +343,17 @@ impl IfEmpty for String {
 }
 
 fn probe_cursor_connected(bin: &Path) -> (bool, String) {
-    match run_probe(bin, &["status", "--format", "json"], Duration::from_secs(12)) {
+    match run_probe(
+        bin,
+        &["status", "--format", "json"],
+        Duration::from_secs(12),
+    ) {
         Ok((_code, stdout, stderr)) => {
-            let text = if !stdout.trim().is_empty() { stdout } else { stderr };
+            let text = if !stdout.trim().is_empty() {
+                stdout
+            } else {
+                stderr
+            };
             if let Ok(value) = serde_json::from_str::<Value>(text.trim()) {
                 let authenticated = value
                     .get("isAuthenticated")
@@ -342,7 +368,11 @@ fn probe_cursor_connected(bin: &Path) -> (bool, String) {
                 let message = value
                     .get("message")
                     .and_then(|item| item.as_str())
-                    .unwrap_or(if authenticated { "已登录" } else { "未登录" });
+                    .unwrap_or(if authenticated {
+                        "已登录"
+                    } else {
+                        "未登录"
+                    });
                 return (authenticated, message.to_owned());
             }
             let lower = text.to_ascii_lowercase();
@@ -360,9 +390,15 @@ fn probe_codex_connected(bin: &Path) -> (bool, String) {
     if probe_version(bin).is_some() {
         match run_probe(bin, &["login", "status"], Duration::from_secs(10)) {
             Ok((_code, stdout, stderr)) => {
-                let text = if !stdout.trim().is_empty() { stdout } else { stderr };
+                let text = if !stdout.trim().is_empty() {
+                    stdout
+                } else {
+                    stderr
+                };
                 let lower = text.to_ascii_lowercase();
-                if lower.contains("logged") || (lower.contains("login") && lower.contains("success")) {
+                if lower.contains("logged")
+                    || (lower.contains("login") && lower.contains("success"))
+                {
                     return (true, first_line(&text).if_empty("CLI 可用"));
                 }
                 if lower.contains("not logged") || lower.contains("unauthor") {
@@ -387,17 +423,9 @@ fn resolve_bin(
         if is_executable_candidate(&path) {
             return (Some(path), true, None);
         }
-        return (
-            Some(path),
-            true,
-            Some("自定义路径无效或不可执行".into()),
-        );
+        return (Some(path), true, Some("自定义路径无效或不可执行".into()));
     }
-    (
-        discover_bin(app, client.bin_names()),
-        false,
-        None,
-    )
+    (discover_bin(app, client.bin_names()), false, None)
 }
 
 fn status_for(
@@ -469,9 +497,21 @@ pub fn ai_cli_status(app: AppHandle, paths: Option<AiCliCustomPaths>) -> AiCliSt
     let paths = paths.unwrap_or_default();
     AiCliStatus {
         clients: vec![
-            status_for(Some(&app), AiCliClient::Claude, paths.for_client(AiCliClient::Claude)),
-            status_for(Some(&app), AiCliClient::Codex, paths.for_client(AiCliClient::Codex)),
-            status_for(Some(&app), AiCliClient::Cursor, paths.for_client(AiCliClient::Cursor)),
+            status_for(
+                Some(&app),
+                AiCliClient::Claude,
+                paths.for_client(AiCliClient::Claude),
+            ),
+            status_for(
+                Some(&app),
+                AiCliClient::Codex,
+                paths.for_client(AiCliClient::Codex),
+            ),
+            status_for(
+                Some(&app),
+                AiCliClient::Cursor,
+                paths.for_client(AiCliClient::Cursor),
+            ),
         ],
         searched_at: chrono_like_iso(),
     }
@@ -530,7 +570,13 @@ fn build_prompt(input: &AiCliTagInput) -> String {
     let workspace = if input.workspace_tags.is_empty() {
         "无".to_owned()
     } else {
-        input.workspace_tags.iter().take(40).cloned().collect::<Vec<_>>().join("、")
+        input
+            .workspace_tags
+            .iter()
+            .take(40)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("、")
     };
     let body = if input.markdown.chars().count() > 6000 {
         format!("{}…", input.markdown.chars().take(6000).collect::<String>())
@@ -588,9 +634,7 @@ fn run_with_timeout(
         Err(_) => {
             #[cfg(unix)]
             {
-                let _ = Command::new("kill")
-                    .args(["-9", &pid.to_string()])
-                    .status();
+                let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
             }
             #[cfg(windows)]
             {
@@ -727,7 +771,12 @@ fn cleanup_workdir(path: &Path) {
     let _ = fs::remove_dir_all(path);
 }
 
-fn run_claude(bin: &Path, workdir: &Path, prompt: &str, model: Option<&str>) -> Result<Vec<AiCliTagSuggestion>, String> {
+fn run_claude(
+    bin: &Path,
+    workdir: &Path,
+    prompt: &str,
+    model: Option<&str>,
+) -> Result<Vec<AiCliTagSuggestion>, String> {
     let schema = tag_schema_json();
     let mut command = Command::new(bin);
     command
@@ -762,7 +811,12 @@ fn run_claude(bin: &Path, workdir: &Path, prompt: &str, model: Option<&str>) -> 
     parse_cli_output(&stdout, &stderr)
 }
 
-fn run_cursor(bin: &Path, workdir: &Path, prompt: &str, model: Option<&str>) -> Result<Vec<AiCliTagSuggestion>, String> {
+fn run_cursor(
+    bin: &Path,
+    workdir: &Path,
+    prompt: &str,
+    model: Option<&str>,
+) -> Result<Vec<AiCliTagSuggestion>, String> {
     let mut command = Command::new(bin);
     command
         .current_dir(workdir)
@@ -791,7 +845,12 @@ fn run_cursor(bin: &Path, workdir: &Path, prompt: &str, model: Option<&str>) -> 
     parse_cli_output(&stdout, &stderr)
 }
 
-fn run_codex(bin: &Path, workdir: &Path, prompt: &str, model: Option<&str>) -> Result<Vec<AiCliTagSuggestion>, String> {
+fn run_codex(
+    bin: &Path,
+    workdir: &Path,
+    prompt: &str,
+    model: Option<&str>,
+) -> Result<Vec<AiCliTagSuggestion>, String> {
     let schema_path = workdir.join("tie-tags.schema.json");
     {
         let mut file = fs::File::create(&schema_path).map_err(|error| error.to_string())?;

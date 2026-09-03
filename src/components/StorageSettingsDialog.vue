@@ -24,6 +24,7 @@ import {
   fetchAgentMcpStatus,
   loadCodexMcpPreference,
   saveCodexMcpPreference,
+  setMcpSourcePath,
   type AgentClientId,
   type AgentMcpStatus,
 } from '@/services/codex-mcp'
@@ -267,14 +268,18 @@ const codexSourceOptions = computed(() => {
 })
 const codexStatusSummary = computed(() => {
   if (!isDesktop) return '仅桌面端可用'
-  if (agentMcpStatus.value && !agentMcpStatus.value.nodeAvailable) return '需要本机 Node.js'
-  const configured = agentMcpStatus.value?.clients.filter((item) => item.configured) ?? []
+  const st = agentMcpStatus.value
+  if (st && !st.nodeAvailable) return '需要本机 Node.js'
+  if (st && !st.mcpReady) return st.mcpError ? `MCP 未就绪：${st.mcpError}` : 'MCP 未就绪'
+  const configured = st?.clients.filter((item) => item.configured) ?? []
   if (configured.length) {
     const labels = configured.map((item) => item.label).join(' · ')
     const path = configured.find((item) => item.workspacePath)?.workspacePath
     const matched = path ? fileMcpSources.value.find((source) => source.path === path) : null
     return matched ? `已接入 ${labels} · ${matched.name}` : `已接入 ${labels}`
   }
+  const configuredButInvalid = st?.clients.find((item) => item.workspacePath && item.error)
+  if (configuredButInvalid) return `${configuredButInvalid.label} 未连接：${configuredButInvalid.error}`
   return '未接入 · 点击配置'
 })
 
@@ -299,6 +304,18 @@ async function refreshCodexStatus() {
     agentMcpStatus.value = await fetchAgentMcpStatus()
   } catch {
     agentMcpStatus.value = null
+  }
+}
+
+async function pickMcpSourcePath() {
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const selected = await open({ directory: true, multiple: false, title: '选择 tie-mcp 包目录（应含 src/server.js）' })
+  if (typeof selected !== 'string') return
+  try {
+    agentMcpStatus.value = await setMcpSourcePath(selected)
+    codexError.value = ''
+  } catch (err: any) {
+    codexError.value = err?.message ?? String(err)
   }
 }
 
@@ -1065,16 +1082,21 @@ function restoreDefaultUpdateEndpoints() {
             <span>
               {{ client.label }}
               <em v-if="clientConfigured(client.id)">已接入</em>
+              <em v-else-if="agentMcpStatus?.clients.find((item) => item.id === client.id)?.workspacePath">未连接</em>
               <small>{{ client.hint }}</small>
             </span>
           </label>
         </div>
         <small v-if="agentMcpStatus && !agentMcpStatus.nodeAvailable" class="backend-error">未检测到 Node.js，请先安装并确保可在终端运行 node。</small>
+        <small v-if="agentMcpStatus && !agentMcpStatus.mcpReady && agentMcpStatus.nodeAvailable" class="backend-error">
+          {{ agentMcpStatus.mcpError || 'MCP 包未就绪' }}
+          <button type="button" class="link-button" @click="pickMcpSourcePath">手动选择 tie-mcp 目录</button>
+        </small>
         <p v-if="codexError" class="backend-error">{{ codexError }}</p>
         <div>
           <button type="button" :disabled="codexBusy" @click="codexFormOpen = false">取消</button>
           <button type="button" :disabled="!selectedMcpSource" @click="openSkillsWorkspace">管理 Skills</button>
-          <button type="submit" :disabled="codexBusy || !selectedMcpSource || !selectedClients.length || (agentMcpStatus !== null && !agentMcpStatus.nodeAvailable)">
+          <button type="submit" :disabled="codexBusy || !selectedMcpSource || !selectedClients.length || (agentMcpStatus !== null && !agentMcpStatus.mcpReady)">
             {{ codexBusy ? '正在接入…' : (anySelectedConfigured ? '更新接入' : '接入所选客户端') }}
           </button>
         </div>

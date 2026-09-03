@@ -49,7 +49,11 @@ pub fn read_mobile_credential(app: &tauri::AppHandle, provider_id: &str) -> Resu
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
-pub fn write_mobile_credential(app: &tauri::AppHandle, provider_id: &str, payload: &str) -> Result<(), String> {
+pub fn write_mobile_credential(
+    app: &tauri::AppHandle,
+    provider_id: &str,
+    payload: &str,
+) -> Result<(), String> {
     let path = mobile_credentials_dir(app)?.join(format!("{provider_id}.json"));
     fs::write(path, payload).map_err(|error| format!("无法保存 S3 密钥：{error}"))
 }

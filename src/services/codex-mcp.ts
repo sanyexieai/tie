@@ -9,11 +9,14 @@ export interface AgentClientStatus {
   configured: boolean
   workspacePath: string | null
   configPath: string
+  error: string | null
 }
 
 export interface AgentMcpStatus {
   nodeAvailable: boolean
+  mcpReady: boolean
   serverPath: string | null
+  mcpError: string | null
   clients: AgentClientStatus[]
 }
 
@@ -96,6 +99,10 @@ export async function fetchAgentMcpStatus(): Promise<AgentMcpStatus | null> {
 
 export async function configureAgentMcp(workspacePath: string, clients: AgentClientId[]): Promise<AgentMcpStatus> {
   return invoke<AgentMcpStatus>('configure_agent_mcp', { workspacePath, clients })
+}
+
+export async function setMcpSourcePath(path: string): Promise<AgentMcpStatus> {
+  return invoke<AgentMcpStatus>('set_mcp_source_path', { path })
 }
 
 /** @deprecated Prefer fetchAgentMcpStatus */

@@ -1,9 +1,9 @@
 use crate::common::{app_data_dir, load_settings, save_settings, workspace_sources};
+use tauri::AppHandle;
 use tie_storage::local::{
     io, load_file_workspace, register_storage_source, resolve_directory_path, Page, PageRevision,
     WorkspaceSettings, WorkspaceSnapshot,
 };
-use tauri::AppHandle;
 
 #[tauri::command]
 pub(crate) fn load_workspace(app: AppHandle) -> Result<WorkspaceSnapshot, String> {
@@ -182,7 +182,11 @@ pub(crate) fn save_file_page_asset(
 }
 
 #[tauri::command]
-pub(crate) fn read_file_page_asset(app: AppHandle, page: Page, asset_name: String) -> Result<Vec<u8>, String> {
+pub(crate) fn read_file_page_asset(
+    app: AppHandle,
+    page: Page,
+    asset_name: String,
+) -> Result<Vec<u8>, String> {
     let (sources, _) = workspace_sources(&app)?;
     io::read_file_page_asset(&sources, &page, &asset_name)
 }

@@ -1,15 +1,10 @@
 use crate::common::{
     app_data_dir, copy_page_assets, copy_page_history, frontmatter, load_settings, markdown_path,
     normalize_page_sources, page_asset_dir, parse_page, remove_page_assets, revision_dir,
-    sanitize_asset_name, save_settings, source_from_path, workspace_sources, Page,
-    StorageSource, WorkspaceSettings, WorkspaceSnapshot,
+    sanitize_asset_name, save_settings, source_from_path, workspace_sources, Page, StorageSource,
+    WorkspaceSettings, WorkspaceSnapshot,
 };
-use tie_storage::local::load_file_workspace;
 use crate::s3::s3_client_for_app;
-use tie_storage::s3::{
-    list_s3_object_keys, s3_asset_object, s3_asset_prefix, s3_history_object, s3_history_prefix,
-    trim_s3_history, S3Connection,
-};
 use minio::s3::{builders::ObjectContent, types::S3Api};
 use serde::Serialize;
 use std::{
@@ -19,6 +14,11 @@ use std::{
     path::{Path, PathBuf},
 };
 use tauri::AppHandle;
+use tie_storage::local::load_file_workspace;
+use tie_storage::s3::{
+    list_s3_object_keys, s3_asset_object, s3_asset_prefix, s3_history_object, s3_history_prefix,
+    trim_s3_history, S3Connection,
+};
 
 fn source_root(app: &AppHandle, storage_source_id: &str) -> Result<PathBuf, String> {
     let (sources, _) = workspace_sources(app)?;
@@ -260,8 +260,7 @@ pub(crate) fn export_page_markdown_bundle(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("assets");
-    fs::create_dir_all(&assets_dir)
-        .map_err(|error| format!("无法创建附件目录：{error}"))?;
+    fs::create_dir_all(&assets_dir).map_err(|error| format!("无法创建附件目录：{error}"))?;
     for asset in assets {
         if asset.name.contains('/')
             || asset.name.contains('\\')
@@ -485,12 +484,8 @@ pub(crate) fn open_markdown_files(
             created_source_ids.push(source.id.clone());
         }
 
-        let page_id = import_single_markdown_file(
-            Path::new(&source.path),
-            &source.id,
-            &file,
-            &created_at,
-        )?;
+        let page_id =
+            import_single_markdown_file(Path::new(&source.path), &source.id, &file, &created_at)?;
         if !opened_page_ids.contains(&page_id) {
             opened_page_ids.push(page_id);
         }
@@ -539,16 +534,17 @@ pub(crate) async fn copy_file_history_to_s3(
             .and_then(|name| name.to_str())
             .ok_or("版本文件名无效")?;
         let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-        client.put_object_content(
-            bucket.clone(),
-            s3_history_object(&page_id, revision_id),
-            ObjectContent::from(content),
-        )
-        .map_err(|error| format!("无法复制历史版本到 S3：{error}"))?
-        .build()
-        .send()
-        .await
-        .map_err(|error| format!("无法复制历史版本到 S3：{error}"))?;
+        client
+            .put_object_content(
+                bucket.clone(),
+                s3_history_object(&page_id, revision_id),
+                ObjectContent::from(content),
+            )
+            .map_err(|error| format!("无法复制历史版本到 S3：{error}"))?
+            .build()
+            .send()
+            .await
+            .map_err(|error| format!("无法复制历史版本到 S3：{error}"))?;
     }
     trim_s3_history(&client, bucket, &page_id).await
 }
@@ -582,14 +578,21 @@ pub(crate) async fn copy_s3_history_to_file(
                 .unwrap_or(&key)
                 .to_owned()
         };
-        let response = client.get_object(bucket.clone(), key)
+        let response = client
+            .get_object(bucket.clone(), key)
             .map_err(|error| format!("无法读取 S3 历史版本：{error}"))?
             .build()
             .send()
             .await
             .map_err(|error| format!("无法下载 S3 历史版本：{error}"))?;
-        let content = String::from_utf8(response.into_bytes().await.map_err(|error| format!("无法读取 S3 历史版本内容：{error}"))?.to_vec())
-            .map_err(|_| "S3 历史版本不是 UTF-8 Markdown 文件".to_owned())?;
+        let content = String::from_utf8(
+            response
+                .into_bytes()
+                .await
+                .map_err(|error| format!("无法读取 S3 历史版本内容：{error}"))?
+                .to_vec(),
+        )
+        .map_err(|_| "S3 历史版本不是 UTF-8 Markdown 文件".to_owned())?;
         fs::write(target_directory.join(format!("{revision_id}.md")), content)
             .map_err(|error| format!("无法写入本地历史版本：{error}"))?;
     }
@@ -620,16 +623,17 @@ pub(crate) async fn copy_file_assets_to_s3(
             .ok_or("附件名称无效")?;
         let sanitized = sanitize_asset_name(asset_name)?;
         let data = fs::read(&path).map_err(|error| error.to_string())?;
-        client.put_object_content(
-            bucket.clone(),
-            s3_asset_object(&page_id, &sanitized),
-            ObjectContent::from(data),
-        )
-        .map_err(|error| format!("无法复制附件到 S3：{error}"))?
-        .build()
-        .send()
-        .await
-        .map_err(|error| format!("无法复制附件到 S3：{error}"))?;
+        client
+            .put_object_content(
+                bucket.clone(),
+                s3_asset_object(&page_id, &sanitized),
+                ObjectContent::from(data),
+            )
+            .map_err(|error| format!("无法复制附件到 S3：{error}"))?
+            .build()
+            .send()
+            .await
+            .map_err(|error| format!("无法复制附件到 S3：{error}"))?;
     }
     Ok(())
 }
@@ -654,13 +658,17 @@ pub(crate) async fn copy_s3_assets_to_file(
             .strip_prefix(&s3_asset_prefix(&page_id))
             .ok_or("S3 附件路径无效")?;
         let sanitized = sanitize_asset_name(asset_name)?;
-        let response = client.get_object(bucket.clone(), key)
+        let response = client
+            .get_object(bucket.clone(), key)
             .map_err(|error| format!("无法读取 S3 附件：{error}"))?
             .build()
             .send()
             .await
             .map_err(|error| format!("无法下载 S3 附件：{error}"))?;
-        let data = response.into_bytes().await.map_err(|error| format!("无法读取 S3 附件内容：{error}"))?;
+        let data = response
+            .into_bytes()
+            .await
+            .map_err(|error| format!("无法读取 S3 附件内容：{error}"))?;
         fs::write(target_directory.join(&sanitized), data.to_vec())
             .map_err(|error| format!("无法写入本地附件：{error}"))?;
     }

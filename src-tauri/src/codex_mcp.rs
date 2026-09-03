@@ -55,13 +55,16 @@ pub struct AgentClientStatus {
     pub configured: bool,
     pub workspace_path: Option<String>,
     pub config_path: String,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentMcpStatus {
     pub node_available: bool,
+    pub mcp_ready: bool,
     pub server_path: Option<String>,
+    pub mcp_error: Option<String>,
     pub clients: Vec<AgentClientStatus>,
 }
 
@@ -150,14 +153,66 @@ fn parse_configured_workspace_toml(config: &str) -> Option<String> {
 
 fn parse_configured_workspace_json(config: &str) -> Option<String> {
     let value: Value = serde_json::from_str(config).ok()?;
-    let env = value
-        .get("mcpServers")?
-        .get(SERVER_NAME)?
-        .get("env")?;
+    let env = value.get("mcpServers")?.get(SERVER_NAME)?.get("env")?;
     env.get("TIE_WORKSPACE")
         .and_then(|item| item.as_str())
         .filter(|item| !item.is_empty())
         .map(|item| item.to_owned())
+}
+
+fn parse_server_path_toml(config: &str) -> Option<String> {
+    let mut in_server = false;
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[mcp_servers.tie]" {
+            in_server = true;
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_server = false;
+            continue;
+        }
+        if in_server && trimmed.starts_with("args") {
+            let (_, raw) = trimmed.split_once('=')?;
+            let args: Vec<String> = serde_json::from_str(raw.trim()).ok()?;
+            return args.first().cloned();
+        }
+    }
+    None
+}
+
+fn parse_server_path_json(config: &str) -> Option<String> {
+    serde_json::from_str::<Value>(config)
+        .ok()?
+        .get("mcpServers")?
+        .get(SERVER_NAME)?
+        .get("args")?
+        .as_array()?
+        .first()?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn codex_approval_configured(config: &str) -> bool {
+    let mut in_server = false;
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[mcp_servers.tie]" {
+            in_server = true;
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_server = false;
+            continue;
+        }
+        if in_server && trimmed.starts_with("default_tools_approval_mode") {
+            return trimmed
+                .split_once('=')
+                .map(|(_, value)| value.trim().trim_matches('"') == "approve")
+                .unwrap_or(false);
+        }
+    }
+    false
 }
 
 fn strip_mcp_server_block(config: &str) -> String {
@@ -197,7 +252,7 @@ fn strip_mcp_server_block(config: &str) -> String {
 
 fn build_mcp_block(server_path: &Path, workspace_path: &Path) -> String {
     format!(
-        "[mcp_servers.tie]\ncommand = \"node\"\nargs = [{}]\n\n[mcp_servers.tie.env]\nTIE_WORKSPACE = {}\n",
+        "[mcp_servers.tie]\ncommand = \"node\"\nargs = [{}]\ndefault_tools_approval_mode = \"approve\"\n\n[mcp_servers.tie.env]\nTIE_WORKSPACE = {}\n",
         escape_toml_string(&server_path.to_string_lossy()),
         escape_toml_string(&workspace_path.to_string_lossy())
     )
@@ -234,11 +289,7 @@ fn backup_file(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn write_codex_config(
-    app: &AppHandle,
-    server_path: &Path,
-    workspace: &Path,
-) -> Result<(), String> {
+fn write_codex_config(app: &AppHandle, server_path: &Path, workspace: &Path) -> Result<(), String> {
     let config_path = codex_config_path(app)?;
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -274,9 +325,8 @@ fn upsert_json_mcp_config(
         if existing.trim().is_empty() {
             json!({})
         } else {
-            serde_json::from_str(&existing).map_err(|error| {
-                format!("无法解析 {}: {error}", config_path.display())
-            })?
+            serde_json::from_str(&existing)
+                .map_err(|error| format!("无法解析 {}: {error}", config_path.display()))?
         }
     } else {
         json!({})
@@ -331,33 +381,90 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn mcp_source_override_path(app: &AppHandle) -> Option<PathBuf> {
+    let file = app.path().app_data_dir().ok()?.join("mcp-source-override");
+    if file.is_file() {
+        let content = fs::read_to_string(&file).ok()?;
+        let path = PathBuf::from(content.trim());
+        if path.join("src").join("server.js").is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn save_mcp_source_override(app: &AppHandle, path: &Path) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::write(
+        dir.join("mcp-source-override"),
+        path.to_string_lossy().as_bytes(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn ancestors_scan(start: &Path) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+    let mut dir = start.to_path_buf();
+    for _ in 0..10 {
+        let candidate = dir.join("packages").join("tie-mcp");
+        if candidate.join("src").join("server.js").is_file() {
+            results.push(candidate);
+            break;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    results
+}
+
 fn candidate_mcp_sources(app: &AppHandle) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+
+    // User override takes priority
+    if let Some(path) = mcp_source_override_path(app) {
+        candidates.push(path);
+    }
+
     if let Ok(resource) = app.path().resource_dir() {
         candidates.push(resource.join("tie-mcp"));
         candidates.push(resource.join("packages").join("tie-mcp"));
     }
+
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     candidates.push(manifest_dir.join("..").join("packages").join("tie-mcp"));
+    // Ancestor scan from CARGO_MANIFEST_DIR
+    candidates.extend(ancestors_scan(&manifest_dir));
+
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("packages").join("tie-mcp"));
+        candidates.extend(ancestors_scan(&cwd));
     }
+
     candidates
 }
 
 fn resolve_mcp_package_source(app: &AppHandle) -> Result<PathBuf, String> {
-    for candidate in candidate_mcp_sources(app) {
+    let candidates = candidate_mcp_sources(app);
+    for candidate in &candidates {
         let server = candidate.join("src").join("server.js");
         if server.is_file() {
-            return Ok(candidate);
+            return Ok(candidate.clone());
         }
     }
-    Err("找不到 tie-mcp 包。请确认仓库含 packages/tie-mcp，或重新安装应用。".into())
+    let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
+    Err(format!(
+        "找不到 tie-mcp 包。已尝试路径：{}。请确认仓库含 packages/tie-mcp，或重新安装应用。",
+        tried.join(" ; ")
+    ))
 }
 
 fn ensure_mcp_runtime(app: &AppHandle) -> Result<PathBuf, String> {
     if !node_available() {
-        return Err("未检测到 Node.js。接入 Agent MCP 需要本机已安装 node，并在 PATH 中可用。".into());
+        return Err(
+            "未检测到 Node.js。接入 Agent MCP 需要本机已安装 node，并在 PATH 中可用。".into(),
+        );
     }
     let source = resolve_mcp_package_source(app)?;
     let target = installed_mcp_dir(app)?;
@@ -393,9 +500,7 @@ fn ensure_mcp_runtime(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn validate_workspace(path: &Path) -> Result<PathBuf, String> {
-    let root = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
+    let root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let pages = root.join("pages");
     if !pages.is_dir() {
         return Err(format!(
@@ -406,17 +511,46 @@ fn validate_workspace(path: &Path) -> Result<PathBuf, String> {
     Ok(root)
 }
 
-fn client_status(app: &AppHandle, client: AgentClient) -> Result<AgentClientStatus, String> {
+fn client_status(
+    app: &AppHandle,
+    client: AgentClient,
+    node: bool,
+) -> Result<AgentClientStatus, String> {
     let config_path = config_path_for(app, client)?;
-    let (configured, workspace_path) = if config_path.is_file() {
+    let (configured, workspace_path, error) = if config_path.is_file() {
         let content = fs::read_to_string(&config_path).unwrap_or_default();
         let workspace = match client {
             AgentClient::Codex => parse_configured_workspace_toml(&content),
             AgentClient::Cursor | AgentClient::Claude => parse_configured_workspace_json(&content),
         };
-        (workspace.is_some(), workspace)
+        let server_path = match client {
+            AgentClient::Codex => parse_server_path_toml(&content),
+            AgentClient::Cursor | AgentClient::Claude => parse_server_path_json(&content),
+        };
+        let error = if !node {
+            Some("未检测到 Node.js".into())
+        } else if workspace.is_none() {
+            Some("配置中缺少 TIE_WORKSPACE".into())
+        } else if !workspace
+            .as_ref()
+            .map(|path| Path::new(path).join("pages").is_dir())
+            .unwrap_or(false)
+        {
+            Some("配置的 Tie 工作区无效".into())
+        } else if !server_path
+            .as_ref()
+            .map(|path| Path::new(path).is_file())
+            .unwrap_or(false)
+        {
+            Some("配置的 tie-mcp 服务入口不存在".into())
+        } else if client == AgentClient::Codex && !codex_approval_configured(&content) {
+            Some("Codex 配置缺少 MCP 工具审批策略".into())
+        } else {
+            None
+        };
+        (error.is_none(), workspace, error)
     } else {
-        (false, None)
+        (false, None, Some("尚未写入客户端配置".into()))
     };
 
     Ok(AgentClientStatus {
@@ -425,32 +559,43 @@ fn client_status(app: &AppHandle, client: AgentClient) -> Result<AgentClientStat
         configured,
         workspace_path,
         config_path: config_path.to_string_lossy().into_owned(),
+        error,
     })
 }
 
 fn status_for(app: &AppHandle) -> Result<AgentMcpStatus, String> {
+    let node = node_available();
     let server = installed_mcp_dir(app)
         .ok()
         .map(|dir| dir.join("src").join("server.js"))
         .filter(|path| path.is_file());
 
+    let source_ok = resolve_mcp_package_source(app).is_ok();
+    let mcp_ready = node && (server.is_some() || source_ok);
+    let mcp_error = if !node {
+        Some("未检测到 Node.js".into())
+    } else if !source_ok && server.is_none() {
+        Some(resolve_mcp_package_source(app).unwrap_err())
+    } else {
+        None
+    };
+
     let mut clients = Vec::new();
     for client in AgentClient::all() {
-        clients.push(client_status(app, client)?);
+        clients.push(client_status(app, client, node)?);
     }
 
     Ok(AgentMcpStatus {
-        node_available: node_available(),
+        node_available: node,
+        mcp_ready,
         server_path: server.map(|path| path.to_string_lossy().into_owned()),
+        mcp_error,
         clients,
     })
 }
 
 fn to_codex_status(status: AgentMcpStatus) -> CodexMcpStatus {
-    let codex = status
-        .clients
-        .iter()
-        .find(|item| item.id == "codex");
+    let codex = status.clients.iter().find(|item| item.id == "codex");
     CodexMcpStatus {
         configured: codex.map(|item| item.configured).unwrap_or(false),
         workspace_path: codex.and_then(|item| item.workspace_path.clone()),
@@ -613,12 +758,28 @@ pub fn codex_mcp_status(app: AppHandle) -> Result<CodexMcpStatus, String> {
 }
 
 #[tauri::command]
-pub fn configure_codex_mcp(app: AppHandle, workspace_path: String) -> Result<CodexMcpStatus, String> {
+pub fn configure_codex_mcp(
+    app: AppHandle,
+    workspace_path: String,
+) -> Result<CodexMcpStatus, String> {
     Ok(to_codex_status(configure_for_clients(
         &app,
         &workspace_path,
         &["codex".to_owned()],
     )?))
+}
+
+#[tauri::command]
+pub fn set_mcp_source_path(app: AppHandle, path: String) -> Result<AgentMcpStatus, String> {
+    let p = PathBuf::from(path.trim());
+    if !p.join("src").join("server.js").is_file() {
+        return Err(format!(
+            "所选路径无效：未找到 {}/src/server.js",
+            p.display()
+        ));
+    }
+    save_mcp_source_override(&app, &p)?;
+    status_for(&app)
 }
 
 fn chrono_like_stamp() -> String {

@@ -112,6 +112,8 @@ pub fn run() {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             codex_mcp::configure_agent_mcp,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            codex_mcp::set_mcp_source_path,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             codex_mcp::codex_mcp_status,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             codex_mcp::configure_codex_mcp,
