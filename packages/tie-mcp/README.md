@@ -1,8 +1,8 @@
 # @tie/mcp
 
-本地优先的 Tie MCP Server：让 Codex（或其他 MCP 客户端）读写 **同一份** 工作区 `pages/*.md`，**不依赖** Tie Backend。
+本地优先的 Tie MCP Server：让 Codex（或其他 MCP 客户端）读写 **同一份** 工作区 `pages/*.md` 与 `.tie/files/`，**不依赖** Tie Backend。
 
-不影响桌面端：本包独立，不改 `src/` / `src-tauri/` 运行时逻辑。
+桌面端负责渲染 `tie://file/`（副本/外链不同样式）并用系统应用打开；登记与整理以 MCP/Skill 为主入口。
 
 ## 能力
 
@@ -13,8 +13,14 @@
 | `tie_write` | 安全写入（自动 frontmatter；更新前写入 `.tie/history`） |
 | `tie_related` | 出链 / 入链 / 子页 / 同标签 |
 | `tie_list_recent` | 最近更新 |
+| `tie_file_ingest` | 登记外部文件：`copy` 导入副本 / `link` 外链；返回元数据与 `tie://file/{id}` |
+| `tie_file_get` | 按 fileId 读文件资源元数据 |
+| `tie_file_list` | 列出已登记文件资源 |
+| `tie_file_open_hint` | 返回可打开路径（不替用户打开） |
 
 记忆类型 `kind`：`decision` | `bug` | `preference` | `note`（自动加 `memory` 等标签）。
+
+文件资源落在工作区 `.tie/files/`（与页面图片附件 `.tie/assets/` 分开）。正文链接统一用 `tie://file/{id}`；桌面端按 `mode` 区分副本/外链样式。
 
 ## 准备
 
@@ -77,10 +83,13 @@ npm run mcp:setup -- --workspace /path/to/workspace --dry-run
 [mcp_servers.tie]
 command = "node"
 args = ["/绝对路径/tie/packages/tie-mcp/src/server.js"]
+default_tools_approval_mode = "approve"
 
 [mcp_servers.tie.env]
 TIE_WORKSPACE = "/绝对路径/你的工作区"
 ```
+
+> 桌面发布包会把 `tie-mcp` 打进应用资源目录（`$RESOURCE/tie-mcp`）。接入时会复制到应用数据目录并 `npm install`；本机仍需有 Node.js。
 
 或：
 
@@ -135,6 +144,7 @@ TIE_WORKSPACE=/path/to/workspace npm run mcp
 
 ## 安全约定
 
-- 只读写指定工作区下的 `pages/` 与 `.tie/history/`
+- 只读写指定工作区下的 `pages/`、`.tie/history/`、`.tie/files/`
 - 禁止 Agent 手写裸 frontmatter；一律走 `tie_write`
+- 外部文件必须走 `tie_file_ingest`；不要把二进制塞进 Markdown
 - 不要把密钥、token 写入知识库页面

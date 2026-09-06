@@ -1,7 +1,14 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import LocalGraphPanel from '@/components/LocalGraphPanel.vue'
+import {
+  collectFileIdsFromMarkdown,
+  fileLinkLabel,
+  listWorkspaceFiles,
+  openWorkspaceFile,
+  type WorkspaceFileResource,
+} from '@/services/files'
 
 const store = useWorkspaceStore()
 const tab = ref<'outline' | 'properties' | 'links' | 'graph'>('outline')
@@ -18,6 +25,8 @@ const childPages = computed(() => {
     .sort((a, b) => a.sortKey - b.sortKey || a.title.localeCompare(b.title, 'zh-CN'))
 })
 const linkingMentionId = ref<string | null>(null)
+const fileResources = ref<WorkspaceFileResource[]>([])
+const openingFileId = ref<string | null>(null)
 const storageLabel = computed(() => {
   const source = store.allSources.find((item) => item.id === store.activePage?.storageSourceId)
   if (!source) return '未知存储源'
@@ -25,6 +34,63 @@ const storageLabel = computed(() => {
   if (source.kind === 's3') return `S3 · ${source.name}`
   return source.kind === 'smb' ? `SMB · ${source.name}` : `本地 · ${source.name}`
 })
+
+const filesWorkspaceRoot = computed(() => {
+  const page = store.activePage
+  const bound = page ? store.allSources.find((item) => item.id === page.storageSourceId) : null
+  if (bound && (bound.kind === 'local' || bound.kind === 'smb') && bound.path) return bound.path
+  return store.allSources.find((item) => (item.kind === 'local' || item.kind === 'smb') && item.path)?.path ?? null
+})
+
+const outgoingFiles = computed(() => {
+  const page = store.activePage
+  if (!page) return []
+  const ids = collectFileIdsFromMarkdown(page.markdown)
+  return ids.map((id) => {
+    const resource = fileResources.value.find((item) => item.id === id)
+    return {
+      id,
+      title: resource?.title ?? id,
+      mode: resource?.mode ?? null,
+      exists: resource?.exists ?? false,
+    }
+  })
+})
+
+async function refreshFileResources() {
+  const root = filesWorkspaceRoot.value
+  if (!root) {
+    fileResources.value = []
+    return
+  }
+  try {
+    fileResources.value = await listWorkspaceFiles(root)
+  } catch {
+    fileResources.value = []
+  }
+}
+
+watch(
+  [() => store.activePage?.id, () => store.activePage?.markdown, filesWorkspaceRoot],
+  () => { void refreshFileResources() },
+  { immediate: true },
+)
+
+async function openOutgoingFile(fileId: string) {
+  const root = filesWorkspaceRoot.value
+  if (!root) {
+    window.alert('当前页面没有可用的本地/SMB 工作区，无法打开文件资源。')
+    return
+  }
+  openingFileId.value = fileId
+  try {
+    await openWorkspaceFile(root, fileId)
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : '无法打开文件资源')
+  } finally {
+    openingFileId.value = null
+  }
+}
 
 async function linkMention(sourcePageId: string) {
   const target = store.activePage
@@ -62,6 +128,7 @@ async function unlinkPage(pageId: string) {
       <div><span>标签</span><strong>{{ store.activePage?.tags.length ? store.activePage.tags.map((tag) => `#${tag}`).join(' ') : '无' }}</strong></div>
       <div><span>存储</span><strong>{{ storageLabel }}</strong></div>
       <div><span>出链</span><strong>{{ outgoing.length }}</strong></div>
+      <div><span>文件</span><strong>{{ outgoingFiles.length }}</strong></div>
       <div><span>回链</span><strong>{{ incoming.length }}</strong></div>
     </div>
     <div v-else-if="tab === 'links'" class="context-content link-panel">
@@ -76,6 +143,16 @@ async function unlinkPage(pageId: string) {
         <div v-for="page in outgoing" :key="`out-${page.id}`" class="mention-row">
           <button @click="store.openPage(page.id)"><span>↗</span>{{ page.title }}</button>
           <button class="unlink-action" title="移除正文中的链接" @click="unlinkPage(page.id)">×</button>
+        </div>
+      </section>
+      <section>
+        <h3>文件资源</h3>
+        <p v-if="!outgoingFiles.length" class="muted">正文中的 tie://file/… 会显示在这里（副本 / 外链样式不同）。</p>
+        <div v-for="file in outgoingFiles" :key="`file-${file.id}`" class="mention-row file-link-row">
+          <button :disabled="openingFileId === file.id" :title="file.exists === false ? '路径不可用' : file.id" @click="openOutgoingFile(file.id)">
+            <span>📄</span>{{ file.title }}
+          </button>
+          <em class="file-mode-badge" :class="file.mode === 'copy' || file.mode === 'link' ? file.mode : undefined">{{ fileLinkLabel(file.mode) }}</em>
         </div>
       </section>
       <section>

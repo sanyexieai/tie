@@ -95,3 +95,25 @@ test('writePage sets parentId from parentTitle without rewriting parent markdown
   assert.equal(child.page.parentId, hub.page.id)
   assert.equal(ws.getById(hub.page.id).markdown, before)
 })
+
+test('writePage accepts JSON-wrapped markdown payload and restores markdown body', () => {
+  const root = makeWorkspace()
+  const ws = createWorkspace(root)
+  const payload = JSON.stringify({
+    id: 'pg_xxx',
+    title: 'JSON 包裹测试',
+    markdown: '# JSON 包裹测试\n\n这段应该被提取为正文。\n\n## 小节\n内容',
+  })
+
+  const created = ws.writePage({
+    title: 'JSON 包裹测试',
+    markdown: payload,
+  })
+
+  const page = ws.getById(created.page.id)
+  assert.ok(page)
+  assert.equal(page.title, 'JSON 包裹测试')
+  assert.ok(page.markdown.includes('这段应该被提取为正文。'))
+  assert.ok(!page.markdown.includes('\\"title\\"'))
+  assert.ok(!page.markdown.includes('"id":'))
+})

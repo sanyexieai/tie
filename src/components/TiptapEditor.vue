@@ -21,6 +21,7 @@ import { openUrl } from '@tauri-apps/plugin-opener'
 import type { Page, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { canStorePageAssets, embedImageFile, inlineImageSrcToFile, isImageFile, normalizeImageFile, parseAssetUrl, resolveAssetDisplayUrl, shouldHandleImagePaste, uploadPastedImage } from '@/services/attachments'
+import { cachedFileMode, fileLinkClass, listWorkspaceFiles, openWorkspaceFile, parseFileUrl } from '@/services/files'
 
 const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page> }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
@@ -54,6 +55,51 @@ interface SlashCommand {
 
 function activePage() {
   return props.pages.find((page) => page.id === props.pageId) ?? null
+}
+
+function filesWorkspaceRoot() {
+  const page = activePage()
+  const bound = page ? props.sources.find((item) => item.id === page.storageSourceId) : null
+  if (bound && (bound.kind === 'local' || bound.kind === 'smb') && bound.path) return bound.path
+  return props.sources.find((item) => (item.kind === 'local' || item.kind === 'smb') && item.path)?.path ?? null
+}
+
+async function ensureWorkspaceFilesLoaded() {
+  const root = filesWorkspaceRoot()
+  if (!root) return
+  try {
+    await listWorkspaceFiles(root)
+  } catch {
+    // ignore missing registry
+  }
+}
+
+function decorateFileLinks() {
+  const root = filesWorkspaceRoot()
+  const dom = editor.value?.view.dom
+  if (!dom) return
+  for (const anchor of dom.querySelectorAll<HTMLAnchorElement>('a[href^="tie://file/"]')) {
+    const parsed = parseFileUrl(anchor.getAttribute('href') ?? '')
+    const mode = parsed ? cachedFileMode(root, parsed.fileId) : null
+    anchor.classList.remove('file-link', 'file-link-copy', 'file-link-link')
+    for (const token of fileLinkClass(mode).split(/\s+/)) {
+      if (token) anchor.classList.add(token)
+    }
+    if (mode === 'copy' || mode === 'link') {
+      anchor.dataset.fileMode = mode
+    } else {
+      delete anchor.dataset.fileMode
+    }
+  }
+}
+
+let decorateFilesTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleDecorateFileLinks() {
+  if (decorateFilesTimer) clearTimeout(decorateFilesTimer)
+  decorateFilesTimer = setTimeout(() => {
+    decorateFilesTimer = null
+    void ensureWorkspaceFilesLoaded().then(() => decorateFileLinks())
+  }, 40)
 }
 
 function markdownForImageAttrs(attrs: { src?: string | null; alt?: string | null; title?: string | null }) {
@@ -351,7 +397,7 @@ function stripAssetAutolinks(currentEditor: Editor) {
     const href = String(mark?.attrs.href ?? '')
     const text = node.text ?? ''
     const isAssetLink = href.startsWith('tie://asset/')
-      || href.startsWith('tie://') && !href.startsWith('tie://page/')
+      || (href.startsWith('tie://') && !href.startsWith('tie://page/') && !href.startsWith('tie://file/'))
       || text.includes('tie://asset/')
     if (!mark || !isAssetLink) return
     tr.removeMark(pos, pos + node.nodeSize, linkType)
@@ -494,6 +540,25 @@ function openInternalLink(event: MouseEvent) {
   return true
 }
 
+function openFileLink(event: MouseEvent) {
+  const target = event.target
+  if (!(target instanceof Element)) return false
+  const anchor = target.closest<HTMLAnchorElement>('a[href^="tie://file/"]')
+  const href = anchor?.getAttribute('href')
+  const parsed = href ? parseFileUrl(href) : null
+  if (!parsed) return false
+  event.preventDefault()
+  const root = filesWorkspaceRoot()
+  if (!root) {
+    window.alert('当前页面没有可用的本地/SMB 工作区，无法打开文件资源。')
+    return true
+  }
+  void openWorkspaceFile(root, parsed.fileId).catch((error) => {
+    window.alert(error instanceof Error ? error.message : '无法打开文件资源')
+  })
+  return true
+}
+
 function openExternalLink(event: MouseEvent) {
   const target = event.target
   if (!(target instanceof Element)) return false
@@ -527,7 +592,7 @@ function focusNextWritingLine(event: MouseEvent) {
 }
 
 function handleEditorClick(event: MouseEvent) {
-  const handled = openInternalLink(event) || openExternalLink(event) || focusNextWritingLine(event)
+  const handled = openInternalLink(event) || openFileLink(event) || openExternalLink(event) || focusNextWritingLine(event)
   if (handled) event.stopPropagation()
   return handled
 }
@@ -552,6 +617,7 @@ const editor = useEditor({
         // Only wiki links use tie:// — never autolink asset URLs (blocks mid-URL caret).
         isAllowedUri: (url, { defaultValidate }) => {
           if (url.startsWith('tie://page/')) return true
+          if (url.startsWith('tie://file/')) return true
           if (url.startsWith('tie://')) return false
           return defaultValidate(url)
         },
@@ -653,11 +719,13 @@ const editor = useEditor({
     syncingExternalValue = true
     hydrateAssetMarkdownImages(currentEditor)
     syncingExternalValue = false
+    scheduleDecorateFileLinks()
   },
   onUpdate: ({ editor: currentEditor }) => {
     if (!syncingExternalValue && !rewritingInlineImages) emit('update:modelValue', currentEditor.getMarkdown())
     updateMenus(currentEditor)
     void rewriteInlineImageNodes(currentEditor)
+    scheduleDecorateFileLinks()
   },
   onSelectionUpdate: ({ editor: currentEditor }) => updateMenus(currentEditor),
 })
@@ -677,12 +745,16 @@ watch(() => props.modelValue, (markdown) => {
     // ignore invalid selection after content swap
   }
   syncingExternalValue = false
+  scheduleDecorateFileLinks()
 })
 
 watch(() => props.pages.map((page) => `${page.id}:${page.storageSourceId}:${(page.storageSourceIds ?? []).join(',')}`).join('|'), () => {
   refreshAssetImages()
+  scheduleDecorateFileLinks()
 })
 watch(() => props.spellcheck, (enabled) => editor.value?.view.dom.setAttribute('spellcheck', String(enabled)))
+watch(() => props.pageId, () => scheduleDecorateFileLinks())
+watch(() => props.sources.map((source) => `${source.id}:${source.path ?? ''}`).join('|'), () => scheduleDecorateFileLinks())
 
 function refreshAssetImages() {
   const root = editor.value?.view.dom
@@ -811,7 +883,10 @@ function findText(query: string, direction = 1) {
   return { count: matches.length, index: index + 1 }
 }
 
-onBeforeUnmount(() => editor.value?.destroy())
+onBeforeUnmount(() => {
+  if (decorateFilesTimer) clearTimeout(decorateFilesTimer)
+  editor.value?.destroy()
+})
 
 defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
 </script>

@@ -1,9 +1,148 @@
 use crate::common::{app_data_dir, load_settings, save_settings, workspace_sources};
+use serde::Serialize;
+use serde_json::Value;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use tauri::AppHandle;
 use tie_storage::local::{
     io, load_file_workspace, register_storage_source, resolve_directory_path, Page, PageRevision,
     WorkspaceSettings, WorkspaceSnapshot,
 };
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileResource {
+    pub id: String,
+    pub title: String,
+    pub mode: String,
+    pub ext: String,
+    pub mime: String,
+    pub size: u64,
+    pub source_path: String,
+    pub stored_path: String,
+    pub open_path: String,
+    pub exists: bool,
+    pub updated_at: String,
+}
+
+fn files_index_path(root: &Path) -> PathBuf {
+    root.join(".tie").join("files").join("index.json")
+}
+
+fn files_meta_path(root: &Path, file_id: &str) -> PathBuf {
+    root.join(".tie").join("files").join(file_id).join("meta.json")
+}
+
+fn read_json_file(path: &Path) -> Result<Value, String> {
+    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&raw).map_err(|error| error.to_string())
+}
+
+fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource> {
+    let id = meta.get("id")?.as_str()?.to_owned();
+    let title = meta
+        .get("title")
+        .and_then(|item| item.as_str())
+        .unwrap_or(&id)
+        .to_owned();
+    let mode = meta.get("mode")?.as_str()?.to_owned();
+    let ext = meta
+        .get("ext")
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let mime = meta
+        .get("mime")
+        .and_then(|item| item.as_str())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let size = meta.get("size").and_then(|item| item.as_u64()).unwrap_or(0);
+    let source_path = meta
+        .get("sourcePath")
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let stored_path = meta
+        .get("storedPath")
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let updated_at = meta
+        .get("updatedAt")
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let open_path = if mode == "copy" {
+        root.join(stored_path.replace('\\', "/")).to_string_lossy().into_owned()
+    } else {
+        stored_path.clone()
+    };
+    let exists = Path::new(&open_path).is_file();
+    Some(WorkspaceFileResource {
+        id,
+        title,
+        mode,
+        ext,
+        mime,
+        size,
+        source_path,
+        stored_path,
+        open_path,
+        exists,
+        updated_at,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn list_workspace_files(root: String) -> Result<Vec<WorkspaceFileResource>, String> {
+    let root_path = PathBuf::from(root.trim());
+    let index = files_index_path(&root_path);
+    if !index.is_file() {
+        return Ok(Vec::new());
+    }
+    let value = read_json_file(&index)?;
+    let entries = value.as_array().cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    for entry in entries {
+        let id = entry
+            .get("id")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default();
+        if id.is_empty() {
+            continue;
+        }
+        let meta_path = files_meta_path(&root_path, id);
+        if !meta_path.is_file() {
+            continue;
+        }
+        if let Ok(meta) = read_json_file(&meta_path) {
+            if let Some(resource) = resource_from_meta(&root_path, &meta) {
+                out.push(resource);
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub(crate) fn resolve_workspace_file(
+    root: String,
+    file_id: String,
+) -> Result<WorkspaceFileResource, String> {
+    let root_path = PathBuf::from(root.trim());
+    let id = file_id.trim();
+    if id.is_empty() {
+        return Err("fileId 无效".into());
+    }
+    let meta_path = files_meta_path(&root_path, id);
+    if !meta_path.is_file() {
+        return Err(format!("文件资源不存在：{id}"));
+    }
+    let meta = read_json_file(&meta_path)?;
+    resource_from_meta(&root_path, &meta).ok_or_else(|| format!("文件资源元数据无效：{id}"))
+}
 
 #[tauri::command]
 pub(crate) fn load_workspace(app: AppHandle) -> Result<WorkspaceSnapshot, String> {

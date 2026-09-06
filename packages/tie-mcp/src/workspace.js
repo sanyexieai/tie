@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { createFileRegistry } from './files.js'
 import { ensureTitleMarkdown, frontmatter, newPageId, parsePage } from './page-format.js'
 
 const LINK_TITLE_RE = /\[\[([^\]]+)\]\]/g
@@ -7,6 +8,27 @@ const LINK_ID_RE = /tie:\/\/page\/([A-Za-z0-9_-]+)/g
 
 function nowIso() {
   return new Date().toISOString()
+}
+
+function stripCodeFence(text) {
+  const trimmed = String(text || '').trim()
+  const match = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  return match ? match[1] : trimmed
+}
+
+function normalizeMarkdownInput(raw) {
+  const text = String(raw ?? '')
+  const candidate = stripCodeFence(text)
+  if (!candidate.startsWith('{') || !candidate.includes('"markdown"')) return text
+  try {
+    const parsed = JSON.parse(candidate)
+    if (parsed && typeof parsed === 'object' && typeof parsed.markdown === 'string') {
+      return parsed.markdown
+    }
+    return text
+  } catch {
+    return text
+  }
 }
 
 function resolveWorkspaceRoot(raw) {
@@ -25,6 +47,7 @@ export function createWorkspace(workspacePath) {
   const root = resolveWorkspaceRoot(workspacePath)
   const pagesDir = path.join(root, 'pages')
   const historyRoot = path.join(root, '.tie', 'history')
+  const files = createFileRegistry(root)
   const storageSourceId = process.env.TIE_STORAGE_SOURCE_ID || ''
 
   function listPageFiles() {
@@ -206,7 +229,7 @@ export function createWorkspace(workspacePath) {
 
     const markdown = ensureTitleMarkdown(
       title || existing?.title || '无标题',
-      input.markdown ?? input.body ?? existing?.markdown ?? '',
+      normalizeMarkdownInput(input.markdown ?? input.body ?? existing?.markdown ?? ''),
     )
 
     const page = {
@@ -245,6 +268,7 @@ export function createWorkspace(workspacePath) {
   return {
     root,
     pagesDir,
+    files,
     loadAll,
     getById,
     findByTitle,

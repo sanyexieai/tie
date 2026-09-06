@@ -102,11 +102,24 @@ function savePanelWidths() {
 }
 
 function maxSidebarForViewport() {
-  return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, window.innerWidth - contextWidth.value - 360))
+  // 右侧进入抽屉后不再占列宽；仍为侧栏+主区预留最小编辑区
+  const reserved = usesContextDrawer.value ? 320 : contextWidth.value + 320
+  return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, window.innerWidth - reserved))
 }
 
 function maxContextForViewport() {
-  return Math.min(CONTEXT_MAX, Math.max(CONTEXT_MIN, window.innerWidth - sidebarWidth.value - 360))
+  return Math.min(CONTEXT_MAX, Math.max(CONTEXT_MIN, window.innerWidth - sidebarWidth.value - 320))
+}
+
+function clampPanelsToViewport() {
+  if (usesMobileShell.value) return
+  const nextSidebar = clamp(sidebarWidth.value, SIDEBAR_MIN, maxSidebarForViewport())
+  const nextContext = clamp(contextWidth.value, CONTEXT_MIN, maxContextForViewport())
+  if (nextSidebar !== sidebarWidth.value || nextContext !== contextWidth.value) {
+    sidebarWidth.value = nextSidebar
+    contextWidth.value = nextContext
+    savePanelWidths()
+  }
 }
 
 function startResize(panel: 'sidebar' | 'context', event: PointerEvent) {
@@ -237,12 +250,14 @@ function syncMobileLayout() {
   isMobileLayout.value = mobile
   if (mobile) sidebarCollapsed.value = true
   else if (wasMobile) sidebarCollapsed.value = false
+  clampPanelsToViewport()
 }
 
 function syncContextDrawer() {
   const drawer = (contextDrawerQuery?.matches ?? false) || isMobileClient.value || usesMobileUi.value
   usesContextDrawer.value = drawer
   if (!usesContextDrawer.value) mobileContextOpen.value = false
+  clampPanelsToViewport()
 }
 function toggleFocusMode() {
   focusMode.value = !focusMode.value
@@ -274,8 +289,10 @@ onMounted(async () => {
   contextDrawerQuery = window.matchMedia('(max-width: 1080px)')
   syncMobileLayout()
   syncContextDrawer()
+  clampPanelsToViewport()
   mobileLayoutQuery.addEventListener('change', syncMobileLayout)
   contextDrawerQuery.addEventListener('change', syncContextDrawer)
+  window.addEventListener('resize', clampPanelsToViewport)
   window.addEventListener('keydown', onShortcut)
   window.addEventListener('tie:toggle-focus-mode', toggleFocusMode)
   await initPlatform()
@@ -310,6 +327,7 @@ onBeforeUnmount(() => {
   document.body.classList.remove('panel-resizing')
   mobileLayoutQuery?.removeEventListener('change', syncMobileLayout)
   contextDrawerQuery?.removeEventListener('change', syncContextDrawer)
+  window.removeEventListener('resize', clampPanelsToViewport)
   window.removeEventListener('keydown', onShortcut)
   window.removeEventListener('tie:toggle-focus-mode', toggleFocusMode)
   uninstallMobileBackHandler()

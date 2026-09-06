@@ -1190,6 +1190,69 @@ body.storage-source-reordering * { cursor: grabbing !important; user-select: non
 .tiptap-content code { padding: .12em .3em; border-radius: 4px; background: var(--bg-hover); color: var(--accent-strong); font: .88em ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 .tiptap-content pre code { padding: 0; background: transparent; color: inherit; }
 .tiptap-content a { color: #7f9bc4; text-decoration: underline; text-decoration-color: color-mix(in srgb, #7f9bc4 55%, transparent); text-underline-offset: 2px; cursor: pointer; }
+.tiptap-content a.file-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  margin: 0 1px;
+  border-radius: 999px;
+  padding: 1px 9px 1px 8px;
+  text-decoration: none;
+  font-size: 0.92em;
+  font-weight: 620;
+  line-height: 1.55;
+  vertical-align: baseline;
+}
+.tiptap-content a.file-link::before {
+  content: attr(data-file-mode);
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+.tiptap-content a.file-link-copy {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.tiptap-content a.file-link-copy::before { content: '副本'; color: var(--accent-strong); opacity: 0.85; }
+.tiptap-content a.file-link-link {
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+}
+.tiptap-content a.file-link-link::before { content: '外链'; color: var(--text-subtle); }
+.tiptap-content a.file-link:not(.file-link-copy):not(.file-link-link)::before { content: '文件'; color: var(--text-faint); }
+.file-link-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.file-link-row > button:first-child {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+.file-mode-badge {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 16px;
+}
+.file-mode-badge.copy {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+.file-mode-badge.link {
+  color: var(--text-muted);
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+}
 .tiptap-content table { width: 100%; margin: 1.2em 0; border-collapse: collapse; }
 .tiptap-content th, .tiptap-content td { min-width: 90px; padding: 7px 10px; border: 1px solid var(--border-strong); text-align: left; vertical-align: top; }
 .tiptap-content th { background: var(--bg-muted); font-weight: 650; }
@@ -1548,14 +1611,24 @@ body.storage-source-reordering * { cursor: grabbing !important; user-select: non
   pointer-events: none;
 }
 @media (max-width: 1080px) {
-  .app-shell:not(.sidebar-collapsed):not(.focus-mode) { grid-template-columns: var(--sidebar-width) minmax(0, 1fr); grid-template-areas: "sidebar main"; }
-  .app-shell.sidebar-collapsed:not(.focus-mode),
-  .app-shell.context-collapsed:not(.focus-mode),
-  .app-shell.sidebar-collapsed.context-collapsed:not(.focus-mode) { grid-template-columns: minmax(0, 1fr); grid-template-areas: "main"; }
+  /* 右侧改为抽屉后，只按侧栏是否折叠决定栅格；勿让 context-collapsed 把侧栏挤出 areas */
+  .app-shell:not(.sidebar-collapsed):not(.focus-mode) {
+    grid-template-columns: minmax(0, var(--sidebar-width)) minmax(0, 1fr);
+    grid-template-areas: "sidebar main";
+  }
+  .app-shell.sidebar-collapsed:not(.focus-mode) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "main";
+  }
   .panel-resize-handle-context { display: none; }
   .context-panel:not(.mobile-context-panel) { display: none; }
   .context-panel.mobile-context-panel { position: fixed; z-index: 30; inset: auto 0 0; display: block; max-height: min(74dvh, 620px); overflow: auto; border: 1px solid var(--border); border-radius: 14px 14px 0 0; padding: 16px 18px calc(28px + var(--safe-bottom)); box-shadow: 0 -12px 32px var(--shadow); }
   .mobile-context-scrim { display: block; position: fixed; z-index: 29; inset: 0; background: rgba(33, 29, 25, .28); }
+  .editor-header { height: auto; min-height: 54px; padding: 8px 18px; gap: 8px; flex-wrap: wrap; }
+  .breadcrumbs { max-width: 100%; flex: 1 1 12rem; }
+  .save-state { flex: 1 1 auto; justify-content: flex-end; min-width: 0; flex-wrap: wrap; }
+  .document { padding: 28px 28px 36px; }
+  .document-title { font-size: 32px; }
 }
 @media (max-width: 720px) {
   html, body, #app { min-height: 100dvh; }

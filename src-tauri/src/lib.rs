@@ -80,6 +80,8 @@ pub fn run() {
             local::commands::list_file_page_assets,
             local::commands::save_file_page_asset,
             local::commands::read_file_page_asset,
+            local::commands::list_workspace_files,
+            local::commands::resolve_workspace_file,
             local::commands::list_page_revisions,
             local::commands::read_page_revision,
             local::commands::restore_page_revision,

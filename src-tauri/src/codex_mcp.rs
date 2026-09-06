@@ -428,7 +428,10 @@ fn candidate_mcp_sources(app: &AppHandle) -> Vec<PathBuf> {
     }
 
     if let Ok(resource) = app.path().resource_dir() {
+        // Current packaging maps to $RESOURCE/tie-mcp
         candidates.push(resource.join("tie-mcp"));
+        // Older releases used ../packages/tie-mcp → $RESOURCE/_up_/packages/tie-mcp
+        candidates.push(resource.join("_up_").join("packages").join("tie-mcp"));
         candidates.push(resource.join("packages").join("tie-mcp"));
     }
 
