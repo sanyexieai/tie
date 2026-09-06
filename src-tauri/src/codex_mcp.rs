@@ -85,8 +85,18 @@ fn home_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("无法定位用户主目录：{error}"))
 }
 
+fn codex_home(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Ok(raw) = std::env::var("CODEX_HOME") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    Ok(home_dir(app)?.join(".codex"))
+}
+
 fn codex_config_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(home_dir(app)?.join(".codex").join("config.toml"))
+    Ok(codex_home(app)?.join("config.toml"))
 }
 
 fn cursor_config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -219,6 +229,15 @@ fn command_path_env() -> String {
 fn binary_name_variants(name: &str) -> Vec<String> {
     #[cfg(windows)]
     {
+        // node 优先 .exe（Codex CreateProcess 对 .cmd 不稳定）；npm 仍优先 .cmd
+        if name.eq_ignore_ascii_case("node") {
+            return vec![
+                format!("{name}.exe"),
+                name.to_owned(),
+                format!("{name}.cmd"),
+                format!("{name}.bat"),
+            ];
+        }
         // Windows 上 npm 通常是 npm.cmd；CreateProcess 对 .cmd 需走 cmd 或完整路径
         vec![
             format!("{name}.cmd"),
@@ -497,6 +516,17 @@ fn escape_toml_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| format!("\"{value}\""))
 }
 
+fn escape_toml_key(key: &str) -> String {
+    if key
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        key.to_owned()
+    } else {
+        escape_toml_string(key)
+    }
+}
+
 fn parse_configured_workspace_toml(config: &str) -> Option<String> {
     let mut in_env = false;
     for line in config.lines() {
@@ -620,16 +650,133 @@ fn strip_mcp_server_block(config: &str) -> String {
     text.trim().to_owned()
 }
 
+fn mcp_package_cwd(server_path: &Path) -> Option<PathBuf> {
+    // .../tie-mcp/src/server.js → .../tie-mcp
+    server_path
+        .parent()
+        .and_then(|src| src.parent())
+        .map(|path| path.to_path_buf())
+        .filter(|path| path.is_dir())
+}
+
 fn build_mcp_block(server_path: &Path, workspace_path: &Path) -> String {
     let node = node_bin()
         .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "node".to_owned());
-    format!(
-        "[mcp_servers.tie]\ncommand = {}\nargs = [{}]\ndefault_tools_approval_mode = \"approve\"\n\n[mcp_servers.tie.env]\nTIE_WORKSPACE = {}\n",
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                "node.exe".to_owned()
+            } else {
+                "node".to_owned()
+            }
+        });
+    let mut block = format!(
+        "[mcp_servers.tie]\ncommand = {}\nargs = [{}]\ndefault_tools_approval_mode = \"approve\"\nstartup_timeout_sec = 60\nenabled = true\n",
         escape_toml_string(&node),
         escape_toml_string(&server_path.to_string_lossy()),
-        escape_toml_string(&workspace_path.to_string_lossy())
-    )
+    );
+    if let Some(cwd) = mcp_package_cwd(server_path) {
+        block.push_str(&format!(
+            "cwd = {}\n",
+            escape_toml_string(&cwd.to_string_lossy())
+        ));
+    }
+    block.push_str("\n[mcp_servers.tie.env]\n");
+    for (key, value) in mcp_runtime_env(workspace_path) {
+        block.push_str(&format!(
+            "{} = {}\n",
+            escape_toml_key(&key),
+            escape_toml_string(&value)
+        ));
+    }
+    block
+}
+
+fn mcp_runtime_env(workspace_path: &Path) -> Vec<(String, String)> {
+    let mut env = vec![(
+        "TIE_WORKSPACE".to_owned(),
+        workspace_path.to_string_lossy().into_owned(),
+    )];
+
+    // Windows 上 Codex 给 MCP 子进程的环境极精简，缺 PATH/SYSTEMROOT 时 node 经常起不来
+    #[cfg(windows)]
+    {
+        env.push(("PATH".into(), command_path_env()));
+        let push_env = |env: &mut Vec<(String, String)>, key: &str| {
+            if let Ok(value) = std::env::var(key) {
+                if !value.is_empty() {
+                    env.push((key.to_owned(), value));
+                }
+            }
+        };
+        for key in [
+            "SystemRoot",
+            "SYSTEMROOT",
+            "windir",
+            "WINDIR",
+            "ComSpec",
+            "COMSPEC",
+            "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "ProgramData",
+            "PROGRAMDATA",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "TEMP",
+            "TMP",
+            "PATHEXT",
+            "USERNAME",
+            "USERDOMAIN",
+            "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE",
+        ] {
+            push_env(&mut env, key);
+        }
+        // 兜底：即使当前进程缺这些变量，也写入常见默认值
+        let defaults = [
+            ("SystemRoot", r"C:\Windows"),
+            ("SYSTEMROOT", r"C:\Windows"),
+            ("windir", r"C:\Windows"),
+            ("WINDIR", r"C:\Windows"),
+            ("ComSpec", r"C:\Windows\System32\cmd.exe"),
+            ("COMSPEC", r"C:\Windows\System32\cmd.exe"),
+            ("PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC"),
+        ];
+        for (key, value) in defaults {
+            if !env.iter().any(|(existing, _)| existing.eq_ignore_ascii_case(key)) {
+                env.push((key.to_owned(), value.to_owned()));
+            }
+        }
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            if !env.iter().any(|(k, _)| k == "APPDATA") {
+                env.push((
+                    "APPDATA".into(),
+                    format!(r"{profile}\AppData\Roaming"),
+                ));
+            }
+            if !env.iter().any(|(k, _)| k == "LOCALAPPDATA") {
+                env.push((
+                    "LOCALAPPDATA".into(),
+                    format!(r"{profile}\AppData\Local"),
+                ));
+            }
+            if !env.iter().any(|(k, _)| k == "TEMP") {
+                env.push(("TEMP".into(), format!(r"{profile}\AppData\Local\Temp")));
+            }
+            if !env.iter().any(|(k, _)| k == "TMP") {
+                env.push(("TMP".into(), format!(r"{profile}\AppData\Local\Temp")));
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        env.push(("PATH".into(), command_path_env()));
+    }
+
+    env
 }
 
 fn mcp_server_json(server_path: &Path, workspace_path: &Path, with_type: bool) -> Value {
@@ -639,16 +786,28 @@ fn mcp_server_json(server_path: &Path, workspace_path: &Path, with_type: bool) -
     }
     let node = node_bin()
         .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "node".to_owned());
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                "node.exe".to_owned()
+            } else {
+                "node".to_owned()
+            }
+        });
     entry.insert("command".into(), json!(node));
     entry.insert(
         "args".into(),
         json!([server_path.to_string_lossy().to_string()]),
     );
-    entry.insert(
-        "env".into(),
-        json!({ "TIE_WORKSPACE": workspace_path.to_string_lossy().to_string() }),
-    );
+    entry.insert("startup_timeout_sec".into(), json!(60));
+    entry.insert("enabled".into(), json!(true));
+    if let Some(cwd) = mcp_package_cwd(server_path) {
+        entry.insert("cwd".into(), json!(cwd.to_string_lossy().to_string()));
+    }
+    let mut env_map = Map::new();
+    for (key, value) in mcp_runtime_env(workspace_path) {
+        env_map.insert(key, json!(value));
+    }
+    entry.insert("env".into(), Value::Object(env_map));
     Value::Object(entry)
 }
 
@@ -1055,6 +1214,43 @@ fn link_or_copy_skill(skill_dir: &Path, target: &Path) -> Result<(), String> {
     }
 }
 
+fn ensure_workspace_tie_skill(app: &AppHandle, workspace: &Path) -> Result<(), String> {
+    let dest_dir = workspace
+        .join(".agents")
+        .join("skills")
+        .join("tie-memory");
+    let dest = dest_dir.join("SKILL.md");
+    if dest.is_file() {
+        return Ok(());
+    }
+
+    let candidates = [
+        resolve_mcp_package_source(app)
+            .ok()
+            .map(|root| root.join("SKILL.md")),
+        installed_mcp_dir(app)
+            .ok()
+            .map(|root| root.join("SKILL.md")),
+    ];
+    let Some(source) = candidates
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_file())
+    else {
+        return Ok(());
+    };
+
+    fs::create_dir_all(&dest_dir).map_err(|error| error.to_string())?;
+    fs::copy(&source, &dest).map_err(|error| {
+        format!(
+            "无法写入默认 Skill（{} → {}）：{error}",
+            source.display(),
+            dest.display()
+        )
+    })?;
+    Ok(())
+}
+
 fn sync_workspace_skills(
     app: &AppHandle,
     workspace: &Path,
@@ -1065,6 +1261,7 @@ fn sync_workspace_skills(
         return Ok(());
     }
     let roots = skill_sync_roots(app, clients)?;
+    let mut errors = Vec::new();
     for entry in fs::read_dir(&skills_root).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         if !entry.file_type().map(|item| item.is_dir()).unwrap_or(false) {
@@ -1077,10 +1274,16 @@ fn sync_workspace_skills(
         let name = entry.file_name();
         for root in &roots {
             let target = root.join(&name);
-            let _ = link_or_copy_skill(&skill_dir, &target);
+            if let Err(error) = link_or_copy_skill(&skill_dir, &target) {
+                errors.push(format!("{} → {}: {error}", skill_dir.display(), target.display()));
+            }
         }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Skill 同步失败：{}", errors.join("; ")))
+    }
 }
 
 fn configure_for_clients(
@@ -1104,7 +1307,8 @@ fn configure_for_clients(
         }
     }
 
-    let _ = sync_workspace_skills(app, &workspace, &selected);
+    ensure_workspace_tie_skill(app, &workspace)?;
+    sync_workspace_skills(app, &workspace, &selected)?;
     status_for(app)
 }
 

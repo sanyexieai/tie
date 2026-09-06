@@ -377,8 +377,8 @@ async function applyCodexMcp() {
     const labels = selectedClients.value
       .map((id) => AGENT_CLIENT_OPTIONS.find((item) => item.id === id)?.label ?? id)
       .join('、')
-    codexNotice.value = `已接入 ${labels}（工作区：${source.name}）`
-    window.setTimeout(() => { codexNotice.value = '' }, 3200)
+    codexNotice.value = `已接入 ${labels}（工作区：${source.name}）。请完全退出并重新打开 Codex，或新开会话后执行 /mcp 查看 tie。`
+    window.setTimeout(() => { codexNotice.value = '' }, 8000)
   } catch (error) {
     codexError.value = error instanceof Error ? error.message : String(error)
   } finally {
@@ -1056,7 +1056,7 @@ function restoreDefaultUpdateEndpoints() {
 
       <form v-if="supportsAgentSkills && codexFormOpen" class="minio-config-form codex-mcp-form" @submit.prevent="applyCodexMcp">
         <strong>Agent 知识库</strong>
-        <small>{{ codexStatusSummary }} · 把本地/SMB 工作区接入 Codex / Cursor / Claude Code 的 MCP。Skill 在「Agent Skills」管理；接入时会同步到对应客户端目录。</small>
+        <small>{{ codexStatusSummary }} · 把本地/SMB 工作区接入 Codex / Cursor / Claude Code 的 MCP。Skill 在「Agent Skills」管理；接入时会同步到对应客户端目录。Windows 上若 Codex 仍显示未连接，请更新接入后完全重启 Codex。</small>
         <label>
           <span>工作区（存储源）</span>
           <TieSelect

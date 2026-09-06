@@ -92,6 +92,10 @@ function escapeTomlString(value) {
   return JSON.stringify(String(value))
 }
 
+function escapeTomlKey(key) {
+  return /^[A-Za-z0-9_-]+$/.test(key) ? key : escapeTomlString(key)
+}
+
 function validateWorkspace(workspace) {
   const resolved = path.resolve(workspace)
   const pages = path.join(resolved, 'pages')
@@ -101,23 +105,94 @@ function validateWorkspace(workspace) {
   return resolved
 }
 
+function nodeCommand() {
+  if (process.platform === 'win32') {
+    const candidates = [
+      process.execPath,
+      path.join(path.dirname(process.execPath), 'node.exe'),
+    ]
+    for (const candidate of candidates) {
+      if (candidate && fs.existsSync(candidate)) return candidate
+    }
+    return 'node.exe'
+  }
+  return process.execPath && fs.existsSync(process.execPath) ? process.execPath : 'node'
+}
+
+function mcpRuntimeEnv(workspace) {
+  const env = { TIE_WORKSPACE: workspace }
+  env.PATH = process.env.PATH || ''
+  if (process.platform === 'win32') {
+    const keys = [
+      'SystemRoot',
+      'SYSTEMROOT',
+      'windir',
+      'WINDIR',
+      'ComSpec',
+      'COMSPEC',
+      'USERPROFILE',
+      'HOMEDRIVE',
+      'HOMEPATH',
+      'APPDATA',
+      'LOCALAPPDATA',
+      'ProgramData',
+      'PROGRAMDATA',
+      'ProgramFiles',
+      'ProgramFiles(x86)',
+      'TEMP',
+      'TMP',
+      'PATHEXT',
+      'USERNAME',
+      'USERDOMAIN',
+    ]
+    for (const key of keys) {
+      if (process.env[key]) env[key] = process.env[key]
+    }
+    const defaults = {
+      SystemRoot: String.raw`C:\Windows`,
+      SYSTEMROOT: String.raw`C:\Windows`,
+      windir: String.raw`C:\Windows`,
+      WINDIR: String.raw`C:\Windows`,
+      ComSpec: String.raw`C:\Windows\System32\cmd.exe`,
+      COMSPEC: String.raw`C:\Windows\System32\cmd.exe`,
+      PATHEXT: '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC',
+    }
+    for (const [key, value] of Object.entries(defaults)) {
+      if (!env[key]) env[key] = value
+    }
+  }
+  return env
+}
+
 function buildMcpBlock({ name, serverPath, workspace }) {
-  return [
+  const command = nodeCommand()
+  const cwd = path.dirname(path.dirname(serverPath))
+  const lines = [
     `[mcp_servers.${name}]`,
-    'command = "node"',
+    `command = ${escapeTomlString(command)}`,
     `args = [${escapeTomlString(serverPath)}]`,
+    'default_tools_approval_mode = "approve"',
+    'startup_timeout_sec = 60',
+    'enabled = true',
+    `cwd = ${escapeTomlString(cwd)}`,
     '',
     `[mcp_servers.${name}.env]`,
-    `TIE_WORKSPACE = ${escapeTomlString(workspace)}`,
-    '',
-  ].join('\n')
+  ]
+  for (const [key, value] of Object.entries(mcpRuntimeEnv(workspace))) {
+    lines.push(`${escapeTomlKey(key)} = ${escapeTomlString(value)}`)
+  }
+  lines.push('')
+  return lines.join('\n')
 }
 
 function buildMcpJsonEntry({ serverPath, workspace, withType }) {
   const entry = {
-    command: 'node',
+    command: nodeCommand(),
     args: [serverPath],
-    env: { TIE_WORKSPACE: workspace },
+    cwd: path.dirname(path.dirname(serverPath)),
+    startup_timeout_sec: 60,
+    enabled: true,
+    env: mcpRuntimeEnv(workspace),
   }
   if (withType) entry.type = 'stdio'
   return entry

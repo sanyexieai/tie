@@ -50,6 +50,8 @@ All notable changes to Tie are documented in this file.
 
 ## [1.0.25] - 2026-09-06
 
+## [1.0.26] - 2026-09-06
+
 ## [Unreleased]
 
 ### Added
@@ -81,7 +83,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.25...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.26...HEAD
+[1.0.26]: https://github.com/sanyexieai/tie/releases/tag/v1.0.26
 [1.0.25]: https://github.com/sanyexieai/tie/releases/tag/v1.0.25
 [1.0.24]: https://github.com/sanyexieai/tie/releases/tag/v1.0.24
 [1.0.23]: https://github.com/sanyexieai/tie/releases/tag/v1.0.23
