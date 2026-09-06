@@ -90,8 +90,16 @@
 }
 
 * { box-sizing: border-box; }
-html, body, #app { min-width: 0; min-height: 100%; margin: 0; background: var(--bg-app); color: var(--text); }
-html, body, #app { min-height: 100dvh; }
+/* 桌面 WebView：用 100% 对齐窗口客户区。100vh 在 Windows 上常比可视区更高，标题栏/任务栏会把底部工具栏裁掉。 */
+html, body, #app {
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg-app);
+  color: var(--text);
+}
 button, input, textarea, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .46; }
@@ -232,7 +240,9 @@ select option {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--context-width);
   grid-template-areas: "sidebar main context";
-  height: 100vh;
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
   overflow: hidden;
   background: var(--bg-app);
 }
@@ -278,7 +288,15 @@ select option {
 body.panel-resizing,
 body.panel-resizing * { cursor: col-resize !important; user-select: none !important; }
 .sidebar { grid-area: sidebar; display: flex; min-height: 0; flex-direction: column; padding: 16px 10px 12px; background: var(--bg-sidebar); border-right: 1px solid var(--border); color: var(--text-secondary); min-width: 0; }
-.editor-pane, .trash-view, .search-view, .tag-view, .library-view, .global-graph-view, .empty-editor { grid-area: main; background: var(--bg-main); color: var(--text); }
+.editor-pane, .trash-view, .search-view, .tag-view, .library-view, .global-graph-view, .empty-editor {
+  grid-area: main;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  max-height: 100%;
+  background: var(--bg-main);
+  color: var(--text);
+}
 .context-panel:not(.mobile-context-panel) { grid-area: context; min-width: 0; background: var(--bg-elevated); border-left: 1px solid var(--border); color: var(--text-secondary); }
 .mobile-sidebar-toggle, .mobile-sidebar-close, .mobile-sidebar-scrim { display: none; }
 .mobile-context-panel, .mobile-context-scrim { display: none; }
@@ -1050,7 +1068,7 @@ body.storage-source-reordering * { cursor: grabbing !important; user-select: non
 .backend-primary-button { border: 0; border-radius: 6px; padding: 9px; color: #fff; background: #647d63; font-size: 12px; font-weight: 600; }.backend-primary-button:hover:not(:disabled) { background: #546e53; }.backend-link-button { justify-self: start; margin-top: -8px; padding: 4px 6px; font-size: 11px; }
 .backend-account { display: flex; align-items: center; gap: 8px; border: 1px solid #dce7d9; border-radius: 7px; padding: 9px; background: #f4f8f2; }.backend-account > span { color: #70a078; font-size: 11px; }.backend-account > div { display: grid; min-width: 0; flex: 1; gap: 2px; }.backend-account strong { color: #516450; font-size: 12px; }.backend-account small { overflow: hidden; color: #839080; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.backend-account button { padding: 4px 6px; color: #8d7169; font-size: 10px; }.backend-account button:hover { color: #784f49; background: #f3e6e3; }
 .backend-workspace-heading { display: flex; align-items: center; justify-content: space-between; color: var(--text-subtle); font-size: 11px; font-weight: 650; }.backend-workspace-heading button { padding: 2px 5px; font-size: 14px; }.backend-workspace-list { display: grid; gap: 4px; max-height: 152px; overflow: auto; }.backend-workspace-list > div { display: flex; align-items: center; gap: 8px; border-radius: 6px; padding: 8px 9px; background: #f5f3ee; }.backend-workspace-list span { display: grid; min-width: 0; flex: 1; gap: 2px; }.backend-workspace-list strong { color: #585149; font-size: 12px; }.backend-workspace-list small, .backend-empty { color: #948c83; font-size: 10px; }.backend-workspace-list > div > button { border: 0; border-radius: 4px; padding: 3px 5px; color: #867d74; background: transparent; font-size: 11px; }.backend-workspace-list > div > button:hover:not(:disabled) { color: #526b55; background: #e7eee4; }.backend-empty { margin: 0; line-height: 1.55; }.backend-create-workspace { display: flex; gap: 6px; }.backend-create-workspace input { min-width: 0; flex: 1; }.backend-create-workspace button { border: 0; border-radius: 6px; padding: 0 10px; color: #5b725b; background: #e9f0e6; font-size: 11px; }.backend-create-workspace button:hover:not(:disabled) { background: #dfeade; }.backend-error, .backend-notice { margin: 0; font-size: 11px; line-height: 1.45; }.backend-error { color: #a15e58; }.backend-notice { color: #668064; }
-.editor-pane { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; background: var(--bg-main); }
+.editor-pane { display: flex; min-width: 0; min-height: 0; height: 100%; max-height: 100%; flex-direction: column; overflow: hidden; background: var(--bg-main); }
 .history-popover { position: absolute; z-index: 8; top: 49px; right: 24px; display: grid; width: min(440px, calc(100% - 32px)); max-height: min(560px, calc(100% - 100px)); overflow: auto; border: 1px solid #e0d9cf; border-radius: 8px; padding: 7px; background: var(--bg-elevated); box-shadow: 0 12px 32px var(--shadow); }.history-popover > .history-popover-heading { display: flex; align-items: center; justify-content: space-between; padding: 5px 7px 8px; color: #625a50; font-size: 12px; }.history-popover-heading button { border: 0; color: #988f85; background: transparent; font-size: 16px; }.history-popover > p { margin: 12px 8px; font-size: 12px; }.history-revision { display: flex; align-items: center; gap: 3px; border-radius: 5px; }.history-revision.selected, .history-revision:hover { background: var(--bg-hover); }.history-revision > button:first-child { display: flex; min-width: 0; flex: 1; align-items: center; justify-content: space-between; gap: 12px; border: 0; border-radius: 5px; padding: 8px; color: #5b534a; background: transparent; text-align: left; }.history-revision span { display: grid; min-width: 0; gap: 2px; }.history-revision strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.history-revision small { color: #9e958b; font-size: 10px; }.history-revision em { color: #8d9682; font-size: 10px; font-style: normal; }.history-restore { border: 0; border-radius: 4px; padding: 5px 7px; color: #718572; background: transparent; font-size: 11px; }.history-restore:hover { background: #e6ede3; }.revision-preview { display: grid; gap: 5px; margin: 7px 1px 1px; border-top: 1px solid #ece7df; padding: 10px 7px 3px; }.revision-preview > strong { color: #5b534a; font-size: 12px; }.revision-preview > small { color: #9a9289; font-size: 10px; }.revision-preview pre { max-height: 210px; overflow: auto; margin: 3px 0 0; border-radius: 5px; padding: 8px; color: #5b554c; background: #f5f2ec; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; }
 .revision-preview-error { margin: 0; color: #9b625b; font-size: 11px; line-height: 1.5; }
 .editor-header { position: relative; z-index: 8; height: 54px; display: flex; align-items: center; justify-content: space-between; padding: 0 32px; border-bottom: 1px solid var(--border); color: var(--text-faint); font-size: 12px; overflow: visible; }
@@ -1107,10 +1125,21 @@ body.storage-source-reordering * { cursor: grabbing !important; user-select: non
 .document-page-icon { flex: 0 0 auto; width: 40px; color: var(--text-faint); font-size: 27px; line-height: 1.25; text-align: center; user-select: none; pointer-events: none; }
 .document-title { width: 100%; border: 0; outline: 0; padding: 0; color: var(--text); background: transparent; font-size: 38px; font-weight: 720; line-height: 1.25; letter-spacing: -.04em; }
 .document-title::placeholder { color: var(--text-faint); }
-.document-child-pages { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--border); }
+.document-child-pages {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  margin-top: 28px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+  /* 避免被上方 TipTap 拉伸空白区盖住点击（Windows WebView 上常见） */
+  background: var(--bg-main);
+}
 .document-child-pages-title { margin: 0 0 12px; color: var(--text-subtle); font-size: 13px; font-weight: 600; letter-spacing: .02em; }
 .document-child-pages-list { display: flex; flex-direction: column; gap: 8px; }
 .document-child-page-card {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1141,12 +1170,22 @@ body.storage-source-reordering * { cursor: grabbing !important; user-select: non
 .tag-accept-all { border: 1px solid #d4e0d1; border-radius: 999px; padding: 3px 8px; color: #687d68; background: #f6faf4; font-size: 11px; }.tag-accept-all:hover { border-color: #acc0a9; color: #516851; background: #eaf2e7; }
 .tiptap-editor {
   position: relative;
+  z-index: 0;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 12rem;
+  /* 限制编辑器命中区域，防止空白区溢出盖住下方子页面列表 */
+  overflow: hidden;
+}
+.tiptap-editor > div:has(> .tiptap-content) {
+  position: relative;
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
   min-height: 0;
 }
-.tiptap-editor > div:has(> .tiptap-content),
+.tiptap-editor > div:has(> .tiptap-content) > .tiptap-content,
 .tiptap-editor > .tiptap-content {
   flex: 1 1 auto;
   min-height: 100%;
@@ -1313,7 +1352,7 @@ body.storage-source-reordering * { cursor: grabbing !important; user-select: non
 .document-find .find-replace-button { width: auto; padding: 0 7px; color: var(--accent-strong); font-size: 11px; white-space: nowrap; }
 .document-find .find-replace-button:disabled { color: var(--text-faint); cursor: default; }
 .document-find small { flex: 0 0 100%; padding: 0 7px 2px; color: var(--text-muted); font-size: 10px; }
-.editor-statusbar { display: flex; align-items: center; gap: 3px; min-height: 29px; padding: 0 10px; border-top: 1px solid var(--border); color: var(--text-faint); background: var(--bg-muted); font-size: 11px; }
+.editor-statusbar { display: flex; flex-shrink: 0; align-items: center; gap: 3px; min-height: 29px; padding: 0 10px; border-top: 1px solid var(--border); color: var(--text-faint); background: var(--bg-muted); font-size: 11px; }
 .editor-statusbar button { border: 0; border-radius: 4px; padding: 3px 5px; color: inherit; background: transparent; font-size: 11px; }
 .editor-statusbar button:hover, .editor-statusbar button.active { color: var(--text-secondary); background: var(--bg-hover); }
 .status-divider { width: 1px; height: 13px; margin: 0 4px; background: var(--border-strong); }

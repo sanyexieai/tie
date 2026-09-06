@@ -260,6 +260,107 @@ fn same_path(left: &str, right: &str) -> bool {
     left_path == right_path
 }
 
+fn skill_name_key(name: &str) -> String {
+    name.trim().to_ascii_lowercase()
+}
+
+fn path_under_root(path: &str, root: &Path) -> bool {
+    let path = canonicalize_path(Path::new(path));
+    let root = canonicalize_path(root);
+    path.starts_with(&root)
+}
+
+fn prefer_scanned_skill(
+    current: &ScannedSkill,
+    candidate: &ScannedSkill,
+    workspace_skills: Option<&Path>,
+    agents_skills: Option<&Path>,
+) -> ScannedSkill {
+    let mut preferred = if candidate.connected && !current.connected {
+        candidate.clone()
+    } else if current.connected && !candidate.connected {
+        current.clone()
+    } else if let Some(root) = workspace_skills {
+        let current_ws = path_under_root(&current.skill_path, root);
+        let candidate_ws = path_under_root(&candidate.skill_path, root);
+        if candidate_ws && !current_ws {
+            candidate.clone()
+        } else if current_ws && !candidate_ws {
+            current.clone()
+        } else if let Some(agents) = agents_skills {
+            let current_agents = path_under_root(&current.skill_path, agents);
+            let candidate_agents = path_under_root(&candidate.skill_path, agents);
+            if candidate_agents && !current_agents {
+                candidate.clone()
+            } else {
+                current.clone()
+            }
+        } else {
+            current.clone()
+        }
+    } else if let Some(agents) = agents_skills {
+        let current_agents = path_under_root(&current.skill_path, agents);
+        let candidate_agents = path_under_root(&candidate.skill_path, agents);
+        if candidate_agents && !current_agents {
+            candidate.clone()
+        } else {
+            current.clone()
+        }
+    } else {
+        current.clone()
+    };
+
+    if current.connected || candidate.connected {
+        preferred.connected = true;
+        preferred.connection_id = current
+            .connection_id
+            .clone()
+            .or_else(|| candidate.connection_id.clone());
+        if let Some(id) = preferred.connection_id.clone() {
+            if current.connection_id.as_deref() == Some(id.as_str()) {
+                preferred.skill_path = current.skill_path.clone();
+                preferred.root_path = current.root_path.clone();
+            } else if candidate.connection_id.as_deref() == Some(id.as_str()) {
+                preferred.skill_path = candidate.skill_path.clone();
+                preferred.root_path = candidate.root_path.clone();
+            }
+        }
+    }
+    preferred
+}
+
+fn dedupe_scanned_skills(
+    app: &AppHandle,
+    workspace_path: Option<&str>,
+    skills: Vec<ScannedSkill>,
+) -> Vec<ScannedSkill> {
+    let workspace_skills = workspace_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| PathBuf::from(path).join(".agents").join("skills"));
+    let agents_skills = user_skills_root(app).ok();
+
+    let mut by_name = std::collections::BTreeMap::<String, ScannedSkill>::new();
+    for skill in skills {
+        let key = skill_name_key(&skill.name);
+        match by_name.get(&key) {
+            None => {
+                by_name.insert(key, skill);
+            }
+            Some(existing) => {
+                let preferred = prefer_scanned_skill(
+                    existing,
+                    &skill,
+                    workspace_skills.as_deref(),
+                    agents_skills.as_deref(),
+                );
+                by_name.insert(key, preferred);
+            }
+        }
+    }
+    by_name.into_values().collect()
+}
+
 fn mirror_skill_roots(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
     let home = home_dir(app)?;
     Ok(vec![
@@ -342,12 +443,23 @@ fn ensure_codex_link(
 
     if primary.exists() || primary.is_symlink() {
         let existing_skill = primary.join("SKILL.md");
-        if !(existing_skill.is_file()
+        if existing_skill.is_file()
             && same_path(
                 &existing_skill.to_string_lossy(),
                 &skill_path.to_string_lossy(),
-            ))
+            )
         {
+            // already linked to this exact file
+        } else if primary.is_symlink()
+            || (existing_skill.is_file()
+                && fs::read(&existing_skill).ok().as_deref() == fs::read(skill_path).ok().as_deref())
+        {
+            // MCP 同步已拷过一份同名内容：刷新镜像即可，勿当成冲突
+            ensure_skill_mirror(skill_dir, skill_path, &primary)?;
+        } else if existing_skill.is_file() {
+            // 工作区是真相源：覆盖同步产生的浅拷贝
+            ensure_skill_mirror(skill_dir, skill_path, &primary)?;
+        } else {
             return Err(format!(
                 "技能目录已存在且指向其他内容：{}。请先断开或改名。",
                 primary.display()
@@ -512,7 +624,12 @@ pub fn scan_skills(
         );
     }
 
-    Ok(by_path.into_values().collect())
+    // 接入 Agent 时会把工作区 Skill 镜像到 ~/.agents、~/.cursor 等；按名称合并，避免「两个相同 Skill」
+    Ok(dedupe_scanned_skills(
+        &app,
+        workspace_path.as_deref(),
+        by_path.into_values().collect(),
+    ))
 }
 
 #[tauri::command]

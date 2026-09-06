@@ -577,9 +577,13 @@ function focusNextWritingLine(event: MouseEvent) {
 
   const target = event.target
   if (!(target instanceof Element)) return false
-  if (target.closest('.editor-embedded-meta, .page-picker, .slash-menu, button, input, textarea, a, img, label')) return false
+  if (target.closest('.editor-embedded-meta, .page-picker, .slash-menu, button, input, textarea, a, img, label, .document-child-pages')) return false
   // 点在正文块内部时交给 ProseMirror 正常处理
   if (root.contains(target) && target !== root) return false
+
+  const editorBox = root.getBoundingClientRect()
+  // 点在编辑器可视区域下方（子页面列表等）时不要抢焦点
+  if (event.clientY > editorBox.bottom + 1) return false
 
   const lastBlock = root.lastElementChild as HTMLElement | null
   if (lastBlock && event.clientY <= lastBlock.getBoundingClientRect().bottom + 1) return false

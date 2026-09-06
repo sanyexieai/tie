@@ -527,6 +527,36 @@ fn escape_toml_key(key: &str) -> String {
     }
 }
 
+/// Windows `canonicalize` 会产出 `\\?\C:\...`；Node / Codex 环境变量里常认不了，写入外部配置前去掉。
+fn strip_windows_extended_prefix(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        let text = raw.as_ref();
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            if let Some(unc) = rest.strip_prefix(r"UNC\") {
+                return PathBuf::from(format!(r"\\{unc}"));
+            }
+            return PathBuf::from(rest);
+        }
+        if let Some(rest) = text.strip_prefix("//?/") {
+            if let Some(unc) = rest.strip_prefix("UNC/") {
+                return PathBuf::from(format!(r"\\{unc}"));
+            }
+            return PathBuf::from(rest);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = &raw;
+    }
+    path.to_path_buf()
+}
+
+fn path_for_external_config(path: &Path) -> PathBuf {
+    strip_windows_extended_prefix(path)
+}
+
 fn parse_configured_workspace_toml(config: &str) -> Option<String> {
     let mut in_env = false;
     for line in config.lines() {
@@ -660,8 +690,10 @@ fn mcp_package_cwd(server_path: &Path) -> Option<PathBuf> {
 }
 
 fn build_mcp_block(server_path: &Path, workspace_path: &Path) -> String {
+    let server_path = path_for_external_config(server_path);
+    let workspace_path = path_for_external_config(workspace_path);
     let node = node_bin()
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| path_for_external_config(&path).to_string_lossy().into_owned())
         .unwrap_or_else(|| {
             if cfg!(windows) {
                 "node.exe".to_owned()
@@ -674,14 +706,14 @@ fn build_mcp_block(server_path: &Path, workspace_path: &Path) -> String {
         escape_toml_string(&node),
         escape_toml_string(&server_path.to_string_lossy()),
     );
-    if let Some(cwd) = mcp_package_cwd(server_path) {
+    if let Some(cwd) = mcp_package_cwd(&server_path) {
         block.push_str(&format!(
             "cwd = {}\n",
-            escape_toml_string(&cwd.to_string_lossy())
+            escape_toml_string(&path_for_external_config(&cwd).to_string_lossy())
         ));
     }
     block.push_str("\n[mcp_servers.tie.env]\n");
-    for (key, value) in mcp_runtime_env(workspace_path) {
+    for (key, value) in mcp_runtime_env(&workspace_path) {
         block.push_str(&format!(
             "{} = {}\n",
             escape_toml_key(&key),
@@ -692,9 +724,10 @@ fn build_mcp_block(server_path: &Path, workspace_path: &Path) -> String {
 }
 
 fn mcp_runtime_env(workspace_path: &Path) -> Vec<(String, String)> {
+    let workspace = path_for_external_config(workspace_path);
     let mut env = vec![(
         "TIE_WORKSPACE".to_owned(),
-        workspace_path.to_string_lossy().into_owned(),
+        workspace.to_string_lossy().into_owned(),
     )];
 
     // Windows 上 Codex 给 MCP 子进程的环境极精简，缺 PATH/SYSTEMROOT 时 node 经常起不来
@@ -780,12 +813,14 @@ fn mcp_runtime_env(workspace_path: &Path) -> Vec<(String, String)> {
 }
 
 fn mcp_server_json(server_path: &Path, workspace_path: &Path, with_type: bool) -> Value {
+    let server_path = path_for_external_config(server_path);
+    let workspace_path = path_for_external_config(workspace_path);
     let mut entry = Map::new();
     if with_type {
         entry.insert("type".into(), json!("stdio"));
     }
     let node = node_bin()
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| path_for_external_config(&path).to_string_lossy().into_owned())
         .unwrap_or_else(|| {
             if cfg!(windows) {
                 "node.exe".to_owned()
@@ -800,11 +835,14 @@ fn mcp_server_json(server_path: &Path, workspace_path: &Path, with_type: bool) -
     );
     entry.insert("startup_timeout_sec".into(), json!(60));
     entry.insert("enabled".into(), json!(true));
-    if let Some(cwd) = mcp_package_cwd(server_path) {
-        entry.insert("cwd".into(), json!(cwd.to_string_lossy().to_string()));
+    if let Some(cwd) = mcp_package_cwd(&server_path) {
+        entry.insert(
+            "cwd".into(),
+            json!(path_for_external_config(&cwd).to_string_lossy().to_string()),
+        );
     }
     let mut env_map = Map::new();
-    for (key, value) in mcp_runtime_env(workspace_path) {
+    for (key, value) in mcp_runtime_env(&workspace_path) {
         env_map.insert(key, json!(value));
     }
     entry.insert("env".into(), Value::Object(env_map));
@@ -1025,11 +1063,15 @@ fn ensure_mcp_runtime(app: &AppHandle) -> Result<PathBuf, String> {
     if !target_server.is_file() {
         return Err(format!("MCP 入口不存在：{}", target_server.display()));
     }
-    Ok(target_server)
+    Ok(path_for_external_config(&target_server))
 }
 
 fn validate_workspace(path: &Path) -> Result<PathBuf, String> {
-    let root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let root = path_for_external_config(
+        &path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf()),
+    );
     let pages = root.join("pages");
     if !pages.is_dir() {
         return Err(format!(

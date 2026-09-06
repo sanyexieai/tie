@@ -40,6 +40,35 @@ fn read_json_file(path: &Path) -> Result<Value, String> {
     serde_json::from_str(&raw).map_err(|error| error.to_string())
 }
 
+fn strip_windows_extended_prefix(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        let text = raw.as_ref();
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            if let Some(unc) = rest.strip_prefix(r"UNC\") {
+                return PathBuf::from(format!(r"\\{unc}"));
+            }
+            return PathBuf::from(rest);
+        }
+        if let Some(rest) = text.strip_prefix("//?/") {
+            if let Some(unc) = rest.strip_prefix("UNC/") {
+                return PathBuf::from(format!(r"\\{unc}"));
+            }
+            return PathBuf::from(rest);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = &raw;
+    }
+    path.to_path_buf()
+}
+
+fn path_for_shell_open(path: &Path) -> PathBuf {
+    strip_windows_extended_prefix(path)
+}
+
 fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource> {
     let id = meta.get("id")?.as_str()?.to_owned();
     let title = meta
@@ -74,12 +103,24 @@ fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource
         .and_then(|item| item.as_str())
         .unwrap_or("")
         .to_owned();
-    let open_path = if mode == "copy" {
-        root.join(stored_path.replace('\\', "/")).to_string_lossy().into_owned()
+    let root = path_for_shell_open(root);
+    let open_buf = if mode == "copy" {
+        let stored = PathBuf::from(stored_path.replace('\\', "/"));
+        if stored.is_absolute() {
+            path_for_shell_open(&stored)
+        } else {
+            path_for_shell_open(&root.join(stored))
+        }
     } else {
-        stored_path.clone()
+        let candidate = if stored_path.trim().is_empty() {
+            PathBuf::from(&source_path)
+        } else {
+            PathBuf::from(&stored_path)
+        };
+        path_for_shell_open(&candidate)
     };
-    let exists = Path::new(&open_path).is_file();
+    let open_path = open_buf.to_string_lossy().into_owned();
+    let exists = open_buf.is_file();
     Some(WorkspaceFileResource {
         id,
         title,

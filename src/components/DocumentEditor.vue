@@ -861,7 +861,7 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
               :key="page.id"
               type="button"
               class="document-child-page-card"
-              @click="store.openPage(page.id)"
+              @click.stop="store.openPage(page.id)"
             >{{ page.title || '无标题' }}</button>
           </div>
         </section>

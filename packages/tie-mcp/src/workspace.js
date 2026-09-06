@@ -31,8 +31,17 @@ function normalizeMarkdownInput(raw) {
   }
 }
 
+function stripWindowsExtendedPrefix(input) {
+  const text = String(input || '')
+  if (text.startsWith('\\\\?\\UNC\\')) return `\\\\${text.slice('\\\\?\\UNC\\'.length)}`
+  if (text.startsWith('\\\\?\\')) return text.slice('\\\\?\\'.length)
+  if (text.startsWith('//?/UNC/')) return `//${text.slice('//?/UNC/'.length)}`
+  if (text.startsWith('//?/')) return text.slice('//?/'.length)
+  return text
+}
+
 function resolveWorkspaceRoot(raw) {
-  const root = path.resolve(raw || process.env.TIE_WORKSPACE || '')
+  const root = path.resolve(stripWindowsExtendedPrefix(raw || process.env.TIE_WORKSPACE || ''))
   if (!root || root === path.resolve('')) {
     throw new Error('请设置 TIE_WORKSPACE 为 Tie 工作区根目录（含 pages/）')
   }
