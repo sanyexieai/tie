@@ -115,86 +115,267 @@ fn installed_mcp_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(directory)
 }
 
+fn path_separator() -> char {
+    if cfg!(windows) { ';' } else { ':' }
+}
+
 fn command_path_env() -> String {
+    let sep = path_separator();
     let mut parts = Vec::new();
     if let Ok(current) = std::env::var("PATH") {
-        for item in current.split(':') {
+        for item in current.split(sep) {
             if !item.is_empty() && !parts.iter().any(|existing| existing == item) {
                 parts.push(item.to_owned());
             }
         }
     }
-    // GUI 启动时 PATH 往往不含用户/系统工具目录
-    for item in [
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/snap/bin",
-        "/opt/homebrew/bin",
-        "/home/linuxbrew/.linuxbrew/bin",
-    ] {
-        if !parts.iter().any(|existing| existing == item) {
-            parts.push(item.to_owned());
+
+    #[cfg(windows)]
+    {
+        let extra = [
+            r"C:\Program Files\nodejs",
+            r"C:\Program Files (x86)\nodejs",
+        ];
+        for item in extra {
+            if Path::new(item).is_dir() && !parts.iter().any(|existing| existing == item) {
+                parts.push(item.to_owned());
+            }
         }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        for item in [
-            format!("{home}/.local/bin"),
-            format!("{home}/.nvm/current/bin"),
-            format!("{home}/.fnm/current/bin"),
-            format!("{home}/.volta/bin"),
-            format!("{home}/.asdf/shims"),
-        ] {
-            if Path::new(&item).is_dir() && !parts.iter().any(|existing| existing == &item) {
-                parts.push(item);
+        if let Ok(profile) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+            for item in [
+                format!(r"{profile}\AppData\Roaming\npm"),
+                format!(r"{profile}\AppData\Local\fnm_multishells"),
+                format!(r"{profile}\.fnm\current"),
+                format!(r"{profile}\scoop\apps\nodejs\current"),
+                format!(r"{profile}\scoop\shims"),
+                format!(r"{profile}\.volta\bin"),
+                format!(r"{profile}\.asdf\shims"),
+            ] {
+                if Path::new(&item).is_dir() && !parts.iter().any(|existing| existing == &item) {
+                    parts.push(item);
+                }
+            }
+            // nvm-windows: %NVM_SYMLINK% or latest under %NVM_HOME%
+            if let Ok(nvm_symlink) = std::env::var("NVM_SYMLINK") {
+                if Path::new(&nvm_symlink).is_dir()
+                    && !parts.iter().any(|existing| existing == &nvm_symlink)
+                {
+                    parts.push(nvm_symlink);
+                }
+            }
+            if let Ok(nvm_home) = std::env::var("NVM_HOME") {
+                if !parts.iter().any(|existing| existing == &nvm_home) {
+                    parts.push(nvm_home);
+                }
+            }
+            let local_programs = format!(r"{profile}\AppData\Local\Programs\node");
+            if Path::new(&local_programs).is_dir()
+                && !parts.iter().any(|existing| existing == &local_programs)
+            {
+                parts.push(local_programs);
+            }
+        }
+        if let Ok(program_files) = std::env::var("ProgramFiles") {
+            let nodejs = PathBuf::from(&program_files).join("nodejs");
+            let text = nodejs.to_string_lossy().into_owned();
+            if nodejs.is_dir() && !parts.iter().any(|existing| existing == &text) {
+                parts.push(text);
             }
         }
     }
-    parts.join(":")
+
+    #[cfg(not(windows))]
+    {
+        for item in [
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/snap/bin",
+            "/opt/homebrew/bin",
+            "/home/linuxbrew/.linuxbrew/bin",
+        ] {
+            if !parts.iter().any(|existing| existing == item) {
+                parts.push(item.to_owned());
+            }
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            for item in [
+                format!("{home}/.local/bin"),
+                format!("{home}/.nvm/current/bin"),
+                format!("{home}/.fnm/current/bin"),
+                format!("{home}/.volta/bin"),
+                format!("{home}/.asdf/shims"),
+            ] {
+                if Path::new(&item).is_dir() && !parts.iter().any(|existing| existing == &item) {
+                    parts.push(item);
+                }
+            }
+        }
+    }
+
+    parts.join(&sep.to_string())
+}
+
+fn binary_name_variants(name: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        // Windows 上 npm 通常是 npm.cmd；CreateProcess 对 .cmd 需走 cmd 或完整路径
+        vec![
+            format!("{name}.cmd"),
+            format!("{name}.exe"),
+            format!("{name}.bat"),
+            name.to_owned(),
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        vec![name.to_owned()]
+    }
+}
+
+fn looks_like_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        match path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("exe") | Some("cmd") | Some("bat") | Some("com") => true,
+            _ => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }
 
 fn resolve_binary(name: &str) -> Option<PathBuf> {
-    let candidates = [
-        format!("/usr/bin/{name}"),
-        format!("/usr/local/bin/{name}"),
-        format!("/bin/{name}"),
-        format!("/snap/bin/{name}"),
-        format!("/opt/homebrew/bin/{name}"),
-    ];
-    for candidate in candidates {
-        let path = PathBuf::from(&candidate);
-        if path.is_file() {
+    let variants = binary_name_variants(name);
+
+    #[cfg(windows)]
+    let hardcoded: Vec<PathBuf> = {
+        let mut list = Vec::new();
+        for base in [
+            PathBuf::from(r"C:\Program Files\nodejs"),
+            PathBuf::from(r"C:\Program Files (x86)\nodejs"),
+        ] {
+            for variant in &variants {
+                list.push(base.join(variant));
+            }
+        }
+        if let Ok(profile) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+            for base in [
+                format!(r"{profile}\AppData\Roaming\npm"),
+                format!(r"{profile}\scoop\shims"),
+                format!(r"{profile}\.volta\bin"),
+                format!(r"{profile}\AppData\Local\Programs\node"),
+            ] {
+                for variant in &variants {
+                    list.push(PathBuf::from(&base).join(variant));
+                }
+            }
+            if let Ok(nvm_symlink) = std::env::var("NVM_SYMLINK") {
+                for variant in &variants {
+                    list.push(PathBuf::from(&nvm_symlink).join(variant));
+                }
+            }
+        }
+        if let Ok(program_files) = std::env::var("ProgramFiles") {
+            for variant in &variants {
+                list.push(PathBuf::from(&program_files).join("nodejs").join(variant));
+            }
+        }
+        list
+    };
+
+    #[cfg(not(windows))]
+    let hardcoded: Vec<PathBuf> = {
+        let mut list = Vec::new();
+        for base in [
+            "/usr/bin",
+            "/usr/local/bin",
+            "/bin",
+            "/snap/bin",
+            "/opt/homebrew/bin",
+        ] {
+            list.push(PathBuf::from(base).join(name));
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            for base in [
+                format!("{home}/.local/bin"),
+                format!("{home}/.nvm/current/bin"),
+                format!("{home}/.fnm/current/bin"),
+                format!("{home}/.volta/bin"),
+                format!("{home}/.asdf/shims"),
+            ] {
+                list.push(PathBuf::from(base).join(name));
+            }
+        }
+        list
+    };
+
+    for path in hardcoded {
+        if looks_like_executable(&path) {
             return Some(path);
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        for candidate in [
-            format!("{home}/.local/bin/{name}"),
-            format!("{home}/.nvm/current/bin/{name}"),
-            format!("{home}/.fnm/current/bin/{name}"),
-            format!("{home}/.volta/bin/{name}"),
-            format!("{home}/.asdf/shims/{name}"),
-        ] {
-            let path = PathBuf::from(&candidate);
-            if path.is_file() {
+
+    // 在增强 PATH 中逐项查找
+    for dir in command_path_env().split(path_separator()) {
+        if dir.is_empty() {
+            continue;
+        }
+        for variant in &variants {
+            let path = PathBuf::from(dir).join(variant);
+            if looks_like_executable(&path) {
                 return Some(path);
             }
         }
     }
-    let output = Command::new("sh")
-        .args(["-lc", &format!("command -v {name}")])
-        .env("PATH", command_path_env())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+
+    #[cfg(windows)]
+    {
+        let script = format!(
+            "where.exe {name} 2>NUL & where.exe {name}.cmd 2>NUL & where.exe {name}.exe 2>NUL"
+        );
+        let output = Command::new("cmd")
+            .args(["/C", &script])
+            .env("PATH", command_path_env())
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let path = PathBuf::from(line.trim());
+            if looks_like_executable(&path) {
+                return Some(path);
+            }
+        }
+        None
     }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if path.is_empty() {
-        return None;
+
+    #[cfg(not(windows))]
+    {
+        let output = Command::new("sh")
+            .args(["-lc", &format!("command -v {name}")])
+            .env("PATH", command_path_env())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if path.is_empty() {
+            return None;
+        }
+        let path = PathBuf::from(path);
+        looks_like_executable(&path).then_some(path)
     }
-    let path = PathBuf::from(path);
-    path.is_file().then_some(path)
 }
 
 fn node_bin() -> Option<PathBuf> {
@@ -205,13 +386,18 @@ fn npm_bin() -> Option<PathBuf> {
     resolve_binary("npm")
 }
 
+fn configure_command_path(command: &mut Command) {
+    command.env("PATH", command_path_env());
+}
+
 fn node_available() -> bool {
     let Some(node) = node_bin() else {
         return false;
     };
-    Command::new(node)
+    let mut command = Command::new(node);
+    configure_command_path(&mut command);
+    command
         .arg("--version")
-        .env("PATH", command_path_env())
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -268,17 +454,27 @@ fn ensure_mcp_dependencies(source: &Path, target: &Path) -> Result<(), String> {
         );
     };
 
-    let output = Command::new(&npm)
-        .args(["install", "--omit=dev"])
-        .current_dir(target)
-        .env("PATH", command_path_env())
-        .output()
-        .map_err(|error| {
-            format!(
-                "无法执行 npm install（{}）：{error}。请确认 npm 可用，或手动选择已安装依赖的 tie-mcp 目录。",
-                npm.display()
-            )
-        })?;
+    let output = {
+        let mut command = Command::new(&npm);
+        configure_command_path(&mut command);
+        // Windows 上 npm.cmd 需要可解析的工作目录与 PATH
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        command
+            .args(["install", "--omit=dev"])
+            .current_dir(target)
+            .output()
+            .map_err(|error| {
+                format!(
+                    "无法执行 npm install（{}）：{error}。请确认已安装 Node.js（含 npm），或手动选择已含 node_modules 的 tie-mcp 目录。",
+                    npm.display()
+                )
+            })?
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
