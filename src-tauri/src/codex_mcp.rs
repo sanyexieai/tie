@@ -115,12 +115,186 @@ fn installed_mcp_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(directory)
 }
 
+fn command_path_env() -> String {
+    let mut parts = Vec::new();
+    if let Ok(current) = std::env::var("PATH") {
+        for item in current.split(':') {
+            if !item.is_empty() && !parts.iter().any(|existing| existing == item) {
+                parts.push(item.to_owned());
+            }
+        }
+    }
+    // GUI 启动时 PATH 往往不含用户/系统工具目录
+    for item in [
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/snap/bin",
+        "/opt/homebrew/bin",
+        "/home/linuxbrew/.linuxbrew/bin",
+    ] {
+        if !parts.iter().any(|existing| existing == item) {
+            parts.push(item.to_owned());
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        for item in [
+            format!("{home}/.local/bin"),
+            format!("{home}/.nvm/current/bin"),
+            format!("{home}/.fnm/current/bin"),
+            format!("{home}/.volta/bin"),
+            format!("{home}/.asdf/shims"),
+        ] {
+            if Path::new(&item).is_dir() && !parts.iter().any(|existing| existing == &item) {
+                parts.push(item);
+            }
+        }
+    }
+    parts.join(":")
+}
+
+fn resolve_binary(name: &str) -> Option<PathBuf> {
+    let candidates = [
+        format!("/usr/bin/{name}"),
+        format!("/usr/local/bin/{name}"),
+        format!("/bin/{name}"),
+        format!("/snap/bin/{name}"),
+        format!("/opt/homebrew/bin/{name}"),
+    ];
+    for candidate in candidates {
+        let path = PathBuf::from(&candidate);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        for candidate in [
+            format!("{home}/.local/bin/{name}"),
+            format!("{home}/.nvm/current/bin/{name}"),
+            format!("{home}/.fnm/current/bin/{name}"),
+            format!("{home}/.volta/bin/{name}"),
+            format!("{home}/.asdf/shims/{name}"),
+        ] {
+            let path = PathBuf::from(&candidate);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    let output = Command::new("sh")
+        .args(["-lc", &format!("command -v {name}")])
+        .env("PATH", command_path_env())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if path.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(path);
+    path.is_file().then_some(path)
+}
+
+fn node_bin() -> Option<PathBuf> {
+    resolve_binary("node")
+}
+
+fn npm_bin() -> Option<PathBuf> {
+    resolve_binary("npm")
+}
+
 fn node_available() -> bool {
-    Command::new("node")
+    let Some(node) = node_bin() else {
+        return false;
+    };
+    Command::new(node)
         .arg("--version")
+        .env("PATH", command_path_env())
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn copy_node_modules(from: &Path, to: &Path) -> Result<(), String> {
+    let source = from.join("node_modules");
+    if !source.is_dir() {
+        return Err("源包没有 node_modules".into());
+    }
+    let target = to.join("node_modules");
+    if target.exists() {
+        fs::remove_dir_all(&target).map_err(|error| error.to_string())?;
+    }
+    copy_dir_recursive_including_node_modules(&source, &target)
+}
+
+fn copy_dir_recursive_including_node_modules(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(from).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        if source.is_dir() {
+            copy_dir_recursive_including_node_modules(&source, &target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::copy(&source, &target).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_mcp_dependencies(source: &Path, target: &Path) -> Result<(), String> {
+    let node_modules = target.join("node_modules");
+    if node_modules.is_dir() {
+        return Ok(());
+    }
+
+    // 优先复用源包已安装依赖，避免 GUI 环境下 npm PATH / 网络问题
+    if source.join("node_modules").is_dir() {
+        copy_node_modules(source, target)?;
+        if node_modules.is_dir() {
+            return Ok(());
+        }
+    }
+
+    let Some(npm) = npm_bin() else {
+        return Err(
+            "未找到 npm。请安装 Node.js（含 npm），或从终端启动 Tie 后再接入；也可手动选择已含 node_modules 的 tie-mcp 目录。"
+                .into(),
+        );
+    };
+
+    let output = Command::new(&npm)
+        .args(["install", "--omit=dev"])
+        .current_dir(target)
+        .env("PATH", command_path_env())
+        .output()
+        .map_err(|error| {
+            format!(
+                "无法执行 npm install（{}）：{error}。请确认 npm 可用，或手动选择已安装依赖的 tie-mcp 目录。",
+                npm.display()
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("退出码 {}", output.status.code().unwrap_or(-1))
+        };
+        return Err(format!("npm install 失败：{detail}"));
+    }
+    if !node_modules.is_dir() {
+        return Err("npm install 完成但未生成 node_modules。".into());
+    }
+    Ok(())
 }
 
 fn escape_toml_string(value: &str) -> String {
@@ -251,8 +425,12 @@ fn strip_mcp_server_block(config: &str) -> String {
 }
 
 fn build_mcp_block(server_path: &Path, workspace_path: &Path) -> String {
+    let node = node_bin()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "node".to_owned());
     format!(
-        "[mcp_servers.tie]\ncommand = \"node\"\nargs = [{}]\ndefault_tools_approval_mode = \"approve\"\n\n[mcp_servers.tie.env]\nTIE_WORKSPACE = {}\n",
+        "[mcp_servers.tie]\ncommand = {}\nargs = [{}]\ndefault_tools_approval_mode = \"approve\"\n\n[mcp_servers.tie.env]\nTIE_WORKSPACE = {}\n",
+        escape_toml_string(&node),
         escape_toml_string(&server_path.to_string_lossy()),
         escape_toml_string(&workspace_path.to_string_lossy())
     )
@@ -263,7 +441,10 @@ fn mcp_server_json(server_path: &Path, workspace_path: &Path, with_type: bool) -
     if with_type {
         entry.insert("type".into(), json!("stdio"));
     }
-    entry.insert("command".into(), json!("node"));
+    let node = node_bin()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "node".to_owned());
+    entry.insert("command".into(), json!(node));
     entry.insert(
         "args".into(),
         json!([server_path.to_string_lossy().to_string()]),
@@ -484,17 +665,7 @@ fn ensure_mcp_runtime(app: &AppHandle) -> Result<PathBuf, String> {
         copy_dir_recursive(&source, &target)?;
     }
 
-    let node_modules = target.join("node_modules");
-    if !node_modules.is_dir() {
-        let status = Command::new("npm")
-            .args(["install", "--omit=dev"])
-            .current_dir(&target)
-            .status()
-            .map_err(|error| format!("无法运行 npm install：{error}"))?;
-        if !status.success() {
-            return Err("npm install 失败，请检查网络与 npm 配置后重试。".into());
-        }
-    }
+    ensure_mcp_dependencies(&source, &target)?;
 
     if !target_server.is_file() {
         return Err(format!("MCP 入口不存在：{}", target_server.display()));
