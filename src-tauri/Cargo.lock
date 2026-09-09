@@ -4858,7 +4858,7 @@ dependencies = [
 
 [[package]]
 name = "tie"
-version = "1.0.32"
+version = "1.0.33"
 dependencies = [
  "futures-util",
  "keyring",

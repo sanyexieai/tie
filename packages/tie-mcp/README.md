@@ -2,7 +2,9 @@
 
 本地优先的 Tie MCP Server：让 Codex（或其他 MCP 客户端）读写 **同一份** 工作区 `pages/*.md` 与 `.tie/files/`，**不依赖** Tie Backend。
 
-桌面端负责渲染 `tie://file/`（副本/外链不同样式）并用系统应用打开；登记与整理以 MCP/Skill 为主入口。
+桌面端负责按协议渲染并打开本地链接（登记资源 / 相对路径 / 绝对路径样式不同）；登记与整理以 MCP/Skill 为主入口。
+
+发布版更新后，桌面端启动时会按内容指纹自动把安装包内的 `tie-mcp` 同步到应用数据目录（Agent 已指向该目录时一般无需再点「接入」；仍需新开 Agent 会话加载）。Skill 正文若要同步到工作区 / `~/.agents/skills`，仍需在设置里执行一次接入同步。
 
 ## 能力
 
@@ -20,7 +22,17 @@
 
 记忆类型 `kind`：`decision` | `bug` | `preference` | `note`（自动加 `memory` 等标签）。
 
-文件资源落在工作区 `.tie/files/`（与页面图片附件 `.tie/assets/` 分开）。正文链接统一用 `tie://file/{id}`；桌面端按 `mode` 区分副本/外链样式。
+## 正文链接协议
+
+| 用途 | 写法 | 桌面样式 |
+|------|------|----------|
+| 页面 | `[[标题]]` / `tie://page/{id}` | 普通链接 |
+| 已登记文件/目录 | `tie://file/{id}`（须 `tie_file_ingest`） | 副本 / 外链 / 目录 |
+| 工作区内相对路径 | `tie://path/{相对路径}`（相对工作区根，禁 `..`） | 相对 |
+| 本机绝对路径 | `file:///...`（不推荐作稳定链接） | 绝对 |
+| 页面图片附件 | `tie://asset/{pageId}/{文件名}` | 图片 |
+
+文件资源落在工作区 `.tie/files/`（与页面图片附件 `.tie/assets/` 分开）。**外部**资源写 `tie://file/{id}`；**区内**路径写 `tie://path/…`；`file:///` 行为保持独立，不要当作 ingest 替代。
 
 ## 准备
 
@@ -146,5 +158,5 @@ TIE_WORKSPACE=/path/to/workspace npm run mcp
 
 - 只读写指定工作区下的 `pages/`、`.tie/history/`、`.tie/files/`
 - 禁止 Agent 手写裸 frontmatter；一律走 `tie_write`
-- 外部文件必须走 `tie_file_ingest`；不要把二进制塞进 Markdown
+- 外部文件必须走 `tie_file_ingest` → 正文写 `tie://file/{id}`；工作区内路径写 `tie://path/…`；不要用 `file:///` 冒充稳定资源链接
 - 不要把密钥、token 写入知识库页面

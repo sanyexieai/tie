@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "tie"
-version = "1.0.32"
+version = "1.0.33"
 description = "A local-first knowledge editor"
 authors = ["Tie contributors"]
 edition = "2021"

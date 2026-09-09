@@ -1308,7 +1308,19 @@ body.storage-source-reordering * { cursor: grabbing !important; user-select: non
 .tiptap-content a.file-link-directory.file-link-copy::before { content: '目录副本'; }
 .tiptap-content a.file-link-directory.file-link-link::before { content: '目录'; }
 .tiptap-content a.file-link-directory:not(.file-link-copy):not(.file-link-link)::before { content: '目录'; color: var(--text-faint); }
-.tiptap-content a.file-link:not(.file-link-copy):not(.file-link-link)::before { content: '文件'; color: var(--text-faint); }
+.tiptap-content a.file-link:not(.file-link-copy):not(.file-link-link):not(.file-link-absolute):not(.file-link-relative)::before { content: '文件'; color: var(--text-faint); }
+.tiptap-content a.file-link-absolute {
+  color: #6f7f92;
+  background: color-mix(in srgb, #6f7f92 10%, transparent);
+  border: 1px solid color-mix(in srgb, #6f7f92 35%, transparent);
+}
+.tiptap-content a.file-link-absolute::before { content: '绝对'; color: #6f7f92; }
+.tiptap-content a.file-link-relative {
+  color: #6d8a74;
+  background: color-mix(in srgb, #6d8a74 12%, transparent);
+  border: 1px solid color-mix(in srgb, #6d8a74 38%, transparent);
+}
+.tiptap-content a.file-link-relative::before { content: '相对'; color: #5f7a66; }
 .file-link-row {
   display: flex;
   align-items: center;

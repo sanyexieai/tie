@@ -115,13 +115,16 @@ fn find_source_covering_path<'a>(
         let Ok(root) = root.canonicalize() else {
             return file.starts_with(Path::new(&source.path));
         };
-        file.starts_with(&root)
+        let root = tie_storage::fs_path::strip_extended_length_prefix(&root);
+        let file = tie_storage::fs_path::canonicalize(file);
+        tie_storage::fs_path::is_under_root(&file, &root)
     })
 }
 
 fn ensure_local_source_at(app: &AppHandle, root: PathBuf) -> Result<(StorageSource, bool), String> {
     let root = root
         .canonicalize()
+        .map(|path| tie_storage::fs_path::strip_extended_length_prefix(&path))
         .map_err(|error| format!("无法打开工作区目录：{error}"))?;
     if !root.is_dir() {
         return Err("工作区路径不是目录".to_owned());
@@ -130,12 +133,10 @@ fn ensure_local_source_at(app: &AppHandle, root: PathBuf) -> Result<(StorageSour
 
     let existing_settings = load_settings(app)?;
     let (mut sources, _) = workspace_sources(app)?;
-    if let Some(existing) = sources.iter().find(|source| {
-        PathBuf::from(&source.path)
-            .canonicalize()
-            .map(|path| path == root)
-            .unwrap_or(false)
-    }) {
+    if let Some(existing) = sources
+        .iter()
+        .find(|source| tie_storage::fs_path::paths_equal(Path::new(&source.path), &root))
+    {
         return Ok((existing.clone(), false));
     }
 
@@ -154,15 +155,15 @@ fn ensure_local_source_at(app: &AppHandle, root: PathBuf) -> Result<(StorageSour
 
 fn try_existing_page_id(root: &Path, file: &Path) -> Option<String> {
     let pages_dir = root.join("pages");
-    let canon_file = file.canonicalize().ok()?;
-    let canon_pages = pages_dir.canonicalize().ok()?;
-    if !canon_file.starts_with(&canon_pages) {
+    let canon_file = tie_storage::fs_path::canonicalize(file);
+    let canon_pages = tie_storage::fs_path::canonicalize(&pages_dir);
+    if !tie_storage::fs_path::is_under_root(&canon_file, &canon_pages) {
         return None;
     }
     let content = fs::read_to_string(file).ok()?;
     let page = parse_page(&content).ok()?;
     let expected = markdown_path(root, &page.id);
-    if expected.canonicalize().ok().as_ref() == Some(&canon_file) {
+    if tie_storage::fs_path::paths_equal(&expected, &canon_file) {
         return Some(page.id);
     }
     Some(page.id)
@@ -365,6 +366,7 @@ pub(crate) fn import_markdown_files(
     for raw_path in paths {
         let path = PathBuf::from(raw_path)
             .canonicalize()
+            .map(|path| tie_storage::fs_path::strip_extended_length_prefix(&path))
             .map_err(|error| format!("无法读取导入文件：{error}"))?;
         if !path.is_file()
             || !path.extension().is_some_and(|extension| {
@@ -468,6 +470,7 @@ pub(crate) fn open_markdown_files(
     for raw_path in paths {
         let file = PathBuf::from(raw_path.trim())
             .canonicalize()
+            .map(|path| tie_storage::fs_path::strip_extended_length_prefix(&path))
             .map_err(|error| format!("无法打开文件：{error}"))?;
         if !path_is_markdown(&file) {
             continue;

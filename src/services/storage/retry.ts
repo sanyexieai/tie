@@ -16,8 +16,11 @@ export function isRetryableStorageError(error: unknown, kind: StorageRetryKind =
   return false
 }
 
-export function queueFailureMessage(error: unknown, action: string) {
+export function queueFailureMessage(error: unknown, action: string, kind: StorageRetryKind = 'file') {
   const message = error instanceof Error ? error.message : `${action}失败`
-  // 入队 ≠ 成功：云端未确认写入前不得当作已保存。
+  // 入队 ≠ 成功：在确认写入前不得当作已保存。
+  if (kind === 'file') {
+    return `${message}（未写入本地磁盘，已加入待重试队列）`
+  }
   return `${message}（未写入远程，已加入待同步队列）`
 }

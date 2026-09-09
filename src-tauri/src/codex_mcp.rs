@@ -528,33 +528,8 @@ fn escape_toml_key(key: &str) -> String {
 }
 
 /// Windows `canonicalize` 会产出 `\\?\C:\...`；Node / Codex 环境变量里常认不了，写入外部配置前去掉。
-fn strip_windows_extended_prefix(path: &Path) -> PathBuf {
-    let raw = path.to_string_lossy();
-    #[cfg(windows)]
-    {
-        let text = raw.as_ref();
-        if let Some(rest) = text.strip_prefix(r"\\?\") {
-            if let Some(unc) = rest.strip_prefix(r"UNC\") {
-                return PathBuf::from(format!(r"\\{unc}"));
-            }
-            return PathBuf::from(rest);
-        }
-        if let Some(rest) = text.strip_prefix("//?/") {
-            if let Some(unc) = rest.strip_prefix("UNC/") {
-                return PathBuf::from(format!(r"\\{unc}"));
-            }
-            return PathBuf::from(rest);
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = &raw;
-    }
-    path.to_path_buf()
-}
-
 fn path_for_external_config(path: &Path) -> PathBuf {
-    strip_windows_extended_prefix(path)
+    tie_storage::fs_path::for_external_config(path)
 }
 
 fn parse_configured_workspace_toml(config: &str) -> Option<String> {
@@ -955,6 +930,134 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn hash_file(path: &Path) -> Option<u64> {
+    fs::read(path).ok().map(|bytes| hash_bytes(&bytes))
+}
+
+fn append_tree_hashes(root: &Path, prefix: &str, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut names = entries
+        .filter_map(|entry| entry.ok())
+        .collect::<Vec<_>>();
+    names.sort_by_key(|entry| entry.file_name());
+    for entry in names {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if path.is_dir() {
+            if name == "node_modules" || name == "test" {
+                continue;
+            }
+            append_tree_hashes(&path, &rel, out);
+        } else if let Some(hash) = hash_file(&path) {
+            out.push(format!("{rel}:{hash:016x}"));
+        }
+    }
+}
+
+/// Content fingerprint of the packaged MCP sources (ignores node_modules / tests).
+fn mcp_runtime_fingerprint(source: &Path) -> String {
+    let mut parts = Vec::new();
+    if let Some(hash) = hash_file(&source.join("package.json")) {
+        parts.push(format!("package.json:{hash:016x}"));
+    }
+    if let Some(hash) = hash_file(&source.join("package-lock.json")) {
+        parts.push(format!("package-lock.json:{hash:016x}"));
+    }
+    if let Some(hash) = hash_file(&source.join("SKILL.md")) {
+        parts.push(format!("SKILL.md:{hash:016x}"));
+    }
+    append_tree_hashes(&source.join("src"), "src", &mut parts);
+    parts.sort();
+    parts.join("|")
+}
+
+fn mcp_runtime_stamp_path(target: &Path) -> PathBuf {
+    target.join(".tie-mcp-runtime-stamp")
+}
+
+fn package_lock_fingerprint(source: &Path) -> String {
+    hash_file(&source.join("package-lock.json"))
+        .map(|hash| format!("{hash:016x}"))
+        .unwrap_or_default()
+}
+
+fn ensure_mcp_runtime(app: &AppHandle) -> Result<PathBuf, String> {
+    if !node_available() {
+        return Err(
+            "未检测到 Node.js。接入 Agent MCP 需要本机已安装 node，并在 PATH 中可用。".into(),
+        );
+    }
+    let source = resolve_mcp_package_source(app)?;
+    let target = installed_mcp_dir(app)?;
+    let target_server = target.join("src").join("server.js");
+    let fingerprint = mcp_runtime_fingerprint(&source);
+    let stamp_path = mcp_runtime_stamp_path(&target);
+    let previous_stamp = fs::read_to_string(&stamp_path).unwrap_or_default();
+    let previous_lock = previous_stamp
+        .split('|')
+        .find_map(|part| part.strip_prefix("package-lock.json:"))
+        .unwrap_or("")
+        .to_owned();
+    let current_lock = package_lock_fingerprint(&source);
+    let needs_copy = !target_server.is_file() || previous_stamp.trim() != fingerprint;
+
+    if needs_copy {
+        copy_dir_recursive(&source, &target)?;
+        // 依赖锁定变更时强制重装，避免沿用旧 node_modules
+        if !current_lock.is_empty() && current_lock != previous_lock {
+            let node_modules = target.join("node_modules");
+            if node_modules.is_dir() {
+                let _ = fs::remove_dir_all(&node_modules);
+            }
+        }
+    }
+
+    ensure_mcp_dependencies(&source, &target)?;
+
+    if !target_server.is_file() {
+        return Err(format!("MCP 入口不存在：{}", target_server.display()));
+    }
+    fs::write(&stamp_path, &fingerprint).map_err(|error| error.to_string())?;
+    Ok(path_for_external_config(&target_server))
+}
+
+/// Best-effort：启动时把安装包内更新后的 tie-mcp 同步到应用数据目录。
+/// Agent 配置已指向该目录时，无需再点「接入」即可用上新逻辑；仍需新开 Agent 会话加载。
+pub fn refresh_installed_mcp_runtime(app: &AppHandle) -> Result<bool, String> {
+    let source = match resolve_mcp_package_source(app) {
+        Ok(path) => path,
+        Err(_) => return Ok(false),
+    };
+    let target = installed_mcp_dir(app)?;
+    let stamp_path = mcp_runtime_stamp_path(&target);
+    let fingerprint = mcp_runtime_fingerprint(&source);
+    let previous = fs::read_to_string(&stamp_path).unwrap_or_default();
+    // 从未接入过也预热一份运行时，方便下次接入更快
+    if previous.trim() == fingerprint && target.join("src").join("server.js").is_file() {
+        return Ok(false);
+    }
+    if !node_available() {
+        return Ok(false);
+    }
+    ensure_mcp_runtime(app)?;
+    Ok(true)
+}
+
 fn mcp_source_override_path(app: &AppHandle) -> Option<PathBuf> {
     let file = app.path().app_data_dir().ok()?.join("mcp-source-override");
     if file.is_file() {
@@ -1035,35 +1138,6 @@ fn resolve_mcp_package_source(app: &AppHandle) -> Result<PathBuf, String> {
         "找不到 tie-mcp 包。已尝试路径：{}。请确认仓库含 packages/tie-mcp，或重新安装应用。",
         tried.join(" ; ")
     ))
-}
-
-fn ensure_mcp_runtime(app: &AppHandle) -> Result<PathBuf, String> {
-    if !node_available() {
-        return Err(
-            "未检测到 Node.js。接入 Agent MCP 需要本机已安装 node，并在 PATH 中可用。".into(),
-        );
-    }
-    let source = resolve_mcp_package_source(app)?;
-    let target = installed_mcp_dir(app)?;
-    let target_server = target.join("src").join("server.js");
-    let needs_copy = !target_server.is_file()
-        || fs::metadata(&source.join("src").join("server.js"))
-            .ok()
-            .and_then(|meta| meta.modified().ok())
-            > fs::metadata(&target_server)
-                .ok()
-                .and_then(|meta| meta.modified().ok());
-
-    if needs_copy {
-        copy_dir_recursive(&source, &target)?;
-    }
-
-    ensure_mcp_dependencies(&source, &target)?;
-
-    if !target_server.is_file() {
-        return Err(format!("MCP 入口不存在：{}", target_server.display()));
-    }
-    Ok(path_for_external_config(&target_server))
 }
 
 fn validate_workspace(path: &Path) -> Result<PathBuf, String> {

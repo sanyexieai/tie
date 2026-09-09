@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { pathsEqual, resolveFsPath } from './fs-path.js'
 
 const TEXT_EXTS = new Set([
   'txt', 'md', 'markdown', 'json', 'csv', 'tsv', 'log', 'yml', 'yaml',
@@ -186,8 +187,8 @@ export function createFileRegistry(workspaceRoot) {
       if (!meta) continue
       if (mode && meta.mode !== mode) continue
       if (sha256 && meta.sha256 && meta.sha256 === sha256) return meta
-      if (absPath && path.resolve(meta.sourcePath) === absPath && meta.mode === mode) return meta
-      if (mode === 'link' && absPath && path.resolve(meta.storedPath) === absPath) return meta
+      if (absPath && pathsEqual(meta.sourcePath, absPath) && meta.mode === mode) return meta
+      if (mode === 'link' && absPath && pathsEqual(meta.storedPath, absPath)) return meta
     }
     return null
   }
@@ -268,7 +269,7 @@ export function createFileRegistry(workspaceRoot) {
     const inputPath = String(rawPath || '').trim()
     if (!inputPath) throw new Error('path 必填')
 
-    const absPath = path.resolve(inputPath)
+    const absPath = resolveFsPath(inputPath)
     if (!fs.existsSync(absPath)) {
       throw new Error(`路径不存在：${absPath}`)
     }

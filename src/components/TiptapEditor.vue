@@ -17,13 +17,13 @@ import TaskItem from '@tiptap/extension-task-item'
 import TaskList from '@tiptap/extension-task-list'
 import { Markdown } from '@tiptap/markdown'
 import { common, createLowlight } from 'lowlight'
-import { openUrl, openPath } from '@tauri-apps/plugin-opener'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { Page, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { canStorePageAssets, embedImageFile, inlineImageSrcToFile, isImageFile, normalizeImageFile, parseAssetUrl, resolveAssetDisplayUrl, shouldHandleImagePaste, uploadPastedImage } from '@/services/attachments'
-import { buildFileUrl, cachedFileKind, cachedFileMode, fileLinkClass, ingestWorkspaceFile, listWorkspaceFiles, openWorkspaceFile, parseFileUrl } from '@/services/files'
-import { fileUrlToLocalPath } from '@/services/local-path'
+import { buildFileUrl, ingestWorkspaceFile, listWorkspaceFiles } from '@/services/files'
+import { applyLocalLinkClasses, buildPathUrl, classifyLocalLink, openLocalLink, PATH_URL_PREFIX } from '@/services/local-links'
 
 const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page> }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
@@ -82,21 +82,10 @@ function decorateFileLinks() {
   const root = filesWorkspaceRoot()
   const dom = editor.value?.view.dom
   if (!dom) return
-  for (const anchor of dom.querySelectorAll<HTMLAnchorElement>('a[href^="tie://file/"]')) {
-    const parsed = parseFileUrl(anchor.getAttribute('href') ?? '')
-    const mode = parsed ? cachedFileMode(root, parsed.fileId) : null
-    const kind = parsed ? cachedFileKind(root, parsed.fileId) : null
-    anchor.classList.remove('file-link', 'file-link-copy', 'file-link-link', 'file-link-directory')
-    for (const token of fileLinkClass(mode, kind).split(/\s+/)) {
-      if (token) anchor.classList.add(token)
-    }
-    if (mode === 'copy' || mode === 'link') {
-      anchor.dataset.fileMode = mode
-    } else {
-      delete anchor.dataset.fileMode
-    }
-    if (kind === 'directory') anchor.dataset.fileKind = 'directory'
-    else delete anchor.dataset.fileKind
+  for (const anchor of dom.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+    const href = anchor.getAttribute('href') ?? ''
+    if (!classifyLocalLink(href)) continue
+    applyLocalLinkClasses(anchor, href, { workspaceRoot: root })
   }
 }
 
@@ -404,7 +393,10 @@ function stripAssetAutolinks(currentEditor: Editor) {
     const href = String(mark?.attrs.href ?? '')
     const text = node.text ?? ''
     const isAssetLink = href.startsWith('tie://asset/')
-      || (href.startsWith('tie://') && !href.startsWith('tie://page/') && !href.startsWith('tie://file/'))
+      || (href.startsWith('tie://')
+        && !href.startsWith('tie://page/')
+        && !href.startsWith('tie://file/')
+        && !href.startsWith(PATH_URL_PREFIX))
       || text.includes('tie://asset/')
     if (!mark || !isAssetLink) return
     tr.removeMark(pos, pos + node.nodeSize, linkType)
@@ -539,6 +531,24 @@ function pickLocalFileLink(editor: Editor, kind: 'file' | 'directory') {
   })()
 }
 
+function insertRelativePathLink(editor: Editor) {
+  const root = filesWorkspaceRoot()
+  if (!root) {
+    window.alert('当前页面未绑定本地或 SMB 存储源，无法插入相对路径链接')
+    return
+  }
+  const raw = window.prompt('工作区相对路径（例如 docs/spec.pdf）')?.trim()
+  if (!raw) return
+  try {
+    const href = buildPathUrl(raw)
+    const title = raw.replace(/\\/g, '/').split('/').filter(Boolean).pop() || raw
+    editor.chain().focus().insertContent({ type: 'text', text: title, marks: [{ type: 'link', attrs: { href } }] }).run()
+    scheduleDecorateFileLinks()
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : String(error))
+  }
+}
+
 const slashCommands: SlashCommand[] = [
   { id: 'text', label: '正文', hint: '普通段落', keywords: ['paragraph', '文字', '文本'], run: (editor) => editor.chain().focus().setParagraph().run() },
   { id: 'heading-2', label: '二级标题', hint: '章节标题', keywords: ['heading', '标题', 'h2'], run: (editor) => editor.chain().focus().toggleHeading({ level: 2 }).run() },
@@ -561,6 +571,7 @@ const slashCommands: SlashCommand[] = [
   { id: 'page-link', label: '链接页面', hint: '关联知识库中的页面', keywords: ['link', 'page', '链接', '关联', '页面'], run: () => openSlashPagePicker() },
   { id: 'local-file', label: '本地文件', hint: '登记并插入外链', keywords: ['file', 'local', '文件', '本地', '链接', '外链'], run: (editor) => pickLocalFileLink(editor, 'file') },
   { id: 'local-directory', label: '本地目录', hint: '登记并插入目录外链', keywords: ['folder', 'directory', '目录', '文件夹', '本地', '链接', '外链'], run: (editor) => pickLocalFileLink(editor, 'directory') },
+  { id: 'relative-path', label: '相对路径', hint: '工作区内相对路径链接', keywords: ['relative', 'path', '相对', '路径', '工作区'], run: (editor) => insertRelativePathLink(editor) },
   { id: 'child-page', label: '子页面', hint: '在当前页面下创建页面', keywords: ['page', 'child', '页面', '子页面'], run: () => emit('create-child') },
 ]
 
@@ -582,40 +593,15 @@ function openInternalLink(event: MouseEvent) {
   return true
 }
 
-function openFileLink(event: MouseEvent) {
-  const target = event.target
-  if (!(target instanceof Element)) return false
-  const anchor = target.closest<HTMLAnchorElement>('a[href^="tie://file/"]')
-  const href = anchor?.getAttribute('href')
-  const parsed = href ? parseFileUrl(href) : null
-  if (!parsed) return false
-  event.preventDefault()
-  const root = filesWorkspaceRoot()
-  if (!root) {
-    window.alert('当前页面没有可用的本地/SMB 工作区，无法打开文件资源。')
-    return true
-  }
-  void openWorkspaceFile(root, parsed.fileId).catch((error) => {
-    window.alert(error instanceof Error ? error.message : '无法打开文件资源')
-  })
-  return true
-}
-
-function openLocalPathLink(event: MouseEvent) {
+function openLocalLinkFromEvent(event: MouseEvent) {
   const target = event.target
   if (!(target instanceof Element)) return false
   const href = target.closest('a')?.getAttribute('href')
-  if (!href) return false
-  const localPath = fileUrlToLocalPath(href)
-  if (!localPath) return false
+  if (!href || !classifyLocalLink(href)) return false
   event.preventDefault()
-  if ('__TAURI_INTERNALS__' in window) {
-    void openPath(localPath).catch((error) => {
-      window.alert(error instanceof Error ? error.message : `无法打开本地路径：${localPath}`)
-    })
-  } else {
-    window.open(href, '_blank', 'noopener,noreferrer')
-  }
+  void openLocalLink(href, { workspaceRoot: filesWorkspaceRoot() }).catch((error) => {
+    window.alert(error instanceof Error ? error.message : '无法打开本地链接')
+  })
   return true
 }
 
@@ -658,8 +644,7 @@ function focusNextWritingLine(event: MouseEvent) {
 function handleEditorClick(event: MouseEvent) {
   const handled =
     openInternalLink(event)
-    || openFileLink(event)
-    || openLocalPathLink(event)
+    || openLocalLinkFromEvent(event)
     || openExternalLink(event)
     || focusNextWritingLine(event)
   if (handled) event.stopPropagation()
@@ -687,6 +672,7 @@ const editor = useEditor({
         isAllowedUri: (url, { defaultValidate }) => {
           if (url.startsWith('tie://page/')) return true
           if (url.startsWith('tie://file/')) return true
+          if (url.startsWith(PATH_URL_PREFIX)) return true
           if (url.startsWith('tie://')) return false
           if (/^file:/i.test(url)) return true
           return defaultValidate(url)

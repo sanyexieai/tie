@@ -1,6 +1,7 @@
 use crate::page::{ensure_demo, merge_loaded_pages, normalize_page_sources, parse_page};
 use crate::paths::default_workspace_root;
 use crate::settings::{load, save, source_from_path, workspace_sources};
+use tie_common::fs_path;
 use tie_common::{StorageSource, Workspace, WorkspaceSettings, WorkspaceSnapshot};
 use std::{fs, path::PathBuf};
 
@@ -60,9 +61,9 @@ pub fn resolve_directory_path(path: &str) -> Result<PathBuf, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         match path_buf.canonicalize() {
-            Ok(root) if root.is_dir() => Ok(root),
+            Ok(root) if root.is_dir() => Ok(fs_path::strip_extended_length_prefix(&root)),
             Ok(_) => Err("所选路径不是目录".to_owned()),
-            Err(_) if path_buf.is_dir() => Ok(path_buf),
+            Err(_) if path_buf.is_dir() => Ok(fs_path::strip_extended_length_prefix(&path_buf)),
             Err(error) => Err(format!("无法打开所选目录：{error}")),
         }
     }
@@ -74,7 +75,7 @@ pub fn resolve_directory_path(path: &str) -> Result<PathBuf, String> {
         if !root.is_dir() {
             return Err("所选路径不是目录".to_owned());
         }
-        Ok(root)
+        Ok(fs_path::strip_extended_length_prefix(&root))
     }
 }
 

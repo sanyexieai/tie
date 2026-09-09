@@ -96,7 +96,15 @@ fn save_registry(app: &AppHandle, registry: &SkillRegistry) -> Result<(), String
 }
 
 fn canonicalize_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    tie_storage::fs_path::canonicalize(path)
+}
+
+fn same_path(left: &str, right: &str) -> bool {
+    tie_storage::fs_path::paths_equal(Path::new(left), Path::new(right))
+}
+
+fn path_under_root(path: &str, root: &Path) -> bool {
+    tie_storage::fs_path::is_under_root(Path::new(path), root)
 }
 
 fn parse_skill_description(content: &str) -> String {
@@ -254,20 +262,8 @@ fn common_scan_roots(app: &AppHandle, workspace_hint: Option<&str>) -> Vec<PathB
     roots
 }
 
-fn same_path(left: &str, right: &str) -> bool {
-    let left_path = canonicalize_path(Path::new(left));
-    let right_path = canonicalize_path(Path::new(right));
-    left_path == right_path
-}
-
 fn skill_name_key(name: &str) -> String {
     name.trim().to_ascii_lowercase()
-}
-
-fn path_under_root(path: &str, root: &Path) -> bool {
-    let path = canonicalize_path(Path::new(path));
-    let root = canonicalize_path(root);
-    path.starts_with(&root)
 }
 
 fn prefer_scanned_skill(

@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createFileRegistry } from './files.js'
+import { stripWindowsExtendedPrefix } from './fs-path.js'
 import { ensureTitleMarkdown, frontmatter, newPageId, parsePage } from './page-format.js'
 
 const LINK_TITLE_RE = /\[\[([^\]]+)\]\]/g
@@ -29,15 +30,6 @@ function normalizeMarkdownInput(raw) {
   } catch {
     return text
   }
-}
-
-function stripWindowsExtendedPrefix(input) {
-  const text = String(input || '')
-  if (text.startsWith('\\\\?\\UNC\\')) return `\\\\${text.slice('\\\\?\\UNC\\'.length)}`
-  if (text.startsWith('\\\\?\\')) return text.slice('\\\\?\\'.length)
-  if (text.startsWith('//?/UNC/')) return `//${text.slice('//?/UNC/'.length)}`
-  if (text.startsWith('//?/')) return text.slice('//?/'.length)
-  return text
 }
 
 function resolveWorkspaceRoot(raw) {

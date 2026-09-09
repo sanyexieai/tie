@@ -7,6 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::AppHandle;
+use tie_storage::fs_path;
 use tie_storage::local::{
     io, load_file_workspace, register_storage_source, resolve_directory_path, Page, PageRevision,
     WorkspaceSettings, WorkspaceSnapshot,
@@ -40,35 +41,6 @@ fn files_meta_path(root: &Path, file_id: &str) -> PathBuf {
 fn read_json_file(path: &Path) -> Result<Value, String> {
     let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
     serde_json::from_str(&raw).map_err(|error| error.to_string())
-}
-
-fn strip_windows_extended_prefix(path: &Path) -> PathBuf {
-    let raw = path.to_string_lossy();
-    #[cfg(windows)]
-    {
-        let text = raw.as_ref();
-        if let Some(rest) = text.strip_prefix(r"\\?\") {
-            if let Some(unc) = rest.strip_prefix(r"UNC\") {
-                return PathBuf::from(format!(r"\\{unc}"));
-            }
-            return PathBuf::from(rest);
-        }
-        if let Some(rest) = text.strip_prefix("//?/") {
-            if let Some(unc) = rest.strip_prefix("UNC/") {
-                return PathBuf::from(format!(r"\\{unc}"));
-            }
-            return PathBuf::from(rest);
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = &raw;
-    }
-    path.to_path_buf()
-}
-
-fn path_for_shell_open(path: &Path) -> PathBuf {
-    strip_windows_extended_prefix(path)
 }
 
 fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource> {
@@ -116,13 +88,13 @@ fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource
         .and_then(|item| item.as_str())
         .unwrap_or("")
         .to_owned();
-    let root = path_for_shell_open(root);
+    let root = fs_path::for_shell_open(root);
     let open_buf = if mode == "copy" {
         let stored = PathBuf::from(stored_path.replace('\\', "/"));
         if stored.is_absolute() {
-            path_for_shell_open(&stored)
+            fs_path::for_shell_open(&stored)
         } else {
-            path_for_shell_open(&root.join(stored))
+            fs_path::for_shell_open(&root.join(stored))
         }
     } else {
         let candidate = if stored_path.trim().is_empty() {
@@ -130,7 +102,7 @@ fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource
         } else {
             PathBuf::from(&stored_path)
         };
-        path_for_shell_open(&candidate)
+        fs_path::for_shell_open(&candidate)
     };
     let open_path = open_buf.to_string_lossy().into_owned();
     // 目录资源也要算存在，否则外链目录会被桌面端当成失效。
@@ -405,7 +377,7 @@ fn resolve_abs_path(raw: &str) -> Result<PathBuf, String> {
         return Err(format!("路径不存在：{}", input.display()));
     }
     let canonical = fs::canonicalize(&input).unwrap_or(input);
-    Ok(strip_windows_extended_prefix(&canonical))
+    Ok(fs_path::strip_extended_length_prefix(&canonical))
 }
 
 fn find_existing_resource(
@@ -441,7 +413,7 @@ fn find_existing_resource(
             .unwrap_or("");
         let source_resolved = PathBuf::from(source);
         let source_abs = fs::canonicalize(&source_resolved)
-            .map(|p| strip_windows_extended_prefix(&p))
+            .map(|p| fs_path::strip_extended_length_prefix(&p))
             .unwrap_or(source_resolved);
         if source_abs == abs_path {
             return Ok(Some(meta));
@@ -449,7 +421,7 @@ fn find_existing_resource(
         if mode == "link" {
             let stored_resolved = PathBuf::from(stored);
             let stored_abs = fs::canonicalize(&stored_resolved)
-                .map(|p| strip_windows_extended_prefix(&p))
+                .map(|p| fs_path::strip_extended_length_prefix(&p))
                 .unwrap_or(stored_resolved);
             if stored_abs == abs_path || stored == abs.as_ref() {
                 return Ok(Some(meta));

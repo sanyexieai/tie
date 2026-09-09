@@ -12,6 +12,7 @@ import {
   writeSkillFile,
   type ScannedSkill,
 } from '@/services/codex-mcp'
+import { shortenDisplayPath } from '@/services/local-path'
 import { useWorkspaceStore } from '@/stores/workspace'
 import type { Page } from '@/types'
 
@@ -47,9 +48,7 @@ const fakePageId = computed(() => `skill_${active.value?.id ?? 'none'}`)
 const pendingScan = computed(() => scanned.value.filter((item) => !item.connected))
 
 function shortenPath(path: string) {
-  return path
-    .replace(/^\/home\/[^/]+/, '~')
-    .replace(/^\/Users\/[^/]+/, '~')
+  return shortenDisplayPath(path)
 }
 
 function normalizeNewlines(content: string) {

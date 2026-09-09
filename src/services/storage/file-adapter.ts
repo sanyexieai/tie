@@ -48,10 +48,12 @@ export const fileStorageAdapter: StorageAdapter = {
       return saved
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      if (message.includes('其他设备更新')) throw new Error('页面已在其他设备更新，请重新载入后再保存')
+      if (message.includes('其他设备更新') || message.includes('磁盘上被修改')) {
+        throw new Error('页面文件已被其他程序修改，请重新载入后再保存')
+      }
       if (options?.queueOnFailure !== false && isRetryableStorageError(error, 'file')) {
         syncQueue.enqueueSave(page, options?.expectedUpdatedAt)
-        throw new Error(queueFailureMessage(error, '保存'))
+        throw new Error(queueFailureMessage(error, '保存', 'file'))
       }
       throw error
     }
@@ -64,7 +66,7 @@ export const fileStorageAdapter: StorageAdapter = {
     } catch (error) {
       if (isRetryableStorageError(error, 'file')) {
         syncQueue.enqueueDelete(_sourceId, pages)
-        throw new Error(queueFailureMessage(error, '删除'))
+        throw new Error(queueFailureMessage(error, '删除', 'file'))
       }
       throw error
     }

@@ -5,7 +5,7 @@ import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSo
 import { reconcileSaveAgainstRemote } from '@/services/save-reconcile'
 import { isLocalWinningConflict } from '@/services/storage/sync-merge'
 import { loadLocalS3Providers, refreshS3Providers, s3StorageSource, takeS3SourceIdRemap, buildS3SourceIdHealingRemap } from '@/services/s3'
-import { isCloudStorageSourceId } from '@/services/storage-identity'
+import { isCloudStorageSourceId, isLocalStorageSourceId } from '@/services/storage-identity'
 import { dedupeStorageSources, isWorkspaceFileSource, uniqueSourceIds } from '@/services/storage-sources'
 import { sourceStatusStore, syncQueue, storageRegistry } from '@/services/storage'
 import { transferPreservesHistory } from '@/services/transfer-policy'
@@ -28,6 +28,11 @@ function sortSourcesByOrder(sources: StorageSource[], order: string[]) {
     const right = index.get(b.id) ?? Number.MAX_SAFE_INTEGER
     return left - right || a.name.localeCompare(b.name, 'zh-CN')
   })
+}
+
+/** 未绑定任何云端源：只有本机目录/SMB，不存在跨端「远端」。 */
+function pageIsLocalOnly(page: Pick<Page, 'storageSourceId' | 'storageSourceIds'>) {
+  return pageSourceIds(page).every((id) => isLocalStorageSourceId(id))
 }
 
 export const useWorkspaceStore = defineStore('workspace', () => {
@@ -794,16 +799,24 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
     const draft = { ...contentDraft, updatedAt: new Date().toISOString() }
     let expectedUpdatedAt = options?.force ? undefined : previous?.updatedAt
+    let forceWrite = Boolean(options?.force)
+    const localOnly = pageIsLocalOnly(previous ?? draft)
 
-    // 仅「本地领先」的同步冲突禁止静默覆盖；远程已采纳的冲突允许继续保存/对齐。
-    if (!options?.force && syncConflicts.value.has(page.id)) {
+    // 云端协作冲突：本地领先时禁止静默覆盖。纯本地页没有跨端协作面，直接以编辑器为准。
+    if (!forceWrite && syncConflicts.value.has(page.id)) {
       const conflict = syncConflicts.value.get(page.id)
       if (conflict && isLocalWinningConflict(conflict)) {
-        throw new Error('页面已在其他设备更新，请重新载入后再保存')
+        if (localOnly) {
+          forceWrite = true
+          expectedUpdatedAt = undefined
+          clearSyncConflict(page.id)
+        } else {
+          throw new Error('页面已在其他设备更新，请重新载入后再保存')
+        }
       }
     }
 
-    if (!options?.force && previous) {
+    if (!forceWrite && previous) {
       const latest = await workspaceService.readLatestPage(previous).catch(() => null)
       if (latest) {
         const result = reconcileSaveAgainstRemote(previous, draft, latest)
@@ -812,14 +825,22 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           return
         }
         if (result.action === 'conflict') {
-          registerSyncConflict(page.id, previous.storageSourceId, draft.updatedAt, result.remote.updatedAt)
-          throw new Error('页面已在其他设备更新，请重新载入后再保存')
-        }
-        expectedUpdatedAt = result.expectedUpdatedAt
-        if (result.adoptRemoteTimestamp) {
-          pages.value = pages.value.map((item) => (
-            item.id === page.id ? { ...item, updatedAt: result.adoptRemoteTimestamp! } : item
-          ))
+          if (localOnly) {
+            // 纯本地：差异只是「编辑器里的稿」vs「磁盘上的 md」，以当前编辑为准覆盖。
+            forceWrite = true
+            expectedUpdatedAt = undefined
+            clearSyncConflict(page.id)
+          } else {
+            registerSyncConflict(page.id, previous.storageSourceId, draft.updatedAt, result.remote.updatedAt)
+            throw new Error('页面已在其他设备更新，请重新载入后再保存')
+          }
+        } else {
+          expectedUpdatedAt = result.expectedUpdatedAt
+          if (result.adoptRemoteTimestamp) {
+            pages.value = pages.value.map((item) => (
+              item.id === page.id ? { ...item, updatedAt: result.adoptRemoteTimestamp! } : item
+            ))
+          }
         }
       }
     }
@@ -827,7 +848,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     try {
       const saved = await workspaceService.savePage(
         draft,
-        { expectedUpdatedAt, force: options?.force },
+        { expectedUpdatedAt, force: forceWrite },
       )
       const index = pages.value.findIndex((item) => item.id === saved.id)
       if (index === -1) pages.value.push(saved)
@@ -838,16 +859,29 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         const targetUrl = `tie://page/${saved.id}`
         const updates = pages.value.filter((item) => item.id !== saved.id && !item.deletedAt && item.markdown.includes(targetUrl)).map((item) => ({ ...item, markdown: item.markdown.replace(linkPattern, markdownLink(saved.title, saved.id)), updatedAt: new Date().toISOString() }))
         if (updates.length) {
-          const savedLinks = await Promise.all(updates.map((item) => workspaceService.savePage(item, { force: options?.force })))
+          const savedLinks = await Promise.all(updates.map((item) => workspaceService.savePage(item, { force: forceWrite })))
           pages.value = pages.value.map((item) => savedLinks.find((candidate) => candidate.id === item.id) ?? item)
         }
       }
     } catch (error) {
-      if (!options?.force && previous && error instanceof Error && error.message.includes('其他设备')) {
+      if (!forceWrite && previous && error instanceof Error && (
+        error.message.includes('其他设备')
+        || error.message.includes('其他程序')
+        || error.message.includes('磁盘上')
+      )) {
         const latest = await workspaceService.readLatestPage(previous).catch(() => null)
         if (latest && pageContentEqual(latest, draft)) {
           adoptRemotePage(latest, previous)
           clearSyncConflict(latest.id)
+          return
+        }
+        if (localOnly) {
+          // 乐观锁失败：纯本地直接强制覆盖，不再登记「远端冲突」。
+          const saved = await workspaceService.savePage(draft, { force: true })
+          const index = pages.value.findIndex((item) => item.id === saved.id)
+          if (index === -1) pages.value.push(saved)
+          else pages.value[index] = saved
+          clearSyncConflict(saved.id)
           return
         }
         if (latest) registerSyncConflict(page.id, previous.storageSourceId, draft.updatedAt, latest.updatedAt)

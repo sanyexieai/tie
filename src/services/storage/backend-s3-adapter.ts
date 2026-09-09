@@ -57,7 +57,7 @@ export const backendS3StorageAdapter: StorageAdapter = {
     } catch (error) {
       if (options?.queueOnFailure !== false && isRetryableStorageError(error, 'backend')) {
         syncQueue.enqueueSave(page, options?.expectedUpdatedAt)
-        throw new Error(queueFailureMessage(error, '保存'))
+        throw new Error(queueFailureMessage(error, '保存', 'backend'))
       }
       throw error
     }
@@ -72,7 +72,7 @@ export const backendS3StorageAdapter: StorageAdapter = {
     } catch (error) {
       if (isRetryableStorageError(error, 'backend')) {
         syncQueue.enqueueDelete(sourceId, pages)
-        throw new Error(queueFailureMessage(error, '删除'))
+        throw new Error(queueFailureMessage(error, '删除', 'backend'))
       }
       throw error
     }

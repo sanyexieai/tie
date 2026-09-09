@@ -33,7 +33,7 @@ pub fn save_page(
         if let Ok(previous) = parse_page(&content) {
             if let Some(expected) = expected_updated_at {
                 if previous.updated_at != expected {
-                    return Err("页面已在其他设备更新，请重新载入后再保存".to_owned());
+                    return Err("页面文件已在磁盘上被修改，请重新载入后再保存".to_owned());
                 }
             }
             if page_has_changed(&previous, &page) {

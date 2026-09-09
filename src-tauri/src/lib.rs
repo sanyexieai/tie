@@ -46,7 +46,17 @@ pub fn run() {
     builder
         .setup(|_app| {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            set_desktop_window_icon(_app);
+            {
+                set_desktop_window_icon(_app);
+                let handle = _app.handle().clone();
+                std::thread::spawn(move || {
+                    match codex_mcp::refresh_installed_mcp_runtime(&handle) {
+                        Ok(true) => eprintln!("[tie] MCP runtime refreshed from app package"),
+                        Ok(false) => {}
+                        Err(error) => eprintln!("[tie] MCP runtime refresh skipped: {error}"),
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

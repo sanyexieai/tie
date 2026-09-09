@@ -80,10 +80,10 @@ function main() {
 
   server.tool(
     'tie_write',
-    '安全写入 Tie 页面：自动补全 frontmatter；更新时先归档到 .tie/history。创建需 title；更新传 pageId。',
+    '安全写入 Tie 页面：自动补全 frontmatter；更新时先归档到 .tie/history。创建需 title；更新传 pageId。正文链接协议：页面用 [[标题]] 或 tie://page/{id}；已登记文件用 tie://file/{id}；工作区内相对路径用 tie://path/{相对路径}；不要用手写 file:/// 代替登记或相对路径。',
     {
       title: z.string().optional().describe('页面标题；创建时必填'),
-      markdown: z.string().optional().describe('Markdown 正文（纯文本，不要传 JSON 包装）；可省略一级标题，将自动补上'),
+      markdown: z.string().optional().describe('Markdown 正文（纯文本，不要传 JSON 包装）；可省略一级标题，将自动补上。链接见工具说明中的协议表'),
       body: z.string().optional().describe('markdown 的别名（同样应为纯 Markdown）'),
       pageId: z.string().optional().describe('已有页面 id；提供则更新'),
       tags: z.array(z.string()).optional().describe('标签列表；更新时若省略则保留原标签'),
@@ -99,7 +99,7 @@ function main() {
 
   server.tool(
     'tie_file_ingest',
-    '登记外部文件或目录到工作区：mode=copy 导入副本到 .tie/files；mode=link 只记录原路径。目录也可登记；返回 kind/file 元数据与稳定链接 tie://file/{id}。摘要请用 tie_write 写入页面，不要把二进制塞进 markdown，也不要手写 file:/// 链接。',
+    '登记外部文件或目录到工作区：mode=copy 导入副本到 .tie/files；mode=link 只记录原路径。目录也可登记；返回 kind/file 元数据与稳定链接 tie://file/{id}。摘要请用 tie_write 写入页面并引用该 url。工作区内已有文件请直接写 tie://path/{相对路径}，无需 ingest。不要把手写 file:/// 当作稳定资源链接。',
     {
       path: z.string().describe('本机文件或目录的绝对/相对路径'),
       mode: z.enum(['copy', 'link']).describe('copy=导入工作区副本；link=外链引用原路径（目录推荐 link）'),

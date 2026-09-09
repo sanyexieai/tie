@@ -27,9 +27,38 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 4. 外部文件用 `tie_file_ingest` / `tie_file_list` / `tie_file_get`
 5. 新建或更新用 `tie_write`（不要手写 frontmatter）
 
+## 正文链接协议（必须遵守）
+
+桌面端按协议区分样式并打开；**写正文时选用正确协议**，不要混用。
+
+| 用途 | 协议 / 写法 | 桌面样式 | 何时用 |
+|------|-------------|----------|--------|
+| 页面互链 | `[[标题]]` 或 `[标题](tie://page/{pageId})` | 普通链接 | 关联其它笔记页 |
+| 已登记文件/目录 | `[标题](tie://file/{fileId})` | 副本 / 外链 / 目录 | **外部**资源，须先 `tie_file_ingest` |
+| 工作区内相对路径 | `[标题](tie://path/{相对路径})` | 相对 | 文件已在工作区目录内（相对工作区根；POSIX；禁止 `..`） |
+| 本机绝对路径 | `[标题](file:///...)` | 绝对 | **不推荐**作稳定链接；跨机器易失效，打开行为依赖本机 |
+| 页面图片附件 | `![](tie://asset/{pageId}/{文件名})` | 图片 | 由桌面上传产生；不要手写伪造 |
+
+约定摘要：
+
+- **稳定外链资源** → 只写 `tie://file/{id}`（ingest 返回的 `url`）
+- **工作区内部路径** → 写 `tie://path/docs/spec.pdf`（相对根目录）
+- **不要**把 `file:///` 当成登记协议的替代品
+- `tie://path/` 与 `file:///` **互不影响**：绝对路径协议与行为保持不变
+
+示例：
+
+```markdown
+参见 [[排障手册]] 与 [ADR](tie://page/pg_xxx)
+
+[手册 PDF（工作区副本）](tie://file/file_abc)
+[资料夹（外链）](tie://file/file_dir1)
+[工作区内规格](tie://path/docs/spec.pdf)
+```
+
 ## 外部文件 / 目录（副本 / 外链）
 
-主入口是 MCP，不是桌面「文件库」页。**不要**把 `file:///...` 写进正文当作稳定链接——桌面虽可能渲染成可点样式，但不是登记协议，打开行为不可靠。应先 `tie_file_ingest`，再用返回的 `tie://file/{id}`。
+主入口是 MCP，不是桌面「文件库」页。外部文件/目录必须先 `tie_file_ingest`，再用返回的 `tie://file/{id}` 写入正文。
 
 ### 选 mode
 
@@ -47,14 +76,15 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
    - 副本：`[书名（工作区副本）](tie://file/{id})`
    - 外链：`[书名（原文件）](tie://file/{id})`
    - 目录：`[资料夹](tie://file/{id})`
-5. 相关笔记用 `[[页面标题]]` / `tie://page/...` 互链；需要打开路径时用 `tie_file_open_hint`
+   - 若文件本就在工作区内：`[说明](tie://path/相对路径)`（无需 ingest）
+5. 相关笔记用 `[[页面标题]]` / `tie://page/...` 互链；需要打开已登记路径时用 `tie_file_open_hint`
 
 ### 禁止
 
 - 把整份 PDF/二进制塞进 `markdown`
 - 把 `tie_file_ingest` 的整段 JSON 当作正文写入（只要提炼后的 Markdown）
 - 手写 frontmatter 假装登记文件（必须走 `tie_file_*`）
-- 手写 `file:///...` 当作工作区资源链接（必须走 `tie_file_ingest` → `tie://file/{id}`）
+- 手写 `file:///...` 当作工作区资源链接（外部资源走 `tie_file_ingest` → `tie://file/{id}`；区内文件走 `tie://path/…`）
 
 ## 写入规则
 
@@ -62,6 +92,5 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 - `markdown` / `body` 必须是**纯 Markdown 正文**，不要传包含 `id/title/markdown` 的 JSON 包装字符串
 - 更新：必须带 `pageId`（或 `matchTitle: true` 且标题精确匹配）
 - **父子树**：用 `parentTitle` / `parentId` 写入 frontmatter `parent_id`；侧栏与编辑器底部子页列表由客户端按 id 渲染，**不要**在父页正文维护子链接
-- 正文可用 `[[页面标题]]` / `[标题](tie://page/…)` 做页面关联；文件资源用 `[标题](tie://file/…)`
 - `#标签` 仍走 frontmatter `tags`
 - 禁止写入密钥、token、密码、私钥

@@ -62,21 +62,25 @@ let resolveAutoSaveFlushDone: (() => void) | null = null
 
 const status = computed(() => {
   const kind = activeSource.value?.kind
-  const savedLabel = kind === 'backend' || kind === 's3'
-    ? (kind === 'backend' ? '已保存到后台' : '已保存到云端')
-    : '已保存到本地'
-  const awaitingRemote = Boolean(
+  const isCloud = kind === 'backend' || kind === 's3'
+  const savedLabel = kind === 'backend'
+    ? '已保存到后台'
+    : kind === 's3'
+      ? '已保存到云端'
+      : '已保存到本地'
+  const awaitingWrite = Boolean(
     store.activePage
     && (store.pageHasPendingRemoteSave(store.activePage.id) || store.syncConflicts.has(store.activePage.id)),
   )
+  const awaitingLabel = isCloud ? '未写入远程' : '保存未完成'
   return store.saving
     ? '保存中…'
     : refreshing.value
       ? '刷新中…'
       : saveError.value
         ? '保存失败'
-        : awaitingRemote
-          ? '未写入远程'
+        : awaitingWrite
+          ? awaitingLabel
           : hasUnsavedChanges.value
             ? '未保存'
             : refreshedNotice.value
@@ -104,15 +108,35 @@ const sourceChoices = computed(() => (
     : []
 ))
 const canSwitchStorageSource = computed(() => sourceChoices.value.length > 0)
+const hasAnyCloudSource = computed(() => store.allSources.some((source) => isCloudStorageSourceId(source.id)))
+const sourceBindHint = computed(() => (
+  hasAnyCloudSource.value
+    ? '协作与同步认「云端主源」（S3/后台）。日常保存只有写入云端成功才算成功；本机目录只是备份，需手动「同步到备份」。未写入远程时会显示失败或待同步，不会当成已保存。'
+    : '当前只有本地/SMB 工作区：保存直接写入本机目录。若磁盘暂时不可写，会进入待重试队列，不会显示成“远端未同步”。'
+))
 const sourceBindingBusy = ref(false)
-const hasRemoteSaveConflict = computed(() => saveError.value?.includes('其他设备更新'))
+const hasRemoteSaveConflict = computed(() => {
+  const message = saveError.value ?? ''
+  return message.includes('其他设备更新') || message.includes('其他程序修改')
+})
 const hasSyncConflict = computed(() => Boolean(store.activePage && store.syncConflicts.has(store.activePage.id)))
 const hasRemoteConflict = computed(() => hasRemoteSaveConflict.value || hasSyncConflict.value)
+const isLocalDiskSource = computed(() => {
+  const kind = activeSource.value?.kind
+  return kind === 'local' || kind === 'smb'
+})
 const remoteConflictLabel = computed(() => {
   if (activeSource.value?.kind === 'backend') return '后台'
   if (isS3SourceId(activeSource.value?.id ?? '')) return '远程'
-  return '远程'
+  return '磁盘上的'
 })
+
+/** 云端冲突自动弹出对比；本地/SMB 只显示「查看差异」，避免误当成远端同步框。 */
+function maybeAutoOpenConflictPreview() {
+  if (!hasRemoteConflict.value) return
+  if (isLocalDiskSource.value) return
+  void loadConflictPreview()
+}
 const conflictLocalMarkdown = computed(() => `# ${title.value.trim() || '无标题'}\n\n${bodyMarkdown.value}`)
 type ConflictLine = { text: string; kind: 'same' | 'changed' }
 const conflictDiff = computed(() => {
@@ -214,8 +238,8 @@ watch(
       }
       return
     }
-    if (!contentMatches && (store.syncConflicts.has(page.id) || saveError.value?.includes('其他设备'))) {
-      await loadConflictPreview()
+    if (!contentMatches && (store.syncConflicts.has(page.id) || saveError.value?.includes('其他设备') || saveError.value?.includes('其他程序'))) {
+      maybeAutoOpenConflictPreview()
     }
   },
 )
@@ -273,7 +297,7 @@ async function flushAutoSave() {
         saveError.value = null
       } catch (reason) {
         saveError.value = saveFailureMessage(reason)
-        if (hasRemoteConflict.value) void loadConflictPreview()
+        if (hasRemoteConflict.value) maybeAutoOpenConflictPreview()
         break
       }
       if (changeRevision !== revision) autoSavePending = true
@@ -307,7 +331,7 @@ function cancelAutoSave() {
 
 async function loadConflictPreview() {
   if (conflictLoading.value || !store.activePage) return
-  if (!hasRemoteConflict.value && !saveError.value?.includes('其他设备')) return
+  if (!hasRemoteConflict.value && !saveError.value?.includes('其他设备') && !saveError.value?.includes('其他程序')) return
   conflictLoading.value = true
   try { conflictRemotePage.value = await store.readLatestPage(store.activePage.id) }
   catch (reason) { saveError.value = saveFailureMessage(reason) }
@@ -365,7 +389,7 @@ async function saveNow() {
     return true
   } catch (reason) {
     saveError.value = saveFailureMessage(reason)
-    if (hasRemoteConflict.value) void loadConflictPreview()
+    maybeAutoOpenConflictPreview()
     return false
   }
 }
@@ -818,7 +842,7 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
       >←</button>
       <nav v-if="!props.mobileLayout" class="breadcrumbs" aria-label="页面层级"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><template v-for="(page, index) in breadcrumbs" :key="page.id"><span>›</span><button :class="{ current: index === breadcrumbs.length - 1 }" :title="page.title" @click="store.openPage(page.id)">{{ page.title }}</button></template></nav>
       <h1 v-else class="mobile-editor-title">{{ store.activePage.title }}</h1>
-      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><button class="source-select-trigger" :aria-expanded="sourceMenuOpen" aria-haspopup="menu" :title="boundSourceCount > 1 ? `${activeSource.name}\n${activeSource.path}\n共绑定 ${boundSourceCount} 个存储源` : `${activeSource.name}\n${activeSource.path}`" :disabled="!canSwitchStorageSource || sourceBindingBusy" @click.stop="canSwitchStorageSource && (sourceMenuOpen = !sourceMenuOpen)">{{ sourceShortLabel(activeSource.name) }}</button><div v-if="sourceMenuOpen && activeSource && canSwitchStorageSource" class="source-select-menu source-bind-menu" role="menu"><p class="source-bind-hint">协作与同步认「云端主源」（S3/后台）。日常保存只有写入云端成功才算成功；本机目录只是备份，需手动「同步到备份」。未写入远程时会显示失败或待同步，不会当成已保存。</p><button v-for="source in sourceChoices" :key="source.id" :class="{ unavailable: source.available === false, bound: boundSourceIds.includes(source.id), primary: pageSourceRoleLabel(store.activePage, source.id) === 'primary' }" role="menuitemcheckbox" :aria-checked="boundSourceIds.includes(source.id)" :disabled="source.available === false || sourceBindingBusy" @click="toggleSourceBinding(source.id)"><span><i :class="source.kind"></i>{{ sourceBadgeLabel(source.kind) }} · {{ source.name }}</span><small>{{ source.available === false ? '当前不可访问' : boundSourceIds.includes(source.id) ? (pageSourceRoleLabel(store.activePage, source.id) === 'primary' ? '协作主源' : '备份镜像') : source.path }}</small><em aria-hidden="true">{{ boundSourceIds.includes(source.id) ? '✓' : '' }}</em></button><div v-if="boundCloudSourceIds.length > 1 || (boundCloudSourceIds.length === 1 && boundSourceCount > 1)" class="source-primary-actions"><span>设为协作主源（仅云端）</span><button v-for="sourceId in boundCloudSourceIds" :key="`primary-${sourceId}`" type="button" :class="{ active: sourceId === activeSource.id }" :disabled="sourceBindingBusy || sourceId === activeSource.id" @click="setPrimarySource(sourceId)">{{ store.allSources.find((item) => item.id === sourceId)?.name ?? sourceId }}</button><button type="button" class="source-mirror-sync" :disabled="sourceBindingBusy" @click="pushMirrors">同步到备份</button></div></div></div><span class="save-dot" :class="{ saving: store.saving, error: Boolean(saveError) }"></span><span :title="saveError ?? undefined">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" title="重新尝试保存当前页面" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从存储源刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button class="copy-link-button" title="导出 Markdown" @click="exportMarkdown">⇩</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
+      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><button class="source-select-trigger" :aria-expanded="sourceMenuOpen" aria-haspopup="menu" :title="boundSourceCount > 1 ? `${activeSource.name}\n${activeSource.path}\n共绑定 ${boundSourceCount} 个存储源` : `${activeSource.name}\n${activeSource.path}`" :disabled="!canSwitchStorageSource || sourceBindingBusy" @click.stop="canSwitchStorageSource && (sourceMenuOpen = !sourceMenuOpen)">{{ sourceShortLabel(activeSource.name) }}</button><div v-if="sourceMenuOpen && activeSource && canSwitchStorageSource" class="source-select-menu source-bind-menu" role="menu"><p class="source-bind-hint">{{ sourceBindHint }}</p><button v-for="source in sourceChoices" :key="source.id" :class="{ unavailable: source.available === false, bound: boundSourceIds.includes(source.id), primary: pageSourceRoleLabel(store.activePage, source.id) === 'primary' }" role="menuitemcheckbox" :aria-checked="boundSourceIds.includes(source.id)" :disabled="source.available === false || sourceBindingBusy" @click="toggleSourceBinding(source.id)"><span><i :class="source.kind"></i>{{ sourceBadgeLabel(source.kind) }} · {{ source.name }}</span><small>{{ source.available === false ? '当前不可访问' : boundSourceIds.includes(source.id) ? (pageSourceRoleLabel(store.activePage, source.id) === 'primary' ? '协作主源' : '备份镜像') : source.path }}</small><em aria-hidden="true">{{ boundSourceIds.includes(source.id) ? '✓' : '' }}</em></button><div v-if="boundCloudSourceIds.length > 1 || (boundCloudSourceIds.length === 1 && boundSourceCount > 1)" class="source-primary-actions"><span>设为协作主源（仅云端）</span><button v-for="sourceId in boundCloudSourceIds" :key="`primary-${sourceId}`" type="button" :class="{ active: sourceId === activeSource.id }" :disabled="sourceBindingBusy || sourceId === activeSource.id" @click="setPrimarySource(sourceId)">{{ store.allSources.find((item) => item.id === sourceId)?.name ?? sourceId }}</button><button type="button" class="source-mirror-sync" :disabled="sourceBindingBusy" @click="pushMirrors">同步到备份</button></div></div></div><span class="save-dot" :class="{ saving: store.saving, error: Boolean(saveError) }"></span><span :title="saveError ?? undefined">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" title="重新尝试保存当前页面" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从存储源刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button class="copy-link-button" title="导出 Markdown" @click="exportMarkdown">⇩</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
     </header>
     <aside v-if="showingHistory" class="history-popover">
       <div class="history-popover-heading"><strong>页面历史</strong><button aria-label="关闭页面历史" @click="showingHistory = false">×</button></div>
@@ -829,7 +853,7 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
     </aside>
     <div v-if="conflictRemotePage" class="conflict-dialog-backdrop" @mousedown.self="conflictRemotePage = null">
       <section class="conflict-dialog" role="dialog" aria-modal="true" aria-label="页面同步冲突">
-        <header><div><strong>{{ hasSyncConflict ? '同步检测到内容冲突' : '页面已在其他设备更新' }}</strong><small>{{ hasSyncConflict ? '远程与本地版本不一致，请选择保留哪一方。' : `先对照内容，再决定是否载入${remoteConflictLabel}版本。` }}</small></div><button aria-label="关闭" @click="conflictRemotePage = null">×</button></header>
+        <header><div><strong>{{ hasSyncConflict ? '检测到内容冲突' : (activeSource?.kind === 'local' || activeSource?.kind === 'smb' ? '页面文件已在磁盘上被修改' : '页面已在其他设备更新') }}</strong><small>{{ hasSyncConflict ? '两边内容不一致，请选择保留哪一方。' : `先对照内容，再决定是否载入${remoteConflictLabel}版本。` }}</small></div><button aria-label="关闭" @click="conflictRemotePage = null">×</button></header>
         <div class="conflict-version-grid"><section><strong>本地未保存草稿</strong><small>{{ title || '无标题' }}</small><pre><code v-for="(line, index) in conflictDiff.local" :key="`local-${index}`" :class="line.kind">{{ line.text || ' ' }}</code></pre></section><section><strong>{{ remoteConflictLabel }}当前版本</strong><small>{{ conflictRemotePage.updatedAt.slice(0, 19).replace('T', ' ') }}</small><pre><code v-for="(line, index) in conflictDiff.remote" :key="`remote-${index}`" :class="line.kind">{{ line.text || ' ' }}</code></pre></section></div>
         <footer><button @click="copyConflictDraft">复制本地草稿</button><button @click="conflictRemotePage = null">保留草稿</button><button :disabled="store.saving" @click="forceOverwriteRemote">{{ store.saving ? '覆盖中…' : `覆盖${remoteConflictLabel}版本` }}</button><button class="conflict-load-button" @click="reloadRemotePage">载入{{ remoteConflictLabel }}版本</button></footer>
       </section>

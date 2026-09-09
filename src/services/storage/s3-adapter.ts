@@ -156,7 +156,7 @@ export const s3StorageAdapter: StorageAdapter = {
       if (message.includes('其他设备更新')) throw new Error('页面已在其他设备更新，请重新载入后再保存')
       if (options?.queueOnFailure !== false && isRetryableStorageError(error, 's3')) {
         syncQueue.enqueueSave(page, options?.expectedUpdatedAt)
-        throw new Error(queueFailureMessage(error, '保存'))
+        throw new Error(queueFailureMessage(error, '保存', 's3'))
       }
       throw error
     }
@@ -173,7 +173,7 @@ export const s3StorageAdapter: StorageAdapter = {
     } catch (error) {
       if (isRetryableStorageError(error, 's3')) {
         syncQueue.enqueueDelete(sourceId, pages)
-        throw new Error(queueFailureMessage(error, '删除'))
+        throw new Error(queueFailureMessage(error, '删除', 's3'))
       }
       throw error
     }
