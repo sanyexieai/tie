@@ -1305,10 +1305,30 @@ body.storage-source-reordering * { cursor: grabbing !important; user-select: non
   border: 1px dashed var(--border-strong);
 }
 .tiptap-content a.file-link-link::before { content: '外链'; color: var(--text-subtle); }
-.tiptap-content a.file-link-directory.file-link-copy::before { content: '目录副本'; }
-.tiptap-content a.file-link-directory.file-link-link::before { content: '目录'; }
-.tiptap-content a.file-link-directory:not(.file-link-copy):not(.file-link-link)::before { content: '目录'; color: var(--text-faint); }
-.tiptap-content a.file-link:not(.file-link-copy):not(.file-link-link):not(.file-link-absolute):not(.file-link-relative)::before { content: '文件'; color: var(--text-faint); }
+.tiptap-content a.file-link-directory.file-link-copy::before { content: none; }
+.tiptap-content a.file-link-directory.file-link-link::before { content: none; }
+.tiptap-content a.file-link-directory:not(.file-link-copy):not(.file-link-link)::before { content: none; }
+.tiptap-content a.file-link:not(.file-link-copy):not(.file-link-link):not(.file-link-absolute):not(.file-link-relative):not(.file-link-directory)::before { content: '文件'; color: var(--text-faint); }
+.tiptap-content a.file-link-directory {
+  gap: 0;
+  padding: 0 2px;
+  border-radius: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: #6a8794;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-style: dashed;
+  text-decoration-color: color-mix(in srgb, #6a8794 55%, transparent);
+  text-underline-offset: 3px;
+}
+.tiptap-content a.file-link-directory.file-link-copy,
+.tiptap-content a.file-link-directory.file-link-link {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
 .tiptap-content a.file-link-absolute {
   color: #6f7f92;
   background: color-mix(in srgb, #6f7f92 10%, transparent);
@@ -1325,6 +1345,21 @@ body.storage-source-reordering * { cursor: grabbing !important; user-select: non
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.file-link-row > button.file-resource-open {
+  display: inline;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.file-link-row > button.file-resource-open.directory {
+  color: #6a8794;
+  text-decoration: underline;
+  text-decoration-style: dashed;
+  text-underline-offset: 2px;
 }
 .file-link-row > button:first-child {
   flex: 1;

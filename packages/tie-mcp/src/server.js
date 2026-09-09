@@ -99,9 +99,9 @@ function main() {
 
   server.tool(
     'tie_file_ingest',
-    '登记外部文件或目录到工作区：mode=copy 导入副本到 .tie/files；mode=link 只记录原路径。目录也可登记；返回 kind/file 元数据与稳定链接 tie://file/{id}。摘要请用 tie_write 写入页面并引用该 url。工作区内已有文件请直接写 tie://path/{相对路径}，无需 ingest。不要把手写 file:/// 当作稳定资源链接。',
+    '登记外部文件或目录到工作区（目录已支持，勿再判断为“只接受普通文件”）。mode=copy 导入副本到 .tie/files；mode=link 只记录原路径（目录推荐 link）。返回 kind=file|directory 与稳定链接 tie://file/{id}（目录也用同一协议）。摘要用 tie_write 写入页面并引用 url。工作区内已有路径可写 tie://path/{相对路径}。不要手写 file:///。',
     {
-      path: z.string().describe('本机文件或目录的绝对/相对路径'),
+      path: z.string().describe('本机文件或目录的绝对/相对路径（目录可直接传）'),
       mode: z.enum(['copy', 'link']).describe('copy=导入工作区副本；link=外链引用原路径（目录推荐 link）'),
       title: z.string().optional().describe('显示标题；默认用文件/目录名'),
     },
