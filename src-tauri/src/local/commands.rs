@@ -1,9 +1,10 @@
 use crate::common::{app_data_dir, load_settings, save_settings, workspace_sources};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::AppHandle;
 use tie_storage::local::{
@@ -214,6 +215,362 @@ pub(crate) fn resolve_workspace_file(
     }
     let meta = read_json_file(&meta_path)?;
     resource_from_meta(&root_path, &meta).ok_or_else(|| format!("文件资源元数据无效：{id}"))
+}
+
+fn now_iso() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "0".into())
+}
+
+fn new_file_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mix = (nanos as u64) ^ ((std::process::id() as u64) << 32).wrapping_add(nanos as u64);
+    format!("file_{mix:016x}")
+}
+
+fn extension_of(path: &Path) -> String {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn guess_mime(ext: &str, is_directory: bool) -> String {
+    if is_directory {
+        return "inode/directory".into();
+    }
+    match ext {
+        "pdf" => "application/pdf",
+        "epub" => "application/epub+zip",
+        "txt" | "log" | "csv" | "tsv" => "text/plain",
+        "md" | "markdown" => "text/markdown",
+        "json" => "application/json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
+    .into()
+}
+
+fn sanitize_stored_name(ext: &str) -> String {
+    let clean: String = ext
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if clean.is_empty() {
+        "original.bin".into()
+    } else {
+        format!("original.{clean}")
+    }
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(from).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        let target = to.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn directory_stats(dir: &Path) -> (u64, u64, u64) {
+    let mut size = 0u64;
+    let mut files = 0u64;
+    let mut dirs = 0u64;
+    fn walk(current: &Path, size: &mut u64, files: &mut u64, dirs: &mut u64) {
+        let Ok(entries) = fs::read_dir(current) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                *dirs += 1;
+                walk(&entry.path(), size, files, dirs);
+            } else if file_type.is_file() {
+                *files += 1;
+                if let Ok(meta) = entry.metadata() {
+                    *size += meta.len();
+                }
+            }
+        }
+    }
+    walk(dir, &mut size, &mut files, &mut dirs);
+    (size, files, dirs)
+}
+
+fn directory_preview(dir: &Path, max_entries: usize) -> Option<String> {
+    let mut names = Vec::new();
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten().take(max_entries) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let label = if entry.path().is_dir() {
+            format!("{name}/")
+        } else {
+            name
+        };
+        names.push(label);
+    }
+    if names.is_empty() {
+        return Some("(空目录)".into());
+    }
+    let total = fs::read_dir(dir).ok()?.count();
+    let mut preview = names.join("\n");
+    if total > max_entries {
+        preview.push_str("\n…");
+    }
+    Some(preview)
+}
+
+fn ensure_files_root(root: &Path) -> Result<PathBuf, String> {
+    let files_root = root.join(".tie").join("files");
+    fs::create_dir_all(&files_root).map_err(|error| error.to_string())?;
+    Ok(files_root)
+}
+
+fn read_index_entries(root: &Path) -> Result<Vec<Value>, String> {
+    let index = files_index_path(root);
+    if !index.is_file() {
+        return Ok(Vec::new());
+    }
+    let value = read_json_file(&index)?;
+    Ok(value.as_array().cloned().unwrap_or_default())
+}
+
+fn write_index_entries(root: &Path, entries: &[Value]) -> Result<(), String> {
+    ensure_files_root(root)?;
+    let index = files_index_path(root);
+    let raw = format!("{}\n", serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?);
+    fs::write(index, raw).map_err(|error| error.to_string())
+}
+
+fn write_meta_file(root: &Path, meta: &Value) -> Result<(), String> {
+    let id = meta
+        .get("id")
+        .and_then(|item| item.as_str())
+        .ok_or_else(|| "meta.id 无效".to_string())?;
+    let dir = root.join(".tie").join("files").join(id);
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let raw = format!("{}\n", serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?);
+    fs::write(dir.join("meta.json"), raw).map_err(|error| error.to_string())
+}
+
+fn upsert_index_entry(root: &Path, meta: &Value) -> Result<(), String> {
+    let id = meta
+        .get("id")
+        .and_then(|item| item.as_str())
+        .ok_or_else(|| "meta.id 无效".to_string())?;
+    let mut entries = read_index_entries(root)?
+        .into_iter()
+        .filter(|entry| entry.get("id").and_then(|item| item.as_str()) != Some(id))
+        .collect::<Vec<_>>();
+    entries.insert(
+        0,
+        json!({
+            "id": id,
+            "title": meta.get("title").and_then(|item| item.as_str()).unwrap_or(id),
+            "kind": meta.get("kind").and_then(|item| item.as_str()).unwrap_or("file"),
+            "mode": meta.get("mode").and_then(|item| item.as_str()).unwrap_or("link"),
+            "ext": meta.get("ext").and_then(|item| item.as_str()).unwrap_or(""),
+            "mime": meta.get("mime").and_then(|item| item.as_str()).unwrap_or("application/octet-stream"),
+            "size": meta.get("size").and_then(|item| item.as_u64()).unwrap_or(0),
+            "updatedAt": meta.get("updatedAt").and_then(|item| item.as_str()).unwrap_or(""),
+        }),
+    );
+    write_index_entries(root, &entries)
+}
+
+fn resolve_abs_path(raw: &str) -> Result<PathBuf, String> {
+    let input = PathBuf::from(raw.trim());
+    if !input.exists() {
+        return Err(format!("路径不存在：{}", input.display()));
+    }
+    let canonical = fs::canonicalize(&input).unwrap_or(input);
+    Ok(strip_windows_extended_prefix(&canonical))
+}
+
+fn find_existing_resource(
+    root: &Path,
+    abs_path: &Path,
+    mode: &str,
+) -> Result<Option<Value>, String> {
+    let abs = abs_path.to_string_lossy();
+    for entry in read_index_entries(root)? {
+        let id = entry
+            .get("id")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default();
+        if id.is_empty() {
+            continue;
+        }
+        let meta_path = files_meta_path(root, id);
+        if !meta_path.is_file() {
+            continue;
+        }
+        let meta = read_json_file(&meta_path)?;
+        let meta_mode = meta.get("mode").and_then(|item| item.as_str()).unwrap_or("");
+        if meta_mode != mode {
+            continue;
+        }
+        let source = meta
+            .get("sourcePath")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
+        let stored = meta
+            .get("storedPath")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
+        let source_resolved = PathBuf::from(source);
+        let source_abs = fs::canonicalize(&source_resolved)
+            .map(|p| strip_windows_extended_prefix(&p))
+            .unwrap_or(source_resolved);
+        if source_abs == abs_path {
+            return Ok(Some(meta));
+        }
+        if mode == "link" {
+            let stored_resolved = PathBuf::from(stored);
+            let stored_abs = fs::canonicalize(&stored_resolved)
+                .map(|p| strip_windows_extended_prefix(&p))
+                .unwrap_or(stored_resolved);
+            if stored_abs == abs_path || stored == abs.as_ref() {
+                return Ok(Some(meta));
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+pub(crate) fn ingest_workspace_file(
+    root: String,
+    path: String,
+    mode: String,
+    title: Option<String>,
+) -> Result<WorkspaceFileResource, String> {
+    let normalized_mode = match mode.trim() {
+        "copy" | "link" => mode.trim().to_owned(),
+        _ => return Err("mode 必须是 copy 或 link".into()),
+    };
+    let root_path = PathBuf::from(root.trim());
+    if root_path.as_os_str().is_empty() {
+        return Err("工作区根目录无效".into());
+    }
+    ensure_files_root(&root_path)?;
+    let abs_path = resolve_abs_path(&path)?;
+    let meta_fs = fs::metadata(&abs_path).map_err(|error| error.to_string())?;
+    let is_directory = meta_fs.is_dir();
+    if !is_directory && !meta_fs.is_file() {
+        return Err(format!("不是普通文件或目录：{}", abs_path.display()));
+    }
+    if let Some(existing) = find_existing_resource(&root_path, &abs_path, &normalized_mode)? {
+        return resource_from_meta(&root_path, &existing)
+            .ok_or_else(|| "已有文件资源元数据无效".to_string());
+    }
+
+    let kind = if is_directory { "directory" } else { "file" };
+    let ext = if is_directory {
+        "dir".to_owned()
+    } else {
+        extension_of(&abs_path)
+    };
+    let mime = guess_mime(&ext, is_directory);
+    let (size, entry_count) = if is_directory {
+        let (size, files, dirs) = directory_stats(&abs_path);
+        (
+            size,
+            Some(json!({ "files": files, "dirs": dirs })),
+        )
+    } else {
+        (meta_fs.len(), None)
+    };
+    let id = new_file_id();
+    let now = now_iso();
+    let base_title = title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_owned())
+        .unwrap_or_else(|| {
+            abs_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&id)
+                .to_owned()
+        });
+    let abs_display = abs_path.to_string_lossy().into_owned();
+    let stored_path = if normalized_mode == "copy" {
+        let dir = root_path.join(".tie").join("files").join(&id);
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        if is_directory {
+            let target = dir.join("original");
+            copy_dir_recursive(&abs_path, &target)?;
+            PathBuf::from(".tie")
+                .join("files")
+                .join(&id)
+                .join("original")
+                .to_string_lossy()
+                .replace('\\', "/")
+        } else {
+            let stored_name = sanitize_stored_name(&ext);
+            let target = dir.join(&stored_name);
+            fs::copy(&abs_path, &target).map_err(|error| error.to_string())?;
+            PathBuf::from(".tie")
+                .join("files")
+                .join(&id)
+                .join(stored_name)
+                .to_string_lossy()
+                .replace('\\', "/")
+        }
+    } else {
+        abs_display.clone()
+    };
+
+    let preview = if is_directory {
+        directory_preview(&abs_path, 24)
+    } else {
+        None
+    };
+
+    let mut meta = json!({
+        "id": id,
+        "title": base_title,
+        "kind": kind,
+        "mode": normalized_mode,
+        "mime": mime,
+        "ext": ext,
+        "size": size,
+        "sourcePath": abs_display,
+        "storedPath": stored_path,
+        "sha256": Value::Null,
+        "preview": preview,
+        "createdAt": now,
+        "updatedAt": now,
+    });
+    if let Some(count) = entry_count {
+        meta["entryCount"] = count;
+    }
+    write_meta_file(&root_path, &meta)?;
+    upsert_index_entry(&root_path, &meta)?;
+    resource_from_meta(&root_path, &meta).ok_or_else(|| "写入文件资源后读取失败".to_string())
 }
 
 #[tauri::command]

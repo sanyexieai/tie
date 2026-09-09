@@ -107,3 +107,26 @@ export async function openWorkspaceFile(root: string, fileId: string) {
   await openPath(resource.openPath)
   return resource
 }
+
+export async function ingestWorkspaceFile(
+  root: string,
+  path: string,
+  mode: WorkspaceFileMode = 'link',
+  title?: string,
+): Promise<WorkspaceFileResource> {
+  if (!('__TAURI_INTERNALS__' in window)) {
+    throw new Error('仅桌面端可登记本地文件')
+  }
+  const trimmed = root.trim()
+  if (!trimmed) throw new Error('当前页面未绑定本地存储源')
+  const item = await invoke<WorkspaceFileResource>('ingest_workspace_file', {
+    root: trimmed,
+    path,
+    mode,
+    title: title?.trim() || null,
+  })
+  const map = cacheByRoot.get(trimmed) ?? new Map()
+  map.set(item.id, item)
+  cacheByRoot.set(trimmed, map)
+  return item
+}

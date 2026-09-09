@@ -18,10 +18,11 @@ import TaskList from '@tiptap/extension-task-list'
 import { Markdown } from '@tiptap/markdown'
 import { common, createLowlight } from 'lowlight'
 import { openUrl, openPath } from '@tauri-apps/plugin-opener'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { Page, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { canStorePageAssets, embedImageFile, inlineImageSrcToFile, isImageFile, normalizeImageFile, parseAssetUrl, resolveAssetDisplayUrl, shouldHandleImagePaste, uploadPastedImage } from '@/services/attachments'
-import { cachedFileKind, cachedFileMode, fileLinkClass, listWorkspaceFiles, openWorkspaceFile, parseFileUrl } from '@/services/files'
+import { buildFileUrl, cachedFileKind, cachedFileMode, fileLinkClass, ingestWorkspaceFile, listWorkspaceFiles, openWorkspaceFile, parseFileUrl } from '@/services/files'
 import { fileUrlToLocalPath } from '@/services/local-path'
 
 const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page> }>()
@@ -505,6 +506,39 @@ function pickLocalImage(editor: Editor) {
   input.click()
 }
 
+function insertFileResourceLink(editor: Editor, title: string, fileId: string) {
+  const href = buildFileUrl(fileId)
+  editor.chain().focus().insertContent({ type: 'text', text: title, marks: [{ type: 'link', attrs: { href } }] }).run()
+  scheduleDecorateFileLinks()
+}
+
+function pickLocalFileLink(editor: Editor, kind: 'file' | 'directory') {
+  if (!('__TAURI_INTERNALS__' in window)) {
+    window.alert('仅桌面端可插入本地文件/目录链接')
+    return
+  }
+  const root = filesWorkspaceRoot()
+  if (!root) {
+    window.alert('当前页面未绑定本地或 SMB 存储源，无法登记文件')
+    return
+  }
+  void (async () => {
+    try {
+      const selected = await openDialog({
+        directory: kind === 'directory',
+        multiple: false,
+        title: kind === 'directory' ? '选择要链接的本地目录' : '选择要链接的本地文件',
+      })
+      const path = typeof selected === 'string' ? selected : Array.isArray(selected) ? selected[0] : null
+      if (!path) return
+      const resource = await ingestWorkspaceFile(root, path, 'link')
+      insertFileResourceLink(editor, resource.title || resource.id, resource.id)
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error))
+    }
+  })()
+}
+
 const slashCommands: SlashCommand[] = [
   { id: 'text', label: '正文', hint: '普通段落', keywords: ['paragraph', '文字', '文本'], run: (editor) => editor.chain().focus().setParagraph().run() },
   { id: 'heading-2', label: '二级标题', hint: '章节标题', keywords: ['heading', '标题', 'h2'], run: (editor) => editor.chain().focus().toggleHeading({ level: 2 }).run() },
@@ -525,6 +559,8 @@ const slashCommands: SlashCommand[] = [
   { id: 'table', label: '表格', hint: '插入 3 × 3 表格', keywords: ['table', '表格'], run: (editor) => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run() },
   { id: 'divider', label: '分割线', hint: '分隔内容区域', keywords: ['divider', '分割', 'horizontal'], run: (editor) => editor.chain().focus().setHorizontalRule().run() },
   { id: 'page-link', label: '链接页面', hint: '关联知识库中的页面', keywords: ['link', 'page', '链接', '关联', '页面'], run: () => openSlashPagePicker() },
+  { id: 'local-file', label: '本地文件', hint: '登记并插入外链', keywords: ['file', 'local', '文件', '本地', '链接', '外链'], run: (editor) => pickLocalFileLink(editor, 'file') },
+  { id: 'local-directory', label: '本地目录', hint: '登记并插入目录外链', keywords: ['folder', 'directory', '目录', '文件夹', '本地', '链接', '外链'], run: (editor) => pickLocalFileLink(editor, 'directory') },
   { id: 'child-page', label: '子页面', hint: '在当前页面下创建页面', keywords: ['page', 'child', '页面', '子页面'], run: () => emit('create-child') },
 ]
 
@@ -856,18 +892,35 @@ function updateFloatingMenuPosition(currentEditor: Editor, pos?: number | null) 
     return
   }
   const menuWidth = 330
-  const menuMaxHeight = 310
+  const preferredMaxHeight = 310
   const gap = 6
   const margin = 8
   let left = coords.left
-  let top = coords.bottom + gap
   left = Math.min(left, window.innerWidth - menuWidth - margin)
   left = Math.max(margin, left)
-  const spaceBelow = window.innerHeight - coords.bottom - margin
-  if (spaceBelow < 180) {
-    top = Math.max(margin, coords.top - Math.min(menuMaxHeight, Math.max(spaceBelow, 220)) - gap)
+
+  const spaceBelow = Math.max(0, window.innerHeight - coords.bottom - gap - margin)
+  const spaceAbove = Math.max(0, coords.top - gap - margin)
+  // 下方放得下完整菜单则向下；否则选空间更大的一侧
+  const openAbove = spaceBelow < preferredMaxHeight && spaceAbove > spaceBelow
+  const available = openAbove ? spaceAbove : spaceBelow
+  const maxHeight = Math.max(1, Math.min(preferredMaxHeight, available))
+
+  if (openAbove) {
+    floatingMenuStyle.value = {
+      top: 'auto',
+      bottom: `${Math.round(window.innerHeight - coords.top + gap)}px`,
+      left: `${Math.round(left)}px`,
+      maxHeight: `${Math.round(maxHeight)}px`,
+    }
+  } else {
+    floatingMenuStyle.value = {
+      top: `${Math.round(coords.bottom + gap)}px`,
+      bottom: 'auto',
+      left: `${Math.round(left)}px`,
+      maxHeight: `${Math.round(maxHeight)}px`,
+    }
   }
-  floatingMenuStyle.value = { top: `${Math.round(top)}px`, left: `${Math.round(left)}px` }
 }
 
 function updateSlashState(currentEditor: Editor, textBeforeCursor?: string) {

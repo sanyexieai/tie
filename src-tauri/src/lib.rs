@@ -82,6 +82,7 @@ pub fn run() {
             local::commands::read_file_page_asset,
             local::commands::list_workspace_files,
             local::commands::resolve_workspace_file,
+            local::commands::ingest_workspace_file,
             local::commands::list_page_revisions,
             local::commands::read_page_revision,
             local::commands::restore_page_revision,
