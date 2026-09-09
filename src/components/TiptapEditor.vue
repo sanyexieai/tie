@@ -17,11 +17,12 @@ import TaskItem from '@tiptap/extension-task-item'
 import TaskList from '@tiptap/extension-task-list'
 import { Markdown } from '@tiptap/markdown'
 import { common, createLowlight } from 'lowlight'
-import { openUrl } from '@tauri-apps/plugin-opener'
+import { openUrl, openPath } from '@tauri-apps/plugin-opener'
 import type { Page, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { canStorePageAssets, embedImageFile, inlineImageSrcToFile, isImageFile, normalizeImageFile, parseAssetUrl, resolveAssetDisplayUrl, shouldHandleImagePaste, uploadPastedImage } from '@/services/attachments'
 import { cachedFileMode, fileLinkClass, listWorkspaceFiles, openWorkspaceFile, parseFileUrl } from '@/services/files'
+import { fileUrlToLocalPath } from '@/services/local-path'
 
 const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page> }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
@@ -559,6 +560,24 @@ function openFileLink(event: MouseEvent) {
   return true
 }
 
+function openLocalPathLink(event: MouseEvent) {
+  const target = event.target
+  if (!(target instanceof Element)) return false
+  const href = target.closest('a')?.getAttribute('href')
+  if (!href) return false
+  const localPath = fileUrlToLocalPath(href)
+  if (!localPath) return false
+  event.preventDefault()
+  if ('__TAURI_INTERNALS__' in window) {
+    void openPath(localPath).catch((error) => {
+      window.alert(error instanceof Error ? error.message : `无法打开本地路径：${localPath}`)
+    })
+  } else {
+    window.open(href, '_blank', 'noopener,noreferrer')
+  }
+  return true
+}
+
 function openExternalLink(event: MouseEvent) {
   const target = event.target
   if (!(target instanceof Element)) return false
@@ -596,7 +615,12 @@ function focusNextWritingLine(event: MouseEvent) {
 }
 
 function handleEditorClick(event: MouseEvent) {
-  const handled = openInternalLink(event) || openFileLink(event) || openExternalLink(event) || focusNextWritingLine(event)
+  const handled =
+    openInternalLink(event)
+    || openFileLink(event)
+    || openLocalPathLink(event)
+    || openExternalLink(event)
+    || focusNextWritingLine(event)
   if (handled) event.stopPropagation()
   return handled
 }
@@ -617,12 +641,13 @@ const editor = useEditor({
         openOnClick: false,
         autolink: true,
         linkOnPaste: true,
-        protocols: ['http', 'https', 'mailto', 'tie'],
+        protocols: ['http', 'https', 'mailto', 'tie', 'file'],
         // Only wiki links use tie:// — never autolink asset URLs (blocks mid-URL caret).
         isAllowedUri: (url, { defaultValidate }) => {
           if (url.startsWith('tie://page/')) return true
           if (url.startsWith('tie://file/')) return true
           if (url.startsWith('tie://')) return false
+          if (/^file:/i.test(url)) return true
           return defaultValidate(url)
         },
       },

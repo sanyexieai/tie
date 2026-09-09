@@ -283,8 +283,26 @@ function onShortcut(event: KeyboardEvent) {
     if (!focusMode.value) toggleContextPanel()
   }
 }
+function syncViewportHeight() {
+  const height = Math.round(window.visualViewport?.height ?? window.innerHeight)
+  if (height > 0) {
+    document.documentElement.style.setProperty('--app-height', `${height}px`)
+  }
+}
+
+function onWindowResize() {
+  syncViewportHeight()
+  clampPanelsToViewport()
+}
+
 onMounted(async () => {
   loadPanelWidths()
+  syncViewportHeight()
+  requestAnimationFrame(syncViewportHeight)
+  window.setTimeout(syncViewportHeight, 0)
+  window.setTimeout(syncViewportHeight, 50)
+  window.setTimeout(syncViewportHeight, 200)
+  window.setTimeout(syncViewportHeight, 500)
   mobileLayoutQuery = window.matchMedia('(max-width: 720px)')
   contextDrawerQuery = window.matchMedia('(max-width: 1080px)')
   syncMobileLayout()
@@ -292,14 +310,17 @@ onMounted(async () => {
   clampPanelsToViewport()
   mobileLayoutQuery.addEventListener('change', syncMobileLayout)
   contextDrawerQuery.addEventListener('change', syncContextDrawer)
-  window.addEventListener('resize', clampPanelsToViewport)
+  window.addEventListener('resize', onWindowResize)
+  window.visualViewport?.addEventListener('resize', syncViewportHeight)
   window.addEventListener('keydown', onShortcut)
   window.addEventListener('tie:toggle-focus-mode', toggleFocusMode)
   await initPlatform()
+  syncViewportHeight()
   syncMobileLayout()
   syncContextDrawer()
   await backend.initialize()
   await store.initialize()
+  syncViewportHeight()
   if (usesMobileShell.value) goMobileHome()
   ensureMobileBackHandler()
   const update = await checkForAppUpdateOnStartup()
@@ -327,7 +348,8 @@ onBeforeUnmount(() => {
   document.body.classList.remove('panel-resizing')
   mobileLayoutQuery?.removeEventListener('change', syncMobileLayout)
   contextDrawerQuery?.removeEventListener('change', syncContextDrawer)
-  window.removeEventListener('resize', clampPanelsToViewport)
+  window.removeEventListener('resize', onWindowResize)
+  window.visualViewport?.removeEventListener('resize', syncViewportHeight)
   window.removeEventListener('keydown', onShortcut)
   window.removeEventListener('tie:toggle-focus-mode', toggleFocusMode)
   uninstallMobileBackHandler()
