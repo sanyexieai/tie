@@ -51,6 +51,7 @@ const outgoingFiles = computed(() => {
     return {
       id,
       title: resource?.title ?? id,
+      kind: resource?.kind ?? null,
       mode: resource?.mode ?? null,
       exists: resource?.exists ?? false,
     }
@@ -147,12 +148,12 @@ async function unlinkPage(pageId: string) {
       </section>
       <section>
         <h3>文件资源</h3>
-        <p v-if="!outgoingFiles.length" class="muted">正文中的 tie://file/… 会显示在这里（副本 / 外链样式不同）。</p>
+        <p v-if="!outgoingFiles.length" class="muted">正文中的 tie://file/… 会显示在这里（文件 / 目录；副本 / 外链样式不同）。</p>
         <div v-for="file in outgoingFiles" :key="`file-${file.id}`" class="mention-row file-link-row">
           <button :disabled="openingFileId === file.id" :title="file.exists === false ? '路径不可用' : file.id" @click="openOutgoingFile(file.id)">
-            <span>📄</span>{{ file.title }}
+            <span>{{ file.kind === 'directory' ? '📁' : '📄' }}</span>{{ file.title }}
           </button>
-          <em class="file-mode-badge" :class="file.mode === 'copy' || file.mode === 'link' ? file.mode : undefined">{{ fileLinkLabel(file.mode) }}</em>
+          <em class="file-mode-badge" :class="file.mode === 'copy' || file.mode === 'link' ? file.mode : undefined">{{ fileLinkLabel(file.mode, file.kind) }}</em>
         </div>
       </section>
       <section>

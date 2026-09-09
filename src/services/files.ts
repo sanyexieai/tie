@@ -4,10 +4,12 @@ import { openPath } from '@tauri-apps/plugin-opener'
 export const FILE_URL_PREFIX = 'tie://file/'
 
 export type WorkspaceFileMode = 'copy' | 'link'
+export type WorkspaceFileKind = 'file' | 'directory'
 
 export interface WorkspaceFileResource {
   id: string
   title: string
+  kind?: WorkspaceFileKind | string
   mode: WorkspaceFileMode | string
   ext: string
   mime: string
@@ -39,13 +41,15 @@ export function collectFileIdsFromMarkdown(markdown: string) {
   return [...ids]
 }
 
-export function fileLinkClass(mode: string | null | undefined) {
-  if (mode === 'copy') return 'file-link file-link-copy'
-  if (mode === 'link') return 'file-link file-link-link'
-  return 'file-link'
+export function fileLinkClass(mode: string | null | undefined, kind?: string | null) {
+  const base = kind === 'directory' ? 'file-link file-link-directory' : 'file-link'
+  if (mode === 'copy') return `${base} file-link-copy`
+  if (mode === 'link') return `${base} file-link-link`
+  return base
 }
 
-export function fileLinkLabel(mode: string | null | undefined) {
+export function fileLinkLabel(mode: string | null | undefined, kind?: string | null) {
+  if (kind === 'directory') return mode === 'copy' ? '目录副本' : '目录'
   if (mode === 'copy') return '副本'
   if (mode === 'link') return '外链'
   return '文件'
@@ -83,6 +87,11 @@ export async function resolveWorkspaceFile(root: string, fileId: string): Promis
 export function cachedFileMode(root: string | null | undefined, fileId: string) {
   if (!root) return null
   return cacheByRoot.get(root)?.get(fileId)?.mode ?? null
+}
+
+export function cachedFileKind(root: string | null | undefined, fileId: string) {
+  if (!root) return null
+  return cacheByRoot.get(root)?.get(fileId)?.kind ?? null
 }
 
 export async function openWorkspaceFile(root: string, fileId: string) {

@@ -16,6 +16,7 @@ use tie_storage::local::{
 pub struct WorkspaceFileResource {
     pub id: String,
     pub title: String,
+    pub kind: String,
     pub mode: String,
     pub ext: String,
     pub mime: String,
@@ -77,6 +78,17 @@ fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource
         .unwrap_or(&id)
         .to_owned();
     let mode = meta.get("mode")?.as_str()?.to_owned();
+    let kind = meta
+        .get("kind")
+        .and_then(|item| item.as_str())
+        .unwrap_or_else(|| {
+            if mime_hint_is_directory(meta) || ext_hint_is_directory(meta) {
+                "directory"
+            } else {
+                "file"
+            }
+        })
+        .to_owned();
     let ext = meta
         .get("ext")
         .and_then(|item| item.as_str())
@@ -120,10 +132,17 @@ fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource
         path_for_shell_open(&candidate)
     };
     let open_path = open_buf.to_string_lossy().into_owned();
-    let exists = open_buf.is_file();
+    // 目录资源也要算存在，否则外链目录会被桌面端当成失效。
+    let exists = open_buf.exists();
+    let kind = if kind == "directory" || open_buf.is_dir() {
+        "directory".to_owned()
+    } else {
+        "file".to_owned()
+    };
     Some(WorkspaceFileResource {
         id,
         title,
+        kind,
         mode,
         ext,
         mime,
@@ -134,6 +153,18 @@ fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource
         exists,
         updated_at,
     })
+}
+
+fn mime_hint_is_directory(meta: &Value) -> bool {
+    meta.get("mime")
+        .and_then(|item| item.as_str())
+        .is_some_and(|mime| mime == "inode/directory" || mime == "application/x-directory")
+}
+
+fn ext_hint_is_directory(meta: &Value) -> bool {
+    meta.get("ext")
+        .and_then(|item| item.as_str())
+        .is_some_and(|ext| ext == "dir")
 }
 
 #[tauri::command]

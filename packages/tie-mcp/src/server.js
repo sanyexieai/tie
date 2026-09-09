@@ -99,11 +99,11 @@ function main() {
 
   server.tool(
     'tie_file_ingest',
-    '登记外部文件到工作区：mode=copy 导入副本到 .tie/files；mode=link 只记录原路径。返回类型/体积等元数据与 tie://file/{id}。摘要请用 tie_write 写入页面，不要把二进制塞进 markdown。',
+    '登记外部文件或目录到工作区：mode=copy 导入副本到 .tie/files；mode=link 只记录原路径。目录也可登记；返回 kind/file 元数据与稳定链接 tie://file/{id}。摘要请用 tie_write 写入页面，不要把二进制塞进 markdown，也不要手写 file:/// 链接。',
     {
-      path: z.string().describe('本机文件绝对或相对路径'),
-      mode: z.enum(['copy', 'link']).describe('copy=导入工作区副本；link=外链引用原路径'),
-      title: z.string().optional().describe('显示标题；默认用文件名'),
+      path: z.string().describe('本机文件或目录的绝对/相对路径'),
+      mode: z.enum(['copy', 'link']).describe('copy=导入工作区副本；link=外链引用原路径（目录推荐 link）'),
+      title: z.string().optional().describe('显示标题；默认用文件/目录名'),
     },
     async (args) => text(workspace.files.ingest(args)),
   )

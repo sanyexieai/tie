@@ -13,7 +13,7 @@
 | `tie_write` | 安全写入（自动 frontmatter；更新前写入 `.tie/history`） |
 | `tie_related` | 出链 / 入链 / 子页 / 同标签 |
 | `tie_list_recent` | 最近更新 |
-| `tie_file_ingest` | 登记外部文件：`copy` 导入副本 / `link` 外链；返回元数据与 `tie://file/{id}` |
+| `tie_file_ingest` | 登记外部**文件或目录**：`copy` 导入副本 / `link` 外链；返回元数据与 `tie://file/{id}` |
 | `tie_file_get` | 按 fileId 读文件资源元数据 |
 | `tie_file_list` | 列出已登记文件资源 |
 | `tie_file_open_hint` | 返回可打开路径（不替用户打开） |

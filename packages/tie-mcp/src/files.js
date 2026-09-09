@@ -23,6 +23,7 @@ const MIME_BY_EXT = {
   mp3: 'audio/mpeg',
   mp4: 'video/mp4',
   zip: 'application/zip',
+  dir: 'inode/directory',
 }
 
 function nowIso() {
@@ -59,6 +60,54 @@ function readTextPreview(filePath, ext, maxChars = 1200) {
     const raw = fs.readFileSync(filePath, 'utf8')
     const trimmed = raw.replace(/\u0000/g, '').slice(0, maxChars)
     return trimmed || null
+  } catch {
+    return null
+  }
+}
+
+function copyDirectoryRecursive(src, dest) {
+  fs.mkdirSync(dest, { recursive: true })
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const from = path.join(src, entry.name)
+    const to = path.join(dest, entry.name)
+    if (entry.isDirectory()) copyDirectoryRecursive(from, to)
+    else if (entry.isFile()) fs.copyFileSync(from, to)
+  }
+}
+
+function directoryStats(dirPath) {
+  let size = 0
+  let files = 0
+  let dirs = 0
+  const walk = (current) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) {
+        dirs += 1
+        walk(full)
+      } else if (entry.isFile()) {
+        files += 1
+        try { size += fs.statSync(full).size } catch { /* ignore */ }
+      }
+    }
+  }
+  walk(dirPath)
+  return { size, files, dirs }
+}
+
+function directoryPreview(dirPath, maxEntries = 24) {
+  try {
+    const names = fs.readdirSync(dirPath).slice(0, maxEntries)
+    if (!names.length) return '(空目录)'
+    const more = fs.readdirSync(dirPath).length > maxEntries ? '\n…' : ''
+    return names.map((name) => {
+      const full = path.join(dirPath, name)
+      try {
+        return fs.statSync(full).isDirectory() ? `${name}/` : name
+      } catch {
+        return name
+      }
+    }).join('\n') + more
   } catch {
     return null
   }
@@ -113,6 +162,7 @@ export function createFileRegistry(workspaceRoot) {
     entries.unshift({
       id: meta.id,
       title: meta.title,
+      kind: meta.kind === 'directory' ? 'directory' : 'file',
       mode: meta.mode,
       ext: meta.ext,
       mime: meta.mime,
@@ -147,6 +197,7 @@ export function createFileRegistry(workspaceRoot) {
     return {
       id: meta.id,
       title: meta.title,
+      kind: meta.kind === 'directory' ? 'directory' : 'file',
       mode: meta.mode,
       mime: meta.mime,
       ext: meta.ext,
@@ -157,6 +208,7 @@ export function createFileRegistry(workspaceRoot) {
       openPath: resolveOpenPath(meta),
       sha256: meta.sha256 ?? null,
       preview: meta.preview ?? null,
+      entryCount: meta.entryCount ?? null,
       createdAt: meta.createdAt,
       updatedAt: meta.updatedAt,
       url: `tie://file/${meta.id}`,
@@ -195,12 +247,17 @@ export function createFileRegistry(workspaceRoot) {
     if (!meta) throw new Error(`文件资源不存在：${fileId}`)
     const openPath = resolveOpenPath(meta)
     const exists = openPath ? fs.existsSync(openPath) : false
+    const isDirectory = meta.kind === 'directory' || (openPath ? (() => {
+      try { return fs.statSync(openPath).isDirectory() } catch { return false }
+    })() : false)
     return {
       ...summarize(meta),
       openPath,
       exists,
       hint: exists
-        ? `可用系统默认应用打开：${openPath}`
+        ? (isDirectory
+          ? `可用系统文件管理器打开目录：${openPath}`
+          : `可用系统默认应用打开：${openPath}`)
         : `路径不可用（${meta.mode === 'link' ? '外链失效' : '副本缺失'}）：${openPath || '未知'}`,
     }
   }
@@ -212,20 +269,40 @@ export function createFileRegistry(workspaceRoot) {
     if (!inputPath) throw new Error('path 必填')
 
     const absPath = path.resolve(inputPath)
-    if (!fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) {
-      throw new Error(`文件不存在或不是普通文件：${absPath}`)
+    if (!fs.existsSync(absPath)) {
+      throw new Error(`路径不存在：${absPath}`)
+    }
+    const stat = fs.statSync(absPath)
+    const isDirectory = stat.isDirectory()
+    if (!isDirectory && !stat.isFile()) {
+      throw new Error(`不是普通文件或目录：${absPath}`)
     }
 
-    const stat = fs.statSync(absPath)
-    const ext = extensionOf(absPath)
-    const mime = guessMime(ext)
-    const sha256 = normalizedMode === 'copy' ? sha256File(absPath) : null
+    const kind = isDirectory ? 'directory' : 'file'
+    const ext = isDirectory ? 'dir' : extensionOf(absPath)
+    const mime = isDirectory ? 'inode/directory' : guessMime(ext)
+    const sha256 = !isDirectory && normalizedMode === 'copy' ? sha256File(absPath) : null
+    const dirStats = isDirectory ? directoryStats(absPath) : null
 
     const existing = findExisting({ absPath, sha256, mode: normalizedMode })
     if (existing) {
-      const preview = existing.preview ?? readTextPreview(absPath, ext)
+      const preview = existing.preview
+        ?? (isDirectory ? directoryPreview(absPath) : readTextPreview(absPath, ext))
+      let changed = false
       if (preview && preview !== existing.preview) {
         existing.preview = preview
+        changed = true
+      }
+      if (!existing.kind) {
+        existing.kind = kind
+        changed = true
+      }
+      if (isDirectory && dirStats) {
+        existing.size = dirStats.size
+        existing.entryCount = { files: dirStats.files, dirs: dirStats.dirs }
+        changed = true
+      }
+      if (changed) {
         existing.updatedAt = nowIso()
         writeMeta(existing)
         upsertIndexEntry(existing)
@@ -240,24 +317,34 @@ export function createFileRegistry(workspaceRoot) {
     if (normalizedMode === 'copy') {
       const dir = path.join(filesRoot, id)
       fs.mkdirSync(dir, { recursive: true })
-      const storedName = sanitizeStoredName(ext)
-      const target = path.join(dir, storedName)
-      fs.copyFileSync(absPath, target)
-      storedPath = path.relative(workspaceRoot, target).split(path.sep).join('/')
+      if (isDirectory) {
+        const target = path.join(dir, 'original')
+        copyDirectoryRecursive(absPath, target)
+        storedPath = path.relative(workspaceRoot, target).split(path.sep).join('/')
+      } else {
+        const storedName = sanitizeStoredName(ext)
+        const target = path.join(dir, storedName)
+        fs.copyFileSync(absPath, target)
+        storedPath = path.relative(workspaceRoot, target).split(path.sep).join('/')
+      }
     }
 
     const meta = {
       id,
       title: baseTitle,
+      kind,
       mode: normalizedMode,
       mime,
       ext,
-      size: stat.size,
+      size: isDirectory ? (dirStats?.size ?? 0) : stat.size,
+      entryCount: isDirectory && dirStats
+        ? { files: dirStats.files, dirs: dirStats.dirs }
+        : null,
       mtime: stat.mtime.toISOString(),
       sourcePath: absPath,
       storedPath,
       sha256,
-      preview: readTextPreview(absPath, ext),
+      preview: isDirectory ? directoryPreview(absPath) : readTextPreview(absPath, ext),
       createdAt: now,
       updatedAt: now,
     }

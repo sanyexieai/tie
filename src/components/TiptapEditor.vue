@@ -21,7 +21,7 @@ import { openUrl, openPath } from '@tauri-apps/plugin-opener'
 import type { Page, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { canStorePageAssets, embedImageFile, inlineImageSrcToFile, isImageFile, normalizeImageFile, parseAssetUrl, resolveAssetDisplayUrl, shouldHandleImagePaste, uploadPastedImage } from '@/services/attachments'
-import { cachedFileMode, fileLinkClass, listWorkspaceFiles, openWorkspaceFile, parseFileUrl } from '@/services/files'
+import { cachedFileKind, cachedFileMode, fileLinkClass, listWorkspaceFiles, openWorkspaceFile, parseFileUrl } from '@/services/files'
 import { fileUrlToLocalPath } from '@/services/local-path'
 
 const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page> }>()
@@ -36,6 +36,8 @@ const selectedPageIndex = ref(0)
 const slashQuery = ref<string | null>(null)
 const slashStart = ref<number | null>(null)
 const selectedCommandIndex = ref(0)
+const floatingMenuStyle = ref<Record<string, string>>({ top: '0px', left: '0px' })
+const SLASH_TRIGGER = /(?:^|\s)([/／、])([^\s]*)$/
 const matchingPages = computed(() => {
   const query = (pagePickerMode.value === 'wiki' ? wikiQuery.value : pageQuery.value).trim().toLocaleLowerCase()
   return props.pages.filter((page) => !page.deletedAt && (!query || page.title.toLocaleLowerCase().includes(query))).slice(0, 8)
@@ -82,8 +84,9 @@ function decorateFileLinks() {
   for (const anchor of dom.querySelectorAll<HTMLAnchorElement>('a[href^="tie://file/"]')) {
     const parsed = parseFileUrl(anchor.getAttribute('href') ?? '')
     const mode = parsed ? cachedFileMode(root, parsed.fileId) : null
-    anchor.classList.remove('file-link', 'file-link-copy', 'file-link-link')
-    for (const token of fileLinkClass(mode).split(/\s+/)) {
+    const kind = parsed ? cachedFileKind(root, parsed.fileId) : null
+    anchor.classList.remove('file-link', 'file-link-copy', 'file-link-link', 'file-link-directory')
+    for (const token of fileLinkClass(mode, kind).split(/\s+/)) {
       if (token) anchor.classList.add(token)
     }
     if (mode === 'copy' || mode === 'link') {
@@ -91,6 +94,8 @@ function decorateFileLinks() {
     } else {
       delete anchor.dataset.fileMode
     }
+    if (kind === 'directory') anchor.dataset.fileKind = 'directory'
+    else delete anchor.dataset.fileKind
   }
 }
 
@@ -682,8 +687,20 @@ const editor = useEditor({
     },
     handleDOMEvents: {
       click: (_view, event) => handleEditorClick(event),
+      compositionend: (_view) => {
+        const current = editor.value
+        if (current) updateMenus(current)
+        return false
+      },
     },
     handleKeyDown: (_view, event) => {
+      // Windows 中文输入法在英文标点下直接输入 /；部分环境 key 为 Process，靠 onUpdate/compositionend 兜底。
+      if ((event.key === '/' || event.key === '／' || event.key === '、' || event.code === 'Slash') && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        queueMicrotask(() => {
+          const current = editor.value
+          if (current) updateMenus(current)
+        })
+      }
       if (showPagePicker.value && pagePickerMode.value === 'wiki') {
         if (!matchingPages.value.length && ['ArrowDown', 'ArrowUp'].includes(event.key)) {
           event.preventDefault()
@@ -823,20 +840,48 @@ function updateMenus(currentEditor: Editor) {
     wikiStart.value = currentEditor.state.selection.from - wikiMatch[1].length - 2
     selectedPageIndex.value = 0
     closeSlashMenu()
+    updateFloatingMenuPosition(currentEditor, wikiStart.value)
     return
   }
   if (pagePickerMode.value === 'wiki') closePagePicker()
   updateSlashState(currentEditor, beforeCursor)
 }
 
+function updateFloatingMenuPosition(currentEditor: Editor, pos?: number | null) {
+  const anchor = typeof pos === 'number' ? pos : currentEditor.state.selection.from
+  let coords: { left: number; right: number; top: number; bottom: number }
+  try {
+    coords = currentEditor.view.coordsAtPos(Math.max(1, Math.min(anchor, currentEditor.state.doc.content.size)))
+  } catch {
+    return
+  }
+  const menuWidth = 330
+  const menuMaxHeight = 310
+  const gap = 6
+  const margin = 8
+  let left = coords.left
+  let top = coords.bottom + gap
+  left = Math.min(left, window.innerWidth - menuWidth - margin)
+  left = Math.max(margin, left)
+  const spaceBelow = window.innerHeight - coords.bottom - margin
+  if (spaceBelow < 180) {
+    top = Math.max(margin, coords.top - Math.min(menuMaxHeight, Math.max(spaceBelow, 220)) - gap)
+  }
+  floatingMenuStyle.value = { top: `${Math.round(top)}px`, left: `${Math.round(left)}px` }
+}
+
 function updateSlashState(currentEditor: Editor, textBeforeCursor?: string) {
   const { $from } = currentEditor.state.selection
+  if ($from.parent.type.name === 'codeBlock') return closeSlashMenu()
   const beforeCursor = textBeforeCursor ?? $from.parent.textContent.slice(0, $from.parentOffset)
-  const match = beforeCursor.match(/(?:^|\s)\/([^\s]*)$/)
+  const match = beforeCursor.match(SLASH_TRIGGER)
   if (!match) return closeSlashMenu()
-  slashQuery.value = match[1]
-  slashStart.value = currentEditor.state.selection.from - match[1].length - 1
+  const trigger = match[1]
+  const query = match[2]
+  slashQuery.value = query
+  slashStart.value = currentEditor.state.selection.from - query.length - trigger.length
   selectedCommandIndex.value = 0
+  updateFloatingMenuPosition(currentEditor, slashStart.value)
 }
 
 function closeSlashMenu() {
@@ -850,6 +895,7 @@ function openSlashPagePicker() {
   pageQuery.value = ''
   selectedPageIndex.value = 0
   showPagePicker.value = true
+  if (editor.value) updateFloatingMenuPosition(editor.value)
 }
 
 function closePagePicker() {
@@ -923,7 +969,7 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
 <template>
   <div class="tiptap-editor" v-if="editor" @click="handleSurfaceClick" @paste.capture="onPasteCapture">
     <slot name="meta"></slot>
-    <div v-if="showPagePicker" class="page-picker">
+    <div v-if="showPagePicker" class="page-picker" :style="floatingMenuStyle">
       <input v-if="pagePickerMode === 'slash'" v-model="pageQuery" autofocus placeholder="搜索并关联页面…" />
       <p v-else class="wiki-picker-hint">正在关联：<strong>{{ wikiQuery || '全部页面' }}</strong><small>↑↓ 选择，Enter 插入，Esc 取消</small></p>
       <button v-for="(page, index) in matchingPages" :key="page.id" :class="{ selected: pagePickerMode === 'wiki' && selectedPageIndex === index }" @mousedown.prevent="insertPageLink(page)">
@@ -932,7 +978,7 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
       <button v-if="!matchingPages.length && pagePickerMode === 'wiki' && wikiQuery.trim()" class="page-picker-create" @mousedown.prevent="createWikiPage"><span>创建“{{ wikiQuery.trim() }}”</span><small>并插入页面链接</small></button>
       <p v-else-if="!matchingPages.length">没有匹配页面</p>
     </div>
-    <div v-if="slashQuery !== null" class="slash-menu" role="listbox" aria-label="插入块">
+    <div v-if="slashQuery !== null" class="slash-menu" role="listbox" aria-label="插入块" :style="floatingMenuStyle">
       <button
         v-for="(command, index) in filteredCommands"
         :key="command.id"

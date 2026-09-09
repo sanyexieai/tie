@@ -27,25 +27,26 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 4. 外部文件用 `tie_file_ingest` / `tie_file_list` / `tie_file_get`
 5. 新建或更新用 `tie_write`（不要手写 frontmatter）
 
-## 外部文件（副本 / 外链）
+## 外部文件 / 目录（副本 / 外链）
 
-主入口是 MCP，不是桌面「文件库」页。
+主入口是 MCP，不是桌面「文件库」页。**不要**把 `file:///...` 写进正文当作稳定链接——桌面虽可能渲染成可点样式，但不是登记协议，打开行为不可靠。应先 `tie_file_ingest`，再用返回的 `tie://file/{id}`。
 
 ### 选 mode
 
-- `copy`：导入工作区副本（`.tie/files/{id}/`），适合希望跟知识库一起备份的小中型文件
-- `link`：只记录本机原路径，适合大文件或已有书库目录；跨机器可能失效
+- `copy`：导入工作区副本（`.tie/files/{id}/`），适合希望跟知识库一起备份的小中型文件；目录会递归复制到 `{id}/original/`
+- `link`：只记录本机原路径，适合大文件、已有书库**目录**；跨机器可能失效
 
-二者在编辑器中样式不同（副本=实心芯片，外链=描边芯片），但链接协议相同：`tie://file/{fileId}`。
+二者在编辑器中样式不同（副本=实心芯片，外链=描边芯片），但链接协议相同：`tie://file/{fileId}`。目录资源 `kind: "directory"`，点击由系统文件管理器打开。
 
-### 标准流程（书 / PDF）
+### 标准流程（书 / PDF / 文件夹）
 
-1. `tie_file_ingest`：`path` + `mode`（+ 可选 `title`）→ 拿到 `id`、`mime`/`ext`/`size`、`url`
+1. `tie_file_ingest`：`path` + `mode`（+ 可选 `title`）→ 拿到 `id`、`kind`、`mime`/`ext`/`size`、`url`
 2. 阅读原文件或依据用户说明，提炼**类型、摘要、要点**（MCP 只提供元数据与文本类 preview，不做 PDF 全文解析）
 3. `tie_write` 建书目/摘录页：`tags` 含 `resource`（可再加主题标签）
 4. 正文放入资源链接：
    - 副本：`[书名（工作区副本）](tie://file/{id})`
    - 外链：`[书名（原文件）](tie://file/{id})`
+   - 目录：`[资料夹](tie://file/{id})`
 5. 相关笔记用 `[[页面标题]]` / `tie://page/...` 互链；需要打开路径时用 `tie_file_open_hint`
 
 ### 禁止
@@ -53,6 +54,7 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 - 把整份 PDF/二进制塞进 `markdown`
 - 把 `tie_file_ingest` 的整段 JSON 当作正文写入（只要提炼后的 Markdown）
 - 手写 frontmatter 假装登记文件（必须走 `tie_file_*`）
+- 手写 `file:///...` 当作工作区资源链接（必须走 `tie_file_ingest` → `tie://file/{id}`）
 
 ## 写入规则
 
