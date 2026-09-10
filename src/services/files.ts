@@ -56,7 +56,7 @@ export function fileLinkClass(
 /** Visible status text; healthy links rely on icon color (empty string). */
 export function fileLinkLabel(
   mode: string | null | undefined,
-  kind?: string | null,
+  _kind?: string | null,
   availability?: LinkAvailability | null,
   form?: ClassifiedLocalLink['form'] | null,
 ) {

@@ -45,7 +45,7 @@ function stampSource(sources: StorageSource[]) {
 
 async function readApplied(sources: StorageSource[]): Promise<string[]> {
   const source = stampSource(sources)
-  if (source?.readRelative || (source && blobStoreFor(source).readRelative)) {
+  if (source && blobStoreFor(source).readRelative) {
     try {
       const bytes = await blobStoreFor(source).readRelative!(source, MIGRATIONS_RELATIVE_PATH)
       const fromDisk = decodeJsonApplied(new TextDecoder().decode(bytes))
