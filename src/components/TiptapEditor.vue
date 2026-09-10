@@ -689,6 +689,8 @@ function openInternalLink(event: MouseEvent) {
   if (!href?.startsWith(prefix)) return false
   event.preventDefault()
   event.stopPropagation()
+  closeSlashMenu()
+  closePagePicker()
   if (shouldOpenFromPointerEvent(event) && event.type === 'click') {
     emit('navigate', href.slice(prefix.length))
   }
@@ -700,6 +702,8 @@ function openLocalLinkFromEvent(event: MouseEvent) {
   if (!href || !classifyLocalLink(href)) return false
   event.preventDefault()
   event.stopPropagation()
+  closeSlashMenu()
+  closePagePicker()
   if (!shouldOpenFromPointerEvent(event) || event.type !== 'click') return true
   const context = linkContext()
   void openLocalLink(href, context).catch(async (error) => {
@@ -1138,11 +1142,19 @@ function updateFloatingMenuPosition(currentEditor: Editor, pos?: number | null) 
 function updateSlashState(currentEditor: Editor, textBeforeCursor?: string) {
   const { $from } = currentEditor.state.selection
   if ($from.parent.type.name === 'codeBlock') return closeSlashMenu()
+  // 点击「/home/...」这类路径链接时，光标落在链接内会误触发斜杠菜单。
+  if ($from.marks().some((mark) => mark.type.name === 'link')
+    || ($from.nodeAfter?.marks.some((mark) => mark.type.name === 'link'))
+    || ($from.nodeBefore?.marks.some((mark) => mark.type.name === 'link'))) {
+    return closeSlashMenu()
+  }
   const beforeCursor = textBeforeCursor ?? $from.parent.textContent.slice(0, $from.parentOffset)
   const match = beforeCursor.match(SLASH_TRIGGER)
   if (!match) return closeSlashMenu()
   const trigger = match[1]
   const query = match[2]
+  // 路径片段（含 /）不是斜杠命令查询
+  if (query.includes('/') || query.includes('／')) return closeSlashMenu()
   slashQuery.value = query
   slashStart.value = currentEditor.state.selection.from - query.length - trigger.length
   selectedCommandIndex.value = 0
