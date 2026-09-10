@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
  * 统一 bump 版本、更新 CHANGELOG、提交、打 tag 并推送到 origin。
+ * 默认先跑本地预检（npm run preflight），通过后再改版本与 push。
  *
  * 用法:
  *   npm run release -- patch
@@ -8,6 +9,7 @@
  *   npm run release -- 1.0.2
  *   npm run release -- patch --all
  *   npm run release -- 1.0.2 --message "自动更新与发布流程" --dry-run
+ *   npm run release -- patch --all --skip-checks   # 紧急跳过预检（不推荐）
  */
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -35,6 +37,7 @@ function printHelp() {
   --dry-run          只打印将要执行的操作
   --no-push          本地提交与打 tag，不 push
   --skip-changelog   不修改 CHANGELOG.md
+  --skip-checks      跳过本地预检（默认会先 npm run preflight）
   --allow-dirty      允许工作区有未暂存改动（与 --all 联用时默认允许）
   -h, --help         显示帮助
 
@@ -51,6 +54,7 @@ function parseArgs(argv) {
     dryRun: false,
     noPush: false,
     skipChangelog: false,
+    skipChecks: false,
     stageAll: false,
     allowDirty: false,
   }
@@ -59,6 +63,7 @@ function parseArgs(argv) {
     if (arg === '--dry-run') out.dryRun = true
     else if (arg === '--no-push') out.noPush = true
     else if (arg === '--skip-changelog') out.skipChangelog = true
+    else if (arg === '--skip-checks') out.skipChecks = true
     else if (arg === '--all') out.stageAll = true
     else if (arg === '--allow-dirty') out.allowDirty = true
     else if (arg === '--message' || arg === '-m') out.message = argv[++i] || ''
@@ -279,10 +284,17 @@ function main() {
   console.log(`提交: ${commitMessage}`)
   if (options.stageAll) console.log('将暂存: 全部改动')
   else console.log(`将暂存: ${VERSION_FILES.join(', ')}${options.skipChangelog ? '' : ', CHANGELOG.md'}`)
+  if (options.skipChecks) console.log('本地预检: 跳过（--skip-checks）')
+  else console.log('本地预检: npm run preflight（失败则不 bump / 不 push）')
 
   if (options.dryRun) {
     console.log('\n[dry-run] 未修改文件，也未执行 git 操作。')
     return
+  }
+
+  // 先本地检查，再改版本与推送，避免把坏构建推到 CI
+  if (!options.skipChecks) {
+    run('npm', ['run', 'preflight'])
   }
 
   bumpAllVersions(nextVersion)
