@@ -80,7 +80,7 @@ function main() {
 
   server.tool(
     'tie_write',
-    '安全写入 Tie 页面：自动补全 frontmatter；更新时先归档到 .tie/history。创建需 title；更新传 pageId。正文链接协议：页面用 [[标题]] 或 tie://page/{id}；已登记文件用 tie://file/{id}；工作区内相对路径用 tie://path/{相对路径}；不要用手写 file:/// 代替登记或相对路径。',
+    '安全写入 Tie 页面：自动补全 frontmatter；更新时先归档到 .tie/history。创建需 title；更新传 pageId。正文链接协议：页面用 [[标题]] 或 tie://page/{id}；区外登记用 tie://file/{sourceId}/{id}；区内相对路径用 tie://path/{sourceId}/{相对路径}；图片用 tie://asset/{pageId}/{文件名}（相对路径别名）。旧的无 sourceId 写法会在写入时补上。不要用手写 file:///。',
     {
       title: z.string().optional().describe('页面标题；创建时必填'),
       markdown: z.string().optional().describe('Markdown 正文（纯文本，不要传 JSON 包装）；可省略一级标题，将自动补上。链接见工具说明中的协议表'),
@@ -99,10 +99,10 @@ function main() {
 
   server.tool(
     'tie_file_ingest',
-    '登记外部文件或目录到工作区（目录已支持，勿再判断为“只接受普通文件”）。mode=copy 导入副本到 .tie/files；mode=link 只记录原路径（目录推荐 link）。返回 kind=file|directory 与稳定链接 tie://file/{id}（目录也用同一协议）。摘要用 tie_write 写入页面并引用 url。工作区内已有路径可写 tie://path/{相对路径}。不要手写 file:///。',
+    '登记外部文件或目录。mode=link 登记为绝对引用，返回 tie://file/{id}（可带 sourceId）；mode=copy 导入工作区副本，返回 tie://path/… 相对链接。目录推荐 link。不要手写 file:///。工作区内已有路径直接写 tie://path/{相对路径}。',
     {
       path: z.string().describe('本机文件或目录的绝对/相对路径（目录可直接传）'),
-      mode: z.enum(['copy', 'link']).describe('copy=导入工作区副本；link=外链引用原路径（目录推荐 link）'),
+      mode: z.enum(['copy', 'link']).describe('copy=导入工作区副本（相对路径）；link=登记原路径（绝对引用，目录推荐）'),
       title: z.string().optional().describe('显示标题；默认用文件/目录名'),
     },
     async (args) => text(workspace.files.ingest(args)),
@@ -142,6 +142,16 @@ function main() {
       fileId: z.string().describe('文件资源 id'),
     },
     async ({ fileId }) => text(workspace.files.openHint(fileId)),
+  )
+
+  server.tool(
+    'tie_migration_status',
+    '查询工作区数据迁移 stamp 与「需 Agent 收尾」的版本化目录。仅当某 migration 在目录中标了 agentFollowUp、且 stamp 已 applied、仍有残留时才需要跟 Skill tie-update。不要因「刚更新了 Tie」就调用并全库扫。',
+    {
+      migrationId: z.string().optional().describe('可选，只查某一 migration id，如 href-file-protocol-v1'),
+      limit: z.number().int().min(1).max(200).optional().describe('残留页条数上限，默认 50'),
+    },
+    async ({ migrationId, limit }) => text(workspace.migrationStatus({ migrationId, limit })),
   )
 
   const transport = new StdioServerTransport()

@@ -8,6 +8,7 @@ use std::{
 };
 use tauri::AppHandle;
 use tie_storage::fs_path;
+use tie_storage::file_meta;
 use tie_storage::local::{
     io, load_file_workspace, register_storage_source, resolve_directory_path, Page, PageRevision,
     WorkspaceSettings, WorkspaceSnapshot,
@@ -73,11 +74,7 @@ fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource
         .unwrap_or("application/octet-stream")
         .to_owned();
     let size = meta.get("size").and_then(|item| item.as_u64()).unwrap_or(0);
-    let source_path = meta
-        .get("sourcePath")
-        .and_then(|item| item.as_str())
-        .unwrap_or("")
-        .to_owned();
+    let source_path = file_meta::source_path_from_meta(meta);
     let stored_path = meta
         .get("storedPath")
         .and_then(|item| item.as_str())
@@ -89,28 +86,44 @@ fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource
         .unwrap_or("")
         .to_owned();
     let root = fs_path::for_shell_open(root);
-    let open_buf = if mode == "copy" {
-        let stored = PathBuf::from(stored_path.replace('\\', "/"));
-        if stored.is_absolute() {
-            fs_path::for_shell_open(&stored)
+    let content_uri = crate::saf::is_content_uri(&source_path) || crate::saf::is_content_uri(&stored_path);
+    let (open_path, exists) = if content_uri {
+        let uri = if crate::saf::is_content_uri(&stored_path) {
+            stored_path.clone()
         } else {
-            fs_path::for_shell_open(&root.join(stored))
-        }
-    } else {
-        let candidate = if stored_path.trim().is_empty() {
-            PathBuf::from(&source_path)
-        } else {
-            PathBuf::from(&stored_path)
+            source_path.clone()
         };
-        fs_path::for_shell_open(&candidate)
-    };
-    let open_path = open_buf.to_string_lossy().into_owned();
-    // 目录资源也要算存在，否则外链目录会被桌面端当成失效。
-    let exists = open_buf.exists();
-    let kind = if kind == "directory" || open_buf.is_dir() {
-        "directory".to_owned()
+        (uri.clone(), crate::saf::uri_exists(&uri))
     } else {
-        "file".to_owned()
+        let open_buf = if mode == "copy" {
+            let stored = PathBuf::from(stored_path.replace('\\', "/"));
+            if stored.is_absolute() {
+                fs_path::for_shell_open(&stored)
+            } else {
+                fs_path::for_shell_open(&root.join(stored))
+            }
+        } else {
+            let candidate = if stored_path.trim().is_empty() {
+                PathBuf::from(&source_path)
+            } else {
+                PathBuf::from(&stored_path)
+            };
+            fs_path::for_shell_open(&candidate)
+        };
+        (
+            open_buf.to_string_lossy().into_owned(),
+            open_buf.exists(),
+        )
+    };
+    let kind = if content_uri {
+        kind
+    } else {
+        let open_buf = PathBuf::from(&open_path);
+        if kind == "directory" || open_buf.is_dir() {
+            "directory".to_owned()
+        } else {
+            "file".to_owned()
+        }
     };
     Some(WorkspaceFileResource {
         id,
@@ -248,6 +261,62 @@ fn sanitize_stored_name(ext: &str) -> String {
     }
 }
 
+const MAX_COPY_FILE_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_COPY_DIR_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_COPY_DIR_FILES: u64 = 200;
+const MAX_COPY_DIR_DEPTH: u32 = 8;
+
+fn assert_copy_file_size(size: u64) -> Result<(), String> {
+    if size > MAX_COPY_FILE_BYTES {
+        return Err("导入文件不能超过 50 MB，请改用登记（绝对链接）".into());
+    }
+    Ok(())
+}
+
+fn directory_stats_for_copy(dir: &Path) -> Result<(u64, u64, u64), String> {
+    fn walk(
+        current: &Path,
+        depth: u32,
+        size: &mut u64,
+        files: &mut u64,
+        dirs: &mut u64,
+    ) -> Result<(), String> {
+        if depth > MAX_COPY_DIR_DEPTH {
+            return Err(format!(
+                "导入目录不能超过 {MAX_COPY_DIR_DEPTH} 层，请改用登记或缩小范围"
+            ));
+        }
+        let entries = fs::read_dir(current).map_err(|error| error.to_string())?;
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let file_type = entry.file_type().map_err(|error| error.to_string())?;
+            if file_type.is_dir() {
+                *dirs += 1;
+                walk(&entry.path(), depth + 1, size, files, dirs)?;
+            } else if file_type.is_file() {
+                *files += 1;
+                if *files > MAX_COPY_DIR_FILES {
+                    return Err(format!(
+                        "导入目录不能超过 {MAX_COPY_DIR_FILES} 个文件，请改用登记或缩小范围"
+                    ));
+                }
+                if let Ok(meta) = entry.metadata() {
+                    *size += meta.len();
+                }
+                if *size > MAX_COPY_DIR_BYTES {
+                    return Err("导入目录不能超过 50 MB，请改用登记或缩小范围".into());
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut size = 0u64;
+    let mut files = 0u64;
+    let mut dirs = 0u64;
+    walk(dir, 1, &mut size, &mut files, &mut dirs)?;
+    Ok((size, files, dirs))
+}
+
 fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|error| error.to_string())?;
     for entry in fs::read_dir(from).map_err(|error| error.to_string())? {
@@ -261,33 +330,6 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn directory_stats(dir: &Path) -> (u64, u64, u64) {
-    let mut size = 0u64;
-    let mut files = 0u64;
-    let mut dirs = 0u64;
-    fn walk(current: &Path, size: &mut u64, files: &mut u64, dirs: &mut u64) {
-        let Ok(entries) = fs::read_dir(current) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                *dirs += 1;
-                walk(&entry.path(), size, files, dirs);
-            } else if file_type.is_file() {
-                *files += 1;
-                if let Ok(meta) = entry.metadata() {
-                    *size += meta.len();
-                }
-            }
-        }
-    }
-    walk(dir, &mut size, &mut files, &mut dirs);
-    (size, files, dirs)
 }
 
 fn directory_preview(dir: &Path, max_entries: usize) -> Option<String> {
@@ -403,14 +445,14 @@ fn find_existing_resource(
         if meta_mode != mode {
             continue;
         }
-        let source = meta
-            .get("sourcePath")
-            .and_then(|item| item.as_str())
-            .unwrap_or("");
+        let source = file_meta::source_path_from_meta(&meta);
         let stored = meta
             .get("storedPath")
             .and_then(|item| item.as_str())
             .unwrap_or("");
+        if source == abs.as_ref() || stored == abs.as_ref() {
+            return Ok(Some(meta));
+        }
         let source_resolved = PathBuf::from(source);
         let source_abs = fs::canonicalize(&source_resolved)
             .map(|p| fs_path::strip_extended_length_prefix(&p))
@@ -431,12 +473,216 @@ fn find_existing_resource(
     Ok(None)
 }
 
+fn rebind_link_resource(
+    root: &Path,
+    file_id: &str,
+    abs_path: &Path,
+    title: Option<&str>,
+    source_id: Option<&str>,
+) -> Result<WorkspaceFileResource, String> {
+    let id = file_id.trim();
+    if id.is_empty() {
+        return Err("fileId 无效".into());
+    }
+    let meta_path = files_meta_path(root, id);
+    if !meta_path.is_file() {
+        return Err(format!("文件资源不存在：{id}"));
+    }
+    let mut meta = read_json_file(&meta_path)?;
+    let mode = meta
+        .get("mode")
+        .and_then(|item| item.as_str())
+        .unwrap_or("");
+    if mode != "link" {
+        return Err("副本不能重新绑定，请重新导入".into());
+    }
+    let meta_fs = fs::metadata(abs_path).map_err(|error| error.to_string())?;
+    let is_directory = meta_fs.is_dir();
+    if !is_directory && !meta_fs.is_file() {
+        return Err(format!("不是普通文件或目录：{}", abs_path.display()));
+    }
+    let kind = if is_directory { "directory" } else { "file" };
+    let ext = if is_directory {
+        "dir".to_owned()
+    } else {
+        extension_of(abs_path)
+    };
+    let mime = guess_mime(&ext, is_directory);
+    let abs_display = abs_path.to_string_lossy().into_owned();
+    let base_title = title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_owned())
+        .or_else(|| {
+            meta.get("title")
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_owned())
+        })
+        .unwrap_or_else(|| {
+            abs_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(id)
+                .to_owned()
+        });
+    meta["title"] = json!(base_title);
+    meta["kind"] = json!(kind);
+    meta["ext"] = json!(ext);
+    meta["mime"] = json!(mime);
+    meta["size"] = json!(if is_directory {
+        // rebind/link：不要递归扫目录体积
+        0u64
+    } else {
+        meta_fs.len()
+    });
+    meta["sourcePath"] = json!(abs_display);
+    meta["storedPath"] = json!(abs_display);
+    meta["locator"] = json!({
+        "type": "desktop",
+        "desktopPath": abs_display,
+        "displayPath": abs_display,
+    });
+    meta["updatedAt"] = json!(now_iso());
+    let meta = file_meta::normalize_file_meta(&meta, source_id);
+    write_meta_file(root, &meta)?;
+    upsert_index_entry(root, &meta)?;
+    resource_from_meta(root, &meta).ok_or_else(|| "重新绑定后读取失败".to_string())
+}
+
+fn android_locator(uri: &str, display: &str) -> Value {
+    json!({
+        "type": "android",
+        "androidUri": uri,
+        "displayPath": display,
+    })
+}
+
+fn ingest_android_uri(
+    root: &Path,
+    uri: &str,
+    mode: &str,
+    title: Option<&str>,
+    source_id: Option<&str>,
+    file_id: Option<&str>,
+) -> Result<WorkspaceFileResource, String> {
+    let stat = crate::saf::uri_stat(uri)?;
+    if !stat.exists {
+        return Err("找不到所选文档".into());
+    }
+    if mode == "copy" && stat.is_directory {
+        return Err("Android 不能导入目录副本，请改用登记".into());
+    }
+    let display = if stat.name.trim().is_empty() {
+        uri.rsplit(['/', ':']).next().unwrap_or("document").to_owned()
+    } else {
+        stat.name.clone()
+    };
+    if let Some(id) = file_id.map(str::trim).filter(|value| !value.is_empty()) {
+        if mode != "link" {
+            return Err("只能重新绑定绝对登记".into());
+        }
+        let meta_path = files_meta_path(root, id);
+        if !meta_path.is_file() {
+            return Err(format!("文件资源不存在：{id}"));
+        }
+        let mut meta = read_json_file(&meta_path)?;
+        if meta.get("mode").and_then(|item| item.as_str()) != Some("link") {
+            return Err("副本不能重新绑定，请重新导入".into());
+        }
+        let kind = if stat.is_directory { "directory" } else { "file" };
+        let ext = if stat.is_directory {
+            "dir".to_owned()
+        } else {
+            extension_of(Path::new(&display))
+        };
+        meta["title"] = json!(title.map(str::trim).filter(|value| !value.is_empty()).unwrap_or(&display));
+        meta["kind"] = json!(kind);
+        meta["ext"] = json!(ext);
+        meta["mime"] = json!(if stat.mime.trim().is_empty() {
+            guess_mime(&ext, stat.is_directory)
+        } else {
+            stat.mime.clone()
+        });
+        meta["size"] = json!(stat.size);
+        meta["sourcePath"] = json!(uri);
+        meta["storedPath"] = json!(uri);
+        meta["locator"] = android_locator(uri, &display);
+        meta["updatedAt"] = json!(now_iso());
+        let meta = file_meta::normalize_file_meta(&meta, source_id);
+        write_meta_file(root, &meta)?;
+        upsert_index_entry(root, &meta)?;
+        return resource_from_meta(root, &meta).ok_or_else(|| "重新绑定后读取失败".to_string());
+    }
+    if let Some(existing) = find_existing_resource(root, Path::new(uri), mode)? {
+        return resource_from_meta(root, &existing)
+            .ok_or_else(|| "已有文件资源元数据无效".to_string());
+    }
+    let kind = if stat.is_directory { "directory" } else { "file" };
+    let ext = if stat.is_directory {
+        "dir".to_owned()
+    } else {
+        extension_of(Path::new(&display))
+    };
+    let mime = if stat.mime.trim().is_empty() {
+        guess_mime(&ext, stat.is_directory)
+    } else {
+        stat.mime.clone()
+    };
+    let id = new_file_id();
+    let now = now_iso();
+    let base_title = title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_owned())
+        .unwrap_or_else(|| display.clone());
+    let stored_path = if mode == "copy" {
+        let materialized = crate::saf::materialize_content_uri(uri)?;
+        let dir = root.join(".tie").join("files").join(&id);
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let stored_name = sanitize_stored_name(&ext);
+        let target = dir.join(&stored_name);
+        fs::copy(&materialized, &target).map_err(|error| error.to_string())?;
+        let _ = fs::remove_file(&materialized);
+        PathBuf::from(".tie")
+            .join("files")
+            .join(&id)
+            .join(stored_name)
+            .to_string_lossy()
+            .replace('\\', "/")
+    } else {
+        uri.to_owned()
+    };
+    let meta = json!({
+        "id": id,
+        "title": base_title,
+        "kind": kind,
+        "mode": mode,
+        "mime": mime,
+        "ext": ext,
+        "size": stat.size,
+        "sourcePath": uri,
+        "storedPath": stored_path,
+        "locator": android_locator(uri, &display),
+        "sha256": Value::Null,
+        "createdAt": now,
+        "updatedAt": now,
+    });
+    let meta = file_meta::normalize_file_meta(&meta, source_id);
+    write_meta_file(root, &meta)?;
+    upsert_index_entry(root, &meta)?;
+    resource_from_meta(root, &meta).ok_or_else(|| "写入文件资源后读取失败".to_string())
+}
+
 #[tauri::command]
 pub(crate) fn ingest_workspace_file(
     root: String,
     path: String,
     mode: String,
     title: Option<String>,
+    source_id: Option<String>,
+    file_id: Option<String>,
 ) -> Result<WorkspaceFileResource, String> {
     let normalized_mode = match mode.trim() {
         "copy" | "link" => mode.trim().to_owned(),
@@ -447,11 +693,33 @@ pub(crate) fn ingest_workspace_file(
         return Err("工作区根目录无效".into());
     }
     ensure_files_root(&root_path)?;
+    if crate::saf::is_content_uri(&path) {
+        return ingest_android_uri(
+            &root_path,
+            path.trim(),
+            &normalized_mode,
+            title.as_deref(),
+            source_id.as_deref(),
+            file_id.as_deref(),
+        );
+    }
     let abs_path = resolve_abs_path(&path)?;
     let meta_fs = fs::metadata(&abs_path).map_err(|error| error.to_string())?;
     let is_directory = meta_fs.is_dir();
     if !is_directory && !meta_fs.is_file() {
         return Err(format!("不是普通文件或目录：{}", abs_path.display()));
+    }
+    if let Some(id) = file_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        if normalized_mode != "link" {
+            return Err("只能重新绑定绝对登记".into());
+        }
+        return rebind_link_resource(
+            &root_path,
+            id,
+            &abs_path,
+            title.as_deref(),
+            source_id.as_deref(),
+        );
     }
     if let Some(existing) = find_existing_resource(&root_path, &abs_path, &normalized_mode)? {
         return resource_from_meta(&root_path, &existing)
@@ -466,12 +734,24 @@ pub(crate) fn ingest_workspace_file(
     };
     let mime = guess_mime(&ext, is_directory);
     let (size, entry_count) = if is_directory {
-        let (size, files, dirs) = directory_stats(&abs_path);
+        let (size, files, dirs) = if normalized_mode == "copy" {
+            directory_stats_for_copy(&abs_path)?
+        } else {
+            // link 只登记路径，禁止递归扫树（模型库等 TB 级目录会卡死 UI / 启动迁移）
+            (0u64, 0u64, 0u64)
+        };
         (
             size,
-            Some(json!({ "files": files, "dirs": dirs })),
+            if normalized_mode == "copy" {
+                Some(json!({ "files": files, "dirs": dirs }))
+            } else {
+                None
+            },
         )
     } else {
+        if normalized_mode == "copy" {
+            assert_copy_file_size(meta_fs.len())?;
+        }
         (meta_fs.len(), None)
     };
     let id = new_file_id();
@@ -540,9 +820,92 @@ pub(crate) fn ingest_workspace_file(
     if let Some(count) = entry_count {
         meta["entryCount"] = count;
     }
+    let meta = file_meta::normalize_file_meta(&meta, source_id.as_deref());
     write_meta_file(&root_path, &meta)?;
     upsert_index_entry(&root_path, &meta)?;
     resource_from_meta(&root_path, &meta).ok_or_else(|| "写入文件资源后读取失败".to_string())
+}
+
+#[tauri::command]
+pub(crate) fn native_path_exists(path: String) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if crate::saf::is_content_uri(trimmed) {
+        return crate::saf::uri_exists(trimmed);
+    }
+    PathBuf::from(trimmed).exists()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePathStat {
+    pub exists: bool,
+    pub is_directory: bool,
+    pub size: u64,
+}
+
+#[tauri::command]
+pub(crate) fn native_path_stat(path: String) -> Result<NativePathStat, String> {
+    if crate::saf::is_content_uri(&path) {
+        let stat = crate::saf::uri_stat(path.trim())?;
+        return Ok(NativePathStat {
+            exists: stat.exists,
+            is_directory: stat.is_directory,
+            size: stat.size,
+        });
+    }
+    let abs = resolve_abs_path(&path)?;
+    let meta = fs::metadata(&abs).map_err(|error| error.to_string())?;
+    Ok(NativePathStat {
+        exists: true,
+        is_directory: meta.is_dir(),
+        size: if meta.is_dir() { 0 } else { meta.len() },
+    })
+}
+
+#[tauri::command]
+pub(crate) fn read_native_file_bytes(path: String) -> Result<Vec<u8>, String> {
+    if crate::saf::is_content_uri(&path) {
+        let temp = crate::saf::materialize_content_uri(path.trim())?;
+        let data = fs::read(&temp).map_err(|error| error.to_string())?;
+        let _ = fs::remove_file(&temp);
+        return Ok(data);
+    }
+    let abs = resolve_abs_path(&path)?;
+    let meta = fs::metadata(&abs).map_err(|error| error.to_string())?;
+    if !meta.is_file() {
+        return Err("只能读取普通文件".into());
+    }
+    if meta.len() > 20 * 1024 * 1024 {
+        return Err("远程导入不能超过 20 MB，请改用登记或缩小文件".into());
+    }
+    fs::read(&abs).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn write_temp_file_bytes(file_name: String, data: Vec<u8>) -> Result<String, String> {
+    if data.len() > 20 * 1024 * 1024 {
+        return Err("缓存文件不能超过 20 MB".into());
+    }
+    let safe = PathBuf::from(file_name.trim())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .unwrap_or("download.bin")
+        .to_owned();
+    let dir = std::env::temp_dir().join("tie-open-files");
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let dest = dir.join(format!(
+        "{}_{safe}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ));
+    fs::write(&dest, data).map_err(|error| error.to_string())?;
+    Ok(fs_path::for_shell_open(&dest).to_string_lossy().into_owned())
 }
 
 #[tauri::command]

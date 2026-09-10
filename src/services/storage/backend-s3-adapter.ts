@@ -8,6 +8,7 @@ import {
 import { isRetryableStorageError, queueFailureMessage } from '@/services/storage/retry'
 import { emptySyncResult, mergeSyncPages } from '@/services/storage/sync-merge'
 import { syncQueue } from '@/services/storage/sync-queue'
+import { backendS3BlobStore } from '@/services/storage/blobs-remote'
 import type { SavePageOptions, StorageAdapter, StorageCapabilities, SyncResult, SyncSourceContext } from '@/services/storage/types'
 
 const capabilities: StorageCapabilities = {
@@ -22,6 +23,7 @@ const capabilities: StorageCapabilities = {
 }
 
 export const backendS3StorageAdapter: StorageAdapter = {
+  blobs: backendS3BlobStore,
   kind: 's3',
   capabilities,
   matches(sourceId) {

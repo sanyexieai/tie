@@ -982,6 +982,7 @@ fn mcp_runtime_fingerprint(source: &Path) -> String {
         parts.push(format!("SKILL.md:{hash:016x}"));
     }
     append_tree_hashes(&source.join("src"), "src", &mut parts);
+    append_tree_hashes(&source.join("skills"), "skills", &mut parts);
     parts.sort();
     parts.join("|")
 }
@@ -1058,6 +1059,74 @@ pub fn refresh_installed_mcp_runtime(app: &AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
+fn collect_skill_workspaces(app: &AppHandle) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut push = |raw: PathBuf| {
+        let Ok(workspace) = validate_workspace(&raw) else {
+            return;
+        };
+        if !out.iter().any(|item| item == &workspace) {
+            out.push(workspace);
+        }
+    };
+
+    for client in AgentClient::all() {
+        if let Ok(status) = client_status(app, client, true) {
+            if let Some(path) = status.workspace_path {
+                push(PathBuf::from(path));
+            }
+        }
+    }
+
+    if let Ok((sources, _)) = crate::common::workspace_sources(app) {
+        for source in sources {
+            if source.kind == "local" || source.kind == "smb" {
+                push(PathBuf::from(source.path));
+            }
+        }
+    }
+
+    out
+}
+
+/// 启动 / 更新后：刷新 MCP 运行时，并用安装包模板覆盖各工作区打包 Skill（tie-memory + skills/*），再同步到 Agent Skill 目录。
+/// Skill 文件可用 ≠ 每次更新都要跑；Agent 收尾由版本化 migration 目录决定（见 tie-update）。
+pub fn refresh_mcp_and_skills_on_startup(app: &AppHandle) -> Result<(), String> {
+    match refresh_installed_mcp_runtime(app) {
+        Ok(true) => eprintln!("[tie] MCP runtime refreshed from package"),
+        Ok(false) => {}
+        Err(error) => eprintln!("[tie] MCP runtime refresh skipped: {error}"),
+    }
+
+    let workspaces = collect_skill_workspaces(app);
+    if workspaces.is_empty() {
+        return Ok(());
+    }
+
+    let clients = AgentClient::all().to_vec();
+    for workspace in workspaces {
+        match ensure_workspace_packaged_skills(app, &workspace) {
+            Ok(names) if !names.is_empty() => eprintln!(
+                "[tie] Skill templates overwritten ({}): {}",
+                names.join(", "),
+                workspace.join(".agents").join("skills").display()
+            ),
+            Ok(_) => {}
+            Err(error) => eprintln!(
+                "[tie] Skill template sync skipped ({}): {error}",
+                workspace.display()
+            ),
+        }
+        if let Err(error) = sync_workspace_skills(app, &workspace, &clients) {
+            eprintln!(
+                "[tie] Skill agent sync skipped ({}): {error}",
+                workspace.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn mcp_source_override_path(app: &AppHandle) -> Option<PathBuf> {
     let file = app.path().app_data_dir().ok()?.join("mcp-source-override");
     if file.is_file() {
@@ -1126,12 +1195,34 @@ fn candidate_mcp_sources(app: &AppHandle) -> Vec<PathBuf> {
 }
 
 fn resolve_mcp_package_source(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(path) = mcp_source_override_path(app) {
+        return Ok(path);
+    }
     let candidates = candidate_mcp_sources(app);
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for candidate in &candidates {
+        // override already handled; skip duplicates that are the override path
         let server = candidate.join("src").join("server.js");
-        if server.is_file() {
-            return Ok(candidate.clone());
+        if !server.is_file() {
+            continue;
         }
+        let stamp = [
+            candidate.join("src").join("server.js"),
+            candidate.join("src").join("files.js"),
+            candidate.join("SKILL.md"),
+            candidate.join("package.json"),
+        ]
+        .into_iter()
+        .filter_map(|path| fs::metadata(path).ok()?.modified().ok())
+        .max()
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        match &best {
+            Some((best_time, _)) if stamp <= *best_time => {}
+            _ => best = Some((stamp, candidate.clone())),
+        }
+    }
+    if let Some((_, path)) = best {
+        return Ok(path);
     }
     let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
     Err(format!(
@@ -1293,11 +1384,13 @@ fn link_or_copy_skill(skill_dir: &Path, target: &Path) -> Result<(), String> {
         if existing.is_file() && source.is_file() {
             #[cfg(unix)]
             {
+                // 符号链接指向工作区真相源：工作区 SKILL 更新后自动生效。
                 if target.is_symlink() {
                     return Ok(());
                 }
             }
-            let _ = fs::copy(&source, &existing);
+            // 实体目录：强制覆盖 SKILL.md，保证 Agent 侧与工作区一致。
+            fs::copy(&source, &existing).map_err(|error| error.to_string())?;
             return Ok(());
         }
         return Ok(());
@@ -1330,16 +1423,7 @@ fn link_or_copy_skill(skill_dir: &Path, target: &Path) -> Result<(), String> {
     }
 }
 
-fn ensure_workspace_tie_skill(app: &AppHandle, workspace: &Path) -> Result<(), String> {
-    let dest_dir = workspace
-        .join(".agents")
-        .join("skills")
-        .join("tie-memory");
-    let dest = dest_dir.join("SKILL.md");
-    if dest.is_file() {
-        return Ok(());
-    }
-
+fn packaged_tie_skill_path(app: &AppHandle) -> Option<PathBuf> {
     let candidates = [
         resolve_mcp_package_source(app)
             .ok()
@@ -1348,23 +1432,89 @@ fn ensure_workspace_tie_skill(app: &AppHandle, workspace: &Path) -> Result<(), S
             .ok()
             .map(|root| root.join("SKILL.md")),
     ];
-    let Some(source) = candidates
-        .into_iter()
-        .flatten()
-        .find(|path| path.is_file())
-    else {
-        return Ok(());
-    };
+    candidates.into_iter().flatten().find(|path| path.is_file())
+}
 
-    fs::create_dir_all(&dest_dir).map_err(|error| error.to_string())?;
-    fs::copy(&source, &dest).map_err(|error| {
+fn packaged_skills_root(app: &AppHandle) -> Option<PathBuf> {
+    let candidates = [
+        resolve_mcp_package_source(app)
+            .ok()
+            .map(|root| root.join("skills")),
+        installed_mcp_dir(app)
+            .ok()
+            .map(|root| root.join("skills")),
+    ];
+    candidates.into_iter().flatten().find(|path| path.is_dir())
+}
+
+fn copy_skill_template_if_changed(source: &Path, dest_dir: &Path) -> Result<bool, String> {
+    let dest = dest_dir.join("SKILL.md");
+    if !source.is_file() {
+        return Ok(false);
+    }
+    let source_hash = hash_file(source);
+    let dest_hash = if dest.is_file() { hash_file(&dest) } else { None };
+    if source_hash.is_some() && source_hash == dest_hash {
+        return Ok(false);
+    }
+    fs::create_dir_all(dest_dir).map_err(|error| error.to_string())?;
+    fs::copy(source, &dest).map_err(|error| {
         format!(
-            "无法写入默认 Skill（{} → {}）：{error}",
+            "无法写入 Skill（{} → {}）：{error}",
             source.display(),
             dest.display()
         )
     })?;
-    Ok(())
+    Ok(true)
+}
+
+/// 用安装包 / 仓库模板覆盖工作区 `tie-memory` Skill（内容不同才写盘）。
+fn ensure_workspace_tie_skill(app: &AppHandle, workspace: &Path) -> Result<bool, String> {
+    let dest_dir = workspace
+        .join(".agents")
+        .join("skills")
+        .join("tie-memory");
+    let Some(source) = packaged_tie_skill_path(app) else {
+        return Ok(false);
+    };
+    copy_skill_template_if_changed(&source, &dest_dir)
+}
+
+/// 覆盖打包进安装包的额外 Skill（如版本化 `tie-update`）。有模板才写入；不删用户自建 Skill。
+fn ensure_workspace_extra_packaged_skills(
+    app: &AppHandle,
+    workspace: &Path,
+) -> Result<Vec<String>, String> {
+    let Some(skills_root) = packaged_skills_root(app) else {
+        return Ok(Vec::new());
+    };
+    let mut updated = Vec::new();
+    for entry in fs::read_dir(&skills_root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry.file_type().map(|item| item.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+        if name_str == "tie-memory" {
+            continue;
+        }
+        let source = entry.path().join("SKILL.md");
+        let dest_dir = workspace.join(".agents").join("skills").join(&name);
+        if copy_skill_template_if_changed(&source, &dest_dir)? {
+            updated.push(name_str);
+        }
+    }
+    Ok(updated)
+}
+
+fn ensure_workspace_packaged_skills(app: &AppHandle, workspace: &Path) -> Result<Vec<String>, String> {
+    let mut updated = Vec::new();
+    if ensure_workspace_tie_skill(app, workspace)? {
+        updated.push("tie-memory".into());
+    }
+    updated.extend(ensure_workspace_extra_packaged_skills(app, workspace)?);
+    Ok(updated)
 }
 
 fn sync_workspace_skills(
@@ -1423,7 +1573,7 @@ fn configure_for_clients(
         }
     }
 
-    ensure_workspace_tie_skill(app, &workspace)?;
+    ensure_workspace_packaged_skills(app, &workspace)?;
     sync_workspace_skills(app, &workspace, &selected)?;
     status_for(app)
 }

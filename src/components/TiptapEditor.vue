@@ -2,10 +2,11 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import type { Editor } from '@tiptap/core'
-import { Extension } from '@tiptap/core'
+import { Extension, mergeAttributes } from '@tiptap/core'
 import { Plugin } from '@tiptap/pm/state'
 import { TextSelection } from '@tiptap/pm/state'
 import StarterKit from '@tiptap/starter-kit'
+import Link from '@tiptap/extension-link'
 import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight'
 import Placeholder from '@tiptap/extension-placeholder'
 import Image from '@tiptap/extension-image'
@@ -18,12 +19,27 @@ import TaskList from '@tiptap/extension-task-list'
 import { Markdown } from '@tiptap/markdown'
 import { common, createLowlight } from 'lowlight'
 import { openUrl } from '@tauri-apps/plugin-opener'
-import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { Page, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { canStorePageAssets, embedImageFile, inlineImageSrcToFile, isImageFile, normalizeImageFile, parseAssetUrl, resolveAssetDisplayUrl, shouldHandleImagePaste, uploadPastedImage } from '@/services/attachments'
-import { buildFileUrl, ingestWorkspaceFile, listWorkspaceFiles } from '@/services/files'
-import { applyLocalLinkClasses, buildPathUrl, classifyLocalLink, openLocalLink, PATH_URL_PREFIX } from '@/services/local-links'
+import { cachedFileResource, canRebindRegisteredFile, listRegisteredFiles, probeRelativePath } from '@/services/files'
+import { pickLinkedResource, linkableSources, rebindLinkedResource, sourceChipLabel } from '@/services/link-actions'
+import {
+  applyLocalLinkClasses,
+  buildPathUrl,
+  classifyLocalLink,
+  openLocalLink,
+  PATH_URL_PREFIX,
+  pastedTextToHtml,
+  rewriteFileProtocolText,
+  type LinkContext,
+} from '@/services/local-links'
+import {
+  parseFileUrl,
+  parsePathUrl,
+  resolvedSourceId,
+  sourceById,
+} from '@/services/link-runtime'
 
 const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page> }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
@@ -37,6 +53,8 @@ const selectedPageIndex = ref(0)
 const slashQuery = ref<string | null>(null)
 const slashStart = ref<number | null>(null)
 const selectedCommandIndex = ref(0)
+const linkSourcePicker = ref<{ kind: 'file' | 'directory' | 'relative' } | null>(null)
+const selectedLinkSourceIndex = ref(0)
 const floatingMenuStyle = ref<Record<string, string>>({ top: '0px', left: '0px' })
 const SLASH_TRIGGER = /(?:^|\s)([/／、])([^\s]*)$/
 const matchingPages = computed(() => {
@@ -61,31 +79,72 @@ function activePage() {
   return props.pages.find((page) => page.id === props.pageId) ?? null
 }
 
-function filesWorkspaceRoot() {
-  const page = activePage()
-  const bound = page ? props.sources.find((item) => item.id === page.storageSourceId) : null
-  if (bound && (bound.kind === 'local' || bound.kind === 'smb') && bound.path) return bound.path
-  return props.sources.find((item) => (item.kind === 'local' || item.kind === 'smb') && item.path)?.path ?? null
+function pageSourceId() {
+  return activePage()?.storageSourceId ?? null
 }
 
+function linkContext(): LinkContext {
+  return { pageSourceId: pageSourceId(), sources: props.sources }
+}
+
+const linkTargetSources = computed(() => linkableSources(props.sources, pageSourceId()))
+
 async function ensureWorkspaceFilesLoaded() {
-  const root = filesWorkspaceRoot()
-  if (!root) return
-  try {
-    await listWorkspaceFiles(root)
-  } catch {
-    // ignore missing registry
+  const sourceIds = new Set<string>()
+  const relatives: Array<{ sourceId: string; relativePath: string }> = []
+  const pageId = pageSourceId()
+  if (pageId) sourceIds.add(pageId)
+  const context = linkContext()
+  const dom = editor.value?.view.dom
+  if (dom) {
+    for (const anchor of dom.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+      const href = anchor.getAttribute('href') ?? ''
+      const parsed = parseFileUrl(href)
+      if (parsed) {
+        sourceIds.add(parsed.sourceId || pageId || '')
+        continue
+      }
+      const relative = parsePathUrl(href)
+      if (!relative) continue
+      const sourceId = relative.sourceId || pageId || ''
+      if (sourceId) {
+        sourceIds.add(sourceId)
+        relatives.push({ sourceId, relativePath: relative.relativePath })
+      }
+    }
   }
+  await Promise.all([...sourceIds].filter(Boolean).map(async (sourceId) => {
+    const source = sourceById(props.sources, sourceId)
+    if (!source) return
+    try {
+      await listRegisteredFiles(source)
+    } catch {
+      // ignore missing registry
+    }
+  }))
+  await Promise.all(relatives.map(async ({ sourceId, relativePath }) => {
+    const source = sourceById(context.sources, sourceId)
+    if (!source) return
+    try {
+      await probeRelativePath(source, relativePath)
+    } catch {
+      // ignore
+    }
+  }))
 }
 
 function decorateFileLinks() {
-  const root = filesWorkspaceRoot()
+  const context = linkContext()
   const dom = editor.value?.view.dom
   if (!dom) return
   for (const anchor of dom.querySelectorAll<HTMLAnchorElement>('a[href]')) {
     const href = anchor.getAttribute('href') ?? ''
+    // Strip legacy target=_blank so in-app schemes never spawn a browser tab.
+    if (href.startsWith('tie://') || /^file:/i.test(href)) {
+      anchor.removeAttribute('target')
+    }
     if (!classifyLocalLink(href)) continue
-    applyLocalLinkClasses(anchor, href, { workspaceRoot: root })
+    applyLocalLinkClasses(anchor, href, context)
   }
 }
 
@@ -498,55 +557,63 @@ function pickLocalImage(editor: Editor) {
   input.click()
 }
 
-function insertFileResourceLink(editor: Editor, title: string, fileId: string) {
-  const href = buildFileUrl(fileId)
+function insertFileResourceLink(editor: Editor, title: string, href: string) {
   editor.chain().focus().insertContent({ type: 'text', text: title, marks: [{ type: 'link', attrs: { href } }] }).run()
   scheduleDecorateFileLinks()
 }
 
-function pickLocalFileLink(editor: Editor, kind: 'file' | 'directory') {
-  if (!('__TAURI_INTERNALS__' in window)) {
-    window.alert('仅桌面端可插入本地文件/目录链接')
-    return
-  }
-  const root = filesWorkspaceRoot()
-  if (!root) {
-    window.alert('当前页面未绑定本地或 SMB 存储源，无法登记文件')
-    return
-  }
+function pickLocalFileLink(editor: Editor, kind: 'file' | 'directory', source: StorageSource) {
   void (async () => {
     try {
-      const selected = await openDialog({
-        directory: kind === 'directory',
-        multiple: false,
-        title: kind === 'directory' ? '选择要链接的本地目录' : '选择要链接的本地文件',
-      })
-      const path = typeof selected === 'string' ? selected : Array.isArray(selected) ? selected[0] : null
-      if (!path) return
-      const resource = await ingestWorkspaceFile(root, path, 'link')
-      insertFileResourceLink(editor, resource.title || resource.id, resource.id)
+      const linked = await pickLinkedResource(kind, source)
+      if (!linked) return
+      insertFileResourceLink(editor, linked.title, linked.href)
     } catch (error) {
       window.alert(error instanceof Error ? error.message : String(error))
     }
   })()
 }
 
-function insertRelativePathLink(editor: Editor) {
-  const root = filesWorkspaceRoot()
-  if (!root) {
-    window.alert('当前页面未绑定本地或 SMB 存储源，无法插入相对路径链接')
-    return
-  }
+function insertRelativePathLink(editor: Editor, source: StorageSource) {
   const raw = window.prompt('工作区相对路径（例如 docs/spec.pdf）')?.trim()
   if (!raw) return
   try {
-    const href = buildPathUrl(raw)
+    const href = buildPathUrl(raw, source.id)
     const title = raw.replace(/\\/g, '/').split('/').filter(Boolean).pop() || raw
-    editor.chain().focus().insertContent({ type: 'text', text: title, marks: [{ type: 'link', attrs: { href } }] }).run()
-    scheduleDecorateFileLinks()
+    insertFileResourceLink(editor, title, href)
   } catch (error) {
     window.alert(error instanceof Error ? error.message : String(error))
   }
+}
+
+function closeLinkSourcePicker() {
+  linkSourcePicker.value = null
+  selectedLinkSourceIndex.value = 0
+}
+
+function beginLinkInsert(editor: Editor, kind: 'file' | 'directory' | 'relative') {
+  const targets = linkTargetSources.value
+  if (!targets.length) {
+    window.alert('没有可登记或引用文件的存储源')
+    return
+  }
+  if (targets.length === 1) {
+    if (kind === 'relative') insertRelativePathLink(editor, targets[0])
+    else pickLocalFileLink(editor, kind, targets[0])
+    return
+  }
+  const pageId = pageSourceId()
+  const index = Math.max(0, targets.findIndex((source) => source.id === pageId))
+  selectedLinkSourceIndex.value = index
+  linkSourcePicker.value = { kind }
+}
+
+function confirmLinkSource(editor: Editor, source: StorageSource) {
+  const kind = linkSourcePicker.value?.kind
+  closeLinkSourcePicker()
+  if (!kind) return
+  if (kind === 'relative') insertRelativePathLink(editor, source)
+  else pickLocalFileLink(editor, kind, source)
 }
 
 const slashCommands: SlashCommand[] = [
@@ -569,9 +636,9 @@ const slashCommands: SlashCommand[] = [
   { id: 'table', label: '表格', hint: '插入 3 × 3 表格', keywords: ['table', '表格'], run: (editor) => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run() },
   { id: 'divider', label: '分割线', hint: '分隔内容区域', keywords: ['divider', '分割', 'horizontal'], run: (editor) => editor.chain().focus().setHorizontalRule().run() },
   { id: 'page-link', label: '链接页面', hint: '关联知识库中的页面', keywords: ['link', 'page', '链接', '关联', '页面'], run: () => openSlashPagePicker() },
-  { id: 'local-file', label: '本地文件', hint: '登记并插入外链', keywords: ['file', 'local', '文件', '本地', '链接', '外链'], run: (editor) => pickLocalFileLink(editor, 'file') },
-  { id: 'local-directory', label: '本地目录', hint: '登记并插入目录外链', keywords: ['folder', 'directory', '目录', '文件夹', '本地', '链接', '外链'], run: (editor) => pickLocalFileLink(editor, 'directory') },
-  { id: 'relative-path', label: '相对路径', hint: '工作区内相对路径链接', keywords: ['relative', 'path', '相对', '路径', '工作区'], run: (editor) => insertRelativePathLink(editor) },
+  { id: 'local-file', label: '文件', hint: '区内相对或导入副本，区外登记；可选手源', keywords: ['file', 'local', '文件', '本地', '链接', '登记', '跨源', '导入'], run: (editor) => beginLinkInsert(editor, 'file') },
+  { id: 'local-directory', label: '目录', hint: '区内相对路径，区外登记；可选手源', keywords: ['folder', 'directory', '目录', '文件夹', '本地', '链接', '登记', '跨源'], run: (editor) => beginLinkInsert(editor, 'directory') },
+  { id: 'relative-path', label: '相对路径', hint: '写入指定存储源的相对路径', keywords: ['relative', 'path', '相对', '路径', '工作区'], run: (editor) => beginLinkInsert(editor, 'relative') },
   { id: 'child-page', label: '子页面', hint: '在当前页面下创建页面', keywords: ['page', 'child', '页面', '子页面'], run: () => emit('create-child') },
 ]
 
@@ -581,38 +648,104 @@ const filteredCommands = computed(() => {
   return slashCommands.filter((command) => [command.label, command.hint, ...command.keywords].some((value) => value.toLocaleLowerCase().includes(query)))
 })
 
+function anchorHrefFromEvent(event: MouseEvent) {
+  const raw = event.target
+  const el = raw instanceof Element ? raw : raw instanceof Node ? raw.parentElement : null
+  if (!el) return null
+  const anchor = el.closest('a')
+  if (!anchor) return null
+  // Prefer attribute: HTMLAnchorElement.href can resolve custom schemes against http://localhost.
+  const attr = anchor.getAttribute('href')
+  if (attr) return attr
+  const prop = typeof (anchor as HTMLAnchorElement).href === 'string' ? (anchor as HTMLAnchorElement).href : ''
+  if (/^(tie|file):/i.test(prop)) return prop
+  return null
+}
+
+function linkMarkHrefFromEvent(event: MouseEvent) {
+  const view = editor.value?.view
+  if (!view) return null
+  const coords = view.posAtCoords({ left: event.clientX, top: event.clientY })
+  if (!coords) return null
+  const marks = view.state.doc.resolve(coords.pos).marks()
+  const link = marks.find((mark) => mark.type.name === 'link')
+  const href = String(link?.attrs?.href ?? '').trim()
+  return href || null
+}
+
+function resolveClickedHref(event: MouseEvent) {
+  return anchorHrefFromEvent(event) || linkMarkHrefFromEvent(event)
+}
+
+function shouldOpenFromPointerEvent(event: MouseEvent) {
+  // `click` is primary-button only; `auxclick` is middle/other. Don't gate on event.button —
+  // some WebKitGTK builds leave button unset on click and would silently no-op.
+  return event.type === 'click' || event.type === 'auxclick'
+}
+
 function openInternalLink(event: MouseEvent) {
-  const target = event.target
-  if (!(target instanceof Element)) return false
-  const anchor = target.closest<HTMLAnchorElement>('a[href^="tie://page/"]')
-  const href = anchor?.getAttribute('href')
+  const href = resolveClickedHref(event)
   const prefix = 'tie://page/'
   if (!href?.startsWith(prefix)) return false
   event.preventDefault()
-  emit('navigate', href.slice(prefix.length))
+  event.stopPropagation()
+  if (shouldOpenFromPointerEvent(event) && event.type === 'click') {
+    emit('navigate', href.slice(prefix.length))
+  }
   return true
 }
 
 function openLocalLinkFromEvent(event: MouseEvent) {
-  const target = event.target
-  if (!(target instanceof Element)) return false
-  const href = target.closest('a')?.getAttribute('href')
+  const href = resolveClickedHref(event)
   if (!href || !classifyLocalLink(href)) return false
   event.preventDefault()
-  void openLocalLink(href, { workspaceRoot: filesWorkspaceRoot() }).catch((error) => {
+  event.stopPropagation()
+  if (!shouldOpenFromPointerEvent(event) || event.type !== 'click') return true
+  const context = linkContext()
+  void openLocalLink(href, context).catch(async (error) => {
+    const link = classifyLocalLink(href)
+    const source = sourceById(context.sources, link ? resolvedSourceId(link, context) : null)
+    const resource = link?.fileId ? cachedFileResource(source?.id, link.fileId) : null
+    if (source && link?.fileId && canRebindRegisteredFile(resource)) {
+      const retry = window.confirm(`${error instanceof Error ? error.message : '找不到已登记文件'}。要重新绑定本机路径吗？`)
+      if (!retry) return
+      try {
+        const rebound = await rebindLinkedResource(
+          source,
+          link.fileId,
+          resource?.kind === 'directory' ? 'directory' : 'file',
+        )
+        if (!rebound) return
+        scheduleDecorateFileLinks()
+        await openLocalLink(href, context)
+      } catch (rebindError) {
+        window.alert(rebindError instanceof Error ? rebindError.message : '无法重新绑定')
+      }
+      return
+    }
     window.alert(error instanceof Error ? error.message : '无法打开本地链接')
   })
   return true
 }
 
 function openExternalLink(event: MouseEvent) {
-  const target = event.target
-  if (!(target instanceof Element)) return false
-  const href = target.closest('a')?.getAttribute('href')
+  const href = resolveClickedHref(event)
   if (!href || !/^(https?:|mailto:)/i.test(href)) return false
   event.preventDefault()
+  event.stopPropagation()
+  if (!shouldOpenFromPointerEvent(event) || event.type !== 'click') return true
   if ('__TAURI_INTERNALS__' in window) void openUrl(href)
   else window.open(href, '_blank', 'noopener,noreferrer')
+  return true
+}
+
+/** Block WebView/OS from navigating unknown schemes (especially tie:// → system browser). */
+function blockUnmanagedLinkNavigation(event: MouseEvent) {
+  const href = resolveClickedHref(event)
+  if (!href) return false
+  if (/^(https?:|mailto:)/i.test(href)) return false
+  event.preventDefault()
+  event.stopPropagation()
   return true
 }
 
@@ -646,15 +779,73 @@ function handleEditorClick(event: MouseEvent) {
     openInternalLink(event)
     || openLocalLinkFromEvent(event)
     || openExternalLink(event)
+    || blockUnmanagedLinkNavigation(event)
     || focusNextWritingLine(event)
   if (handled) event.stopPropagation()
   return handled
+}
+
+function handleEditorMouseDown(event: MouseEvent) {
+  return openInternalLink(event)
+    || openLocalLinkFromEvent(event)
+    || openExternalLink(event)
+    || blockUnmanagedLinkNavigation(event)
 }
 
 function handleSurfaceClick(event: MouseEvent) {
   if (event.target !== event.currentTarget) return
   focusNextWritingLine(event)
 }
+
+function chipClassForHref(href: string) {
+  const value = String(href || '').trim()
+  if (value.startsWith(PATH_URL_PREFIX) || value.startsWith('tie://path/')) return 'file-link file-link-relative'
+  if (value.startsWith('tie://file/') || /^file:/i.test(value)) return 'file-link file-link-absolute'
+  return null
+}
+
+const tieLinkOptions = {
+  openOnClick: false as const,
+  autolink: true,
+  linkOnPaste: true,
+  protocols: ['http', 'https', 'mailto', 'tie'],
+  // Never target=_blank: WebView would hand tie:// / file:// to the system browser.
+  HTMLAttributes: {
+    target: null,
+    rel: 'noopener noreferrer nofollow',
+  },
+  // Only wiki / file / path links use tie:// — never autolink asset URLs (blocks mid-URL caret).
+  isAllowedUri: (url: string, ctx: { defaultValidate: (url: string) => boolean }) => {
+    const href = String(url || '')
+    if (!href) return false
+    if (href.startsWith('tie://page/')) return true
+    if (href.startsWith('tie://file/')) return true
+    if (href.startsWith(PATH_URL_PREFIX)) return true
+    if (href.startsWith('tie://')) return false
+    if (/^file:/i.test(href)) return false
+    return ctx.defaultValidate(href)
+  },
+}
+
+/** Bake relative/absolute chip classes into <a> so ProseMirror re-renders keep ADR styles. */
+const TieLink = Link.extend({
+  renderHTML({ HTMLAttributes }) {
+    const href = String(HTMLAttributes.href || '')
+    const allowed = this.options.isAllowedUri(href, {
+      defaultValidate: (value: string) => Boolean(value),
+      protocols: this.options.protocols,
+      defaultProtocol: this.options.defaultProtocol,
+    })
+    const chip = allowed ? chipClassForHref(href) : null
+    const attrs = mergeAttributes(
+      this.options.HTMLAttributes,
+      HTMLAttributes,
+      chip ? { class: chip } : {},
+      allowed ? {} : { href: '' },
+    )
+    return ['a', attrs, 0]
+  },
+}).configure(tieLinkOptions)
 
 let syncingExternalValue = false
 const editor = useEditor({
@@ -663,22 +854,9 @@ const editor = useEditor({
   extensions: [
     StarterKit.configure({
       codeBlock: false,
-      link: {
-        openOnClick: false,
-        autolink: true,
-        linkOnPaste: true,
-        protocols: ['http', 'https', 'mailto', 'tie', 'file'],
-        // Only wiki links use tie:// — never autolink asset URLs (blocks mid-URL caret).
-        isAllowedUri: (url, { defaultValidate }) => {
-          if (url.startsWith('tie://page/')) return true
-          if (url.startsWith('tie://file/')) return true
-          if (url.startsWith(PATH_URL_PREFIX)) return true
-          if (url.startsWith('tie://')) return false
-          if (/^file:/i.test(url)) return true
-          return defaultValidate(url)
-        },
-      },
+      link: false,
     }),
+    TieLink,
     Markdown,
     CodeBlockLowlight.configure({ lowlight }),
     createAssetImageExtension().configure({ allowBase64: false, inline: true }),
@@ -697,6 +875,24 @@ const editor = useEditor({
     transformPastedText: (text) => text.replace(/!\[[^\]]*\]\((blob:[^)\s]+|data:image\/[^)\s]+)\)/g, ''),
     handlePaste: (_view, event) => {
       const text = event.clipboardData?.getData('text/plain') ?? ''
+      const html = event.clipboardData?.getData('text/html') ?? ''
+      if (/file:\/\//i.test(text) || /file:\/\//i.test(html)) {
+        event.preventDefault()
+        const fromPlain = /file:\/\//i.test(text)
+        const payload = fromPlain ? text : html
+        void rewriteFileProtocolText(payload, linkContext()).then(({ text: next, skipped }) => {
+          const current = editor.value
+          if (!current) return
+          current.chain().focus().insertContent(fromPlain ? pastedTextToHtml(next) : next).run()
+          scheduleDecorateFileLinks()
+          if (skipped.length) {
+            window.alert(`有 ${skipped.length} 条 file:/// 无法改写成工作区链接，已跳过。`)
+          }
+        }).catch((error) => {
+          window.alert(error instanceof Error ? error.message : '无法改写 file:/// 链接')
+        })
+        return true
+      }
       if (!/!\[[^\]]*\]\(tie:\/\/asset\//.test(text)) return false
       queueMicrotask(() => {
         const current = editor.value
@@ -708,6 +904,7 @@ const editor = useEditor({
       return false
     },
     handleDOMEvents: {
+      auxclick: (_view, event) => handleEditorMouseDown(event),
       click: (_view, event) => handleEditorClick(event),
       compositionend: (_view) => {
         const current = editor.value
@@ -751,6 +948,35 @@ const editor = useEditor({
         if (event.key === 'Escape') {
           event.preventDefault()
           closePagePicker()
+          return true
+        }
+      }
+      if (linkSourcePicker.value) {
+        const targets = linkTargetSources.value
+        if (!targets.length && ['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) {
+          event.preventDefault()
+          return true
+        }
+        if (event.key === 'ArrowDown') {
+          event.preventDefault()
+          selectedLinkSourceIndex.value = (selectedLinkSourceIndex.value + 1) % targets.length
+          return true
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault()
+          selectedLinkSourceIndex.value = (selectedLinkSourceIndex.value - 1 + targets.length) % targets.length
+          return true
+        }
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          const current = editor.value
+          const source = targets[selectedLinkSourceIndex.value]
+          if (current && source) confirmLinkSource(current, source)
+          return true
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          closeLinkSourcePicker()
           return true
         }
       }
@@ -1028,6 +1254,21 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
         <span><strong>{{ command.label }}</strong><small>{{ command.hint }}</small></span>
       </button>
       <p v-if="!filteredCommands.length">没有匹配的命令</p>
+    </div>
+    <div v-if="linkSourcePicker" class="slash-menu" role="listbox" aria-label="选择存储源" :style="floatingMenuStyle">
+      <p class="slash-menu-caption">链接写到哪个存储源？</p>
+      <button
+        v-for="(source, index) in linkTargetSources"
+        :key="source.id"
+        :class="{ selected: selectedLinkSourceIndex === index }"
+        @mousedown.prevent="editor && confirmLinkSource(editor, source)"
+      >
+        <span class="slash-command-icon">{{ sourceChipLabel(source).slice(0, 1) }}</span>
+        <span>
+          <strong>{{ source.name }}</strong>
+          <small>{{ sourceChipLabel(source) }}{{ source.id === pageSourceId() ? ' · 当前页' : ' · 跨源' }}</small>
+        </span>
+      </button>
     </div>
     <EditorContent :editor="editor" />
   </div>

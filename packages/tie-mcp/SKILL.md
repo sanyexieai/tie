@@ -34,49 +34,44 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 | 用途 | 协议 / 写法 | 桌面样式 | 何时用 |
 |------|-------------|----------|--------|
 | 页面互链 | `[[标题]]` 或 `[标题](tie://page/{pageId})` | 普通链接 | 关联其它笔记页 |
-| 已登记文件/目录 | `[标题](tie://file/{fileId})` | 副本 / 外链 / 目录 | **外部**资源，须先 `tie_file_ingest` |
-| 工作区内相对路径 | `[标题](tie://path/{相对路径})` | 相对 | 文件已在工作区目录内（相对工作区根；POSIX；禁止 `..`） |
-| 本机绝对路径 | `[标题](file:///...)` | 绝对 | **不推荐**作稳定链接；跨机器易失效，打开行为依赖本机 |
-| 页面图片附件 | `![](tie://asset/{pageId}/{文件名})` | 图片 | 由桌面上传产生；不要手写伪造 |
+| 绝对登记（区外文件/目录） | `[标题](tie://file/{sourceId}/{fileId})`；旧写法 `tie://file/{fileId}` 缺省当前页源 | 登记；找不到文件会标缺失 | **外部**资源，须先 `tie_file_ingest` mode=link |
+| 相对路径（区内文件，含 copy 导入） | `[标题](tie://path/{sourceId}/{相对路径})`；旧写法可省略 sourceId | 相对 | 文件已在该存储源内（含 `.tie/files/{id}/original…`、图片附件） |
+| 页面图片附件 | `![](tie://asset/{pageId}/{文件名})` | 图片 | 相对路径的显示别名，对应 `.tie/assets/{pageId}/{文件名}`；由桌面上传产生 |
 
 约定摘要：
 
-- **稳定外链资源** → 只写 `tie://file/{id}`（ingest 返回的 `url`）
-- **工作区内部路径** → 写 `tie://path/docs/spec.pdf`（相对根目录）
-- **不要**把 `file:///` 当成登记协议的替代品
-- `tie://path/` 与 `file:///` **互不影响**：绝对路径协议与行为保持不变
+- **区外资源** → `tie_file_ingest` mode=`link`，正文只写返回的 `tie://file/…`（不要写 `file:///`）
+- **导入副本 / 区内文件** → `tie://path/…`（相对该存储源根；POSIX；禁止 `..`）
+- **不要**把手写 `file:///` 当作稳定链接；桌面会在粘贴时改写成 path 或 file
+- 新链接带上 `sourceId`（`src_local_…` / `s3:…`），以便跨存储源解析。`tie_file_ingest` 会从环境变量 `TIE_SOURCE_ID` / `TIE_STORAGE_SOURCE_ID`，或工作区页面的 `storage_source_id` 推断并写入 URL。
 
 示例：
 
 ```markdown
 参见 [[排障手册]] 与 [ADR](tie://page/pg_xxx)
 
-[手册 PDF（工作区副本）](tie://file/file_abc)
-[资料夹（外链）](tie://file/file_dir1)
-[工作区内规格](tie://path/docs/spec.pdf)
+[手册 PDF（工作区副本）](tie://path/src_local_2e27348a0aa628a6/.tie/files/file_abc/original.pdf)
+[资料夹（登记）](tie://file/src_local_2e27348a0aa628a6/file_dir1)
+[工作区内规格](tie://path/src_local_2e27348a0aa628a6/docs/spec.pdf)
 ```
 
-## 外部文件 / 目录（副本 / 外链）
+## 外部文件 / 目录
 
-主入口是 MCP，不是桌面「文件库」页。外部文件/目录必须先 `tie_file_ingest`，再用返回的 `tie://file/{id}` 写入正文。
+主入口是 MCP，不是桌面「文件库」页。区外文件/目录必须先 `tie_file_ingest`，再用返回的 `url` 写入正文。
 
 ### 选 mode
 
-- `copy`：导入工作区副本（`.tie/files/{id}/`），适合希望跟知识库一起备份的小中型文件；目录会递归复制到 `{id}/original/`
-- `link`：只记录本机原路径，适合大文件、已有书库**目录**；跨机器可能失效
+- `copy`：导入工作区副本（`.tie/files/{id}/original…`），正文用返回的 **相对** `tie://path/…`；适合要跟知识库一起走的小中型文件
+- `link`：只登记本机原路径，正文用 **绝对** `tie://file/…`；适合大文件、已有书库目录。换机器会显示「找不到」，可重新绑定
 
-二者在编辑器中样式不同（副本=实心芯片，外链=描边芯片），但链接协议相同：`tie://file/{fileId}`。目录资源 `kind: "directory"`，点击由系统文件管理器打开。
+目录资源 `kind: "directory"`，点击由系统文件管理器打开。
 
 ### 标准流程（书 / PDF / 文件夹）
 
-1. `tie_file_ingest`：`path` + `mode`（+ 可选 `title`）→ 拿到 `id`、`kind`、`mime`/`ext`/`size`、`url`
+1. `tie_file_ingest`：`path` + `mode`（+ 可选 `title`）→ 拿到 `id`、`kind`、`url`
 2. 阅读原文件或依据用户说明，提炼**类型、摘要、要点**（MCP 只提供元数据与文本类 preview，不做 PDF 全文解析）
 3. `tie_write` 建书目/摘录页：`tags` 含 `resource`（可再加主题标签）
-4. 正文放入资源链接：
-   - 副本：`[书名（工作区副本）](tie://file/{id})`
-   - 外链：`[书名（原文件）](tie://file/{id})`
-   - 目录：`[资料夹](tie://file/{id})`
-   - 若文件本就在工作区内：`[说明](tie://path/相对路径)`（无需 ingest）
+4. 正文放入 ingest 返回的 `url`（不要手写 `file:///`）
 5. 相关笔记用 `[[页面标题]]` / `tie://page/...` 互链；需要打开已登记路径时用 `tie_file_open_hint`
 
 ### 禁止
@@ -84,7 +79,11 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 - 把整份 PDF/二进制塞进 `markdown`
 - 把 `tie_file_ingest` 的整段 JSON 当作正文写入（只要提炼后的 Markdown）
 - 手写 frontmatter 假装登记文件（必须走 `tie_file_*`）
-- 手写 `file:///...` 当作工作区资源链接（外部资源走 `tie_file_ingest` → `tie://file/{id}`；区内文件走 `tie://path/…`）
+- 手写 `file:///...` 当作工作区资源链接
+
+## 版本化数据收尾（可选）
+
+普通升级不同步跑全库清洗。仅当某次发布引入的 migration（如 `href-file-protocol-v1`）在目录中标了需 Agent 收尾、且 stamp 后仍有残留时，才用 Skill **`tie-update`** + `tie_migration_status`。详见 `skills/tie-update/SKILL.md`。
 
 ## 写入规则
 

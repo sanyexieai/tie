@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const mcpServer = path.join(root, 'packages', 'tie-mcp', 'src', 'server.js')
 const skillSrc = path.join(root, 'packages', 'tie-mcp', 'SKILL.md')
+const packagedSkillsDir = path.join(root, 'packages', 'tie-mcp', 'skills')
 const ALL_CLIENTS = ['codex', 'cursor', 'claude']
 
 function parseArgs(argv) {
@@ -302,22 +303,31 @@ function skillMirrorRoots(clients) {
 }
 
 function installSkills(workspace, clients, dryRun) {
-  const wsSkillDir = path.join(workspace, '.agents', 'skills', 'tie-memory')
-  const wsSkill = path.join(wsSkillDir, 'SKILL.md')
   const mirrors = skillMirrorRoots(clients)
-
-  if (dryRun) {
-    console.log(`[dry-run] 工作区 Skill → ${wsSkill}`)
-    for (const root of mirrors) {
-      console.log(`[dry-run] 同步 Skill → ${path.join(root, 'tie-memory')}`)
+  const packaged = [{ name: 'tie-memory', src: skillSrc }]
+  if (fs.existsSync(packagedSkillsDir)) {
+    for (const name of fs.readdirSync(packagedSkillsDir)) {
+      const src = path.join(packagedSkillsDir, name, 'SKILL.md')
+      if (!fs.existsSync(src)) continue
+      packaged.push({ name, src })
     }
-    return { wsSkill, mirrors }
   }
 
-  fs.mkdirSync(wsSkillDir, { recursive: true })
-  if (!fs.existsSync(wsSkill)) {
-    if (!fs.existsSync(skillSrc)) throw new Error(`缺少模板：${skillSrc}`)
-    fs.copyFileSync(skillSrc, wsSkill)
+  if (dryRun) {
+    for (const item of packaged) {
+      console.log(`[dry-run] 工作区 Skill → ${path.join(workspace, '.agents', 'skills', item.name, 'SKILL.md')}`)
+      for (const rootDir of mirrors) {
+        console.log(`[dry-run] 同步 Skill → ${path.join(rootDir, item.name)}`)
+      }
+    }
+    return { packaged, mirrors }
+  }
+
+  for (const item of packaged) {
+    const wsSkillDir = path.join(workspace, '.agents', 'skills', item.name)
+    const wsSkill = path.join(wsSkillDir, 'SKILL.md')
+    fs.mkdirSync(wsSkillDir, { recursive: true })
+    fs.copyFileSync(item.src, wsSkill)
   }
 
   const skillsRoot = path.join(workspace, '.agents', 'skills')
@@ -325,15 +335,15 @@ function installSkills(workspace, clients, dryRun) {
     for (const name of fs.readdirSync(skillsRoot)) {
       const src = path.join(skillsRoot, name, 'SKILL.md')
       if (!fs.existsSync(src)) continue
-      for (const root of mirrors) {
-        const destDir = path.join(root, name)
+      for (const rootDir of mirrors) {
+        const destDir = path.join(rootDir, name)
         fs.mkdirSync(destDir, { recursive: true })
         fs.copyFileSync(src, path.join(destDir, 'SKILL.md'))
       }
     }
   }
 
-  return { wsSkill, mirrors }
+  return { packaged, mirrors }
 }
 
 function tryCodexCliAdd({ name, serverPath, workspace, dryRun }) {

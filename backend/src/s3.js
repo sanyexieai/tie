@@ -5,10 +5,12 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3'
+import { indexEntryFromMeta, normalizeFileMeta, resourceFromMeta, sanitizeBlobName, sanitizeFileId } from './workspace-files.js'
 
 const PAGE_PREFIX = 'tie/pages/'
 const HISTORY_PREFIX = 'tie/history/'
 const ASSET_PREFIX = 'tie/assets/'
+const FILES_PREFIX = 'tie/files/'
 
 function streamToBuffer(stream) {
   return new Promise((resolve, reject) => {
@@ -185,4 +187,130 @@ export async function listProviderAssetNames(client, bucket, pageId) {
     token = response.IsTruncated ? response.NextContinuationToken : undefined
   } while (token)
   return names
+}
+
+function filesIndexKey() {
+  return `${FILES_PREFIX}index.json`
+}
+
+function fileMetaKey(fileId) {
+  return `${FILES_PREFIX}${fileId}/meta.json`
+}
+
+function fileBlobKey(fileId, blobName) {
+  return `${FILES_PREFIX}${fileId}/${blobName}`
+}
+
+async function getJson(client, bucket, key) {
+  try {
+    const response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }))
+    return JSON.parse(await streamToString(response.Body))
+  } catch (error) {
+    if (error?.name === 'NoSuchKey' || String(error?.message ?? '').includes('NoSuchKey')) return null
+    throw error
+  }
+}
+
+async function putJson(client, bucket, key, value) {
+  await client.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: `${JSON.stringify(value, null, 2)}\n`,
+    ContentType: 'application/json; charset=utf-8',
+  }))
+}
+
+async function listKeys(client, bucket, prefix) {
+  const keys = []
+  let token
+  do {
+    const response = await client.send(new ListObjectsV2Command({
+      Bucket: bucket,
+      Prefix: prefix,
+      ContinuationToken: token,
+    }))
+    for (const item of response.Contents ?? []) {
+      if (item.Key) keys.push(item.Key)
+    }
+    token = response.IsTruncated ? response.NextContinuationToken : undefined
+  } while (token)
+  return keys
+}
+
+export async function listProviderFiles(client, bucket) {
+  const index = await getJson(client, bucket, filesIndexKey())
+  const entries = Array.isArray(index) ? index : []
+  const files = []
+  for (const entry of entries) {
+    const id = String(entry?.id || '')
+    try { sanitizeFileId(id) } catch { continue }
+    const meta = await getJson(client, bucket, fileMetaKey(id))
+    if (!meta) continue
+    const keys = meta.mode === 'copy' ? await listKeys(client, bucket, `${FILES_PREFIX}${id}/`) : []
+    files.push(resourceFromMeta(meta, {
+      exists: meta.mode === 'copy' && keys.some((key) => !key.endsWith('meta.json')),
+    }))
+  }
+  return files.filter(Boolean)
+}
+
+export async function getProviderFile(client, bucket, fileId) {
+  const id = sanitizeFileId(fileId)
+  const meta = await getJson(client, bucket, fileMetaKey(id))
+  if (!meta) {
+    const error = new Error('文件资源不存在')
+    error.status = 404
+    throw error
+  }
+  const keys = meta.mode === 'copy' ? await listKeys(client, bucket, `${FILES_PREFIX}${id}/`) : []
+  return resourceFromMeta(meta, {
+    exists: meta.mode === 'copy' && keys.some((key) => !key.endsWith('meta.json')),
+  })
+}
+
+export async function upsertProviderFileMeta(client, bucket, raw) {
+  const id = sanitizeFileId(raw.id)
+  const now = new Date().toISOString()
+  const meta = normalizeFileMeta({ ...raw, id }, { now })
+  await putJson(client, bucket, fileMetaKey(id), meta)
+  const index = await getJson(client, bucket, filesIndexKey())
+  const entries = Array.isArray(index) ? index.filter((item) => item.id !== id) : []
+  entries.unshift(indexEntryFromMeta(meta))
+  await putJson(client, bucket, filesIndexKey(), entries)
+  return getProviderFile(client, bucket, id)
+}
+
+export async function putProviderFileBlob(client, bucket, fileId, blobName, data) {
+  const id = sanitizeFileId(fileId)
+  const name = sanitizeBlobName(blobName)
+  if (!data?.length) {
+    const error = new Error('导入内容为空')
+    error.status = 400
+    throw error
+  }
+  if (data.length > 20 * 1024 * 1024) {
+    const error = new Error('远程导入不能超过 20 MB，请改用登记或缩小文件')
+    error.status = 413
+    throw error
+  }
+  await client.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: fileBlobKey(id, name),
+    Body: data,
+    ContentType: 'application/octet-stream',
+  }))
+  return name
+}
+
+export async function getProviderFileBlob(client, bucket, fileId) {
+  const id = sanitizeFileId(fileId)
+  const keys = await listKeys(client, bucket, `${FILES_PREFIX}${id}/`)
+  const blobKey = keys.find((key) => !key.endsWith('meta.json'))
+  if (!blobKey) {
+    const error = new Error('副本缺失')
+    error.status = 404
+    throw error
+  }
+  const response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: blobKey }))
+  return streamToBuffer(response.Body)
 }

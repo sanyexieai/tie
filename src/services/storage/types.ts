@@ -1,4 +1,5 @@
 import type { Page, PageRevision, StorageKind, StorageSource } from '@/types'
+import type { SourceBlobStore } from '@/services/storage/blobs'
 
 export interface StorageCapabilities {
   load: boolean
@@ -68,6 +69,7 @@ export interface S3ConnectionInput {
 export interface StorageAdapter {
   readonly kind: StorageKind | 'browser'
   readonly capabilities: StorageCapabilities
+  readonly blobs?: SourceBlobStore
   matches(sourceId: string): boolean
   listSources(): StorageSource[]
   loadPages(sourceId: string): Promise<LoadPagesResult>
@@ -92,6 +94,18 @@ export function defaultSourceStatus(sourceId: string): SourceRuntimeStatus {
     lastError: null,
     pendingCount: 0,
   }
+}
+
+export function sourceStubFromId(sourceId: string): StorageSource {
+  const id = sourceId.trim()
+  const kind: StorageKind = id.startsWith('s3:') || id.startsWith('backend-s3:')
+    ? 's3'
+    : id.startsWith('backend:')
+      ? 'backend'
+      : id.startsWith('src_smb')
+        ? 'smb'
+        : 'local'
+  return { id, name: '', kind, path: '' }
 }
 
 export function isFileSourceId(sourceId: string) {

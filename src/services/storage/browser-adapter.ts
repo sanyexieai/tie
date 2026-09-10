@@ -1,6 +1,7 @@
 import type { Page, PageId, StorageSource } from '@/types'
 import { normalizePageSources, pageBoundToSource } from '@/services/page-sources'
 import { mergeSyncPages } from '@/services/storage/sync-merge'
+import { browserBlobStore } from '@/services/storage/blobs'
 import type { LoadPagesResult, StorageAdapter, StorageCapabilities, SyncSourceContext } from '@/services/storage/types'
 
 const fallbackKey = 'tie-demo-workspace-v1'
@@ -70,6 +71,7 @@ function archiveLocalRevision(page: Page) {
 export const browserStorageAdapter: StorageAdapter = {
   kind: 'browser',
   capabilities,
+  blobs: browserBlobStore,
   matches(sourceId) {
     return sourceId === 'source-demo-local'
   },

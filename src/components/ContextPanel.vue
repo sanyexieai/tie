@@ -3,12 +3,22 @@ import { computed, ref, watch } from 'vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import LocalGraphPanel from '@/components/LocalGraphPanel.vue'
 import {
-  collectFileIdsFromMarkdown,
+  buildFileUrl,
+  canRebindRegisteredFile,
+  collectFileRefsFromMarkdown,
+  collectPathRefsFromMarkdown,
   fileLinkLabel,
-  listWorkspaceFiles,
-  openWorkspaceFile,
+  fileLinkTitle,
+  listRegisteredFiles,
+  openRegisteredFile,
+  probeRelativePath,
+  resolveLinkForm,
+  resourceAvailability,
   type WorkspaceFileResource,
 } from '@/services/files'
+import { buildPathUrl, classifyLocalLink, fileRootForSource, sourceById, type LinkContext } from '@/services/link-runtime'
+import { isCrossSourceLink, rebindLinkedResource, sourceChipLabel } from '@/services/link-actions'
+import { openLocalLink } from '@/services/local-links'
 
 const store = useWorkspaceStore()
 const tab = ref<'outline' | 'properties' | 'links' | 'graph'>('outline')
@@ -35,37 +45,95 @@ const storageLabel = computed(() => {
   return source.kind === 'smb' ? `SMB · ${source.name}` : `本地 · ${source.name}`
 })
 
+const linkContext = computed<LinkContext>(() => ({
+  pageSourceId: store.activePage?.storageSourceId ?? null,
+  sources: store.allSources,
+}))
+
 const filesWorkspaceRoot = computed(() => {
-  const page = store.activePage
-  const bound = page ? store.allSources.find((item) => item.id === page.storageSourceId) : null
-  if (bound && (bound.kind === 'local' || bound.kind === 'smb') && bound.path) return bound.path
-  return store.allSources.find((item) => (item.kind === 'local' || item.kind === 'smb') && item.path)?.path ?? null
+  return fileRootForSource(sourceById(store.allSources, store.activePage?.storageSourceId))
 })
 
 const outgoingFiles = computed(() => {
   const page = store.activePage
   if (!page) return []
-  const ids = collectFileIdsFromMarkdown(page.markdown)
-  return ids.map((id) => {
-    const resource = fileResources.value.find((item) => item.id === id)
+  const files = collectFileRefsFromMarkdown(page.markdown).map((ref) => {
+    const sourceId = ref.sourceId || page.storageSourceId
+    const href = buildFileUrl(ref.fileId, sourceId)
+    const link = classifyLocalLink(href)
+    const resource = fileResources.value.find((item) => item.id === ref.fileId)
+    const source = sourceById(store.allSources, sourceId)
+    const availability = link ? resourceAvailability(link, linkContext.value) : 'unknown'
     return {
-      id,
-      title: resource?.title ?? id,
+      type: 'file' as const,
+      id: ref.fileId,
+      sourceId,
+      href,
+      title: resource?.title ?? ref.fileId,
       kind: resource?.kind ?? null,
-      mode: resource?.mode ?? null,
+      mode: resource?.mode ?? 'link',
       exists: resource?.exists ?? false,
+      availability,
+      canRebind: canRebindRegisteredFile(resource),
+      sourceLabel: sourceChipLabel(source),
+      crossSource: isCrossSourceLink(sourceId, page.storageSourceId),
     }
   })
+  const paths = collectPathRefsFromMarkdown(page.markdown).map((ref) => {
+    const sourceId = ref.sourceId || page.storageSourceId
+    const href = buildPathUrl(ref.relativePath, sourceId)
+    const link = classifyLocalLink(href)
+    const source = sourceById(store.allSources, sourceId)
+    const availability = link ? resourceAvailability(link, linkContext.value) : 'unknown'
+    const name = ref.relativePath.split('/').filter(Boolean).pop() || ref.relativePath
+    return {
+      type: 'path' as const,
+      id: ref.relativePath,
+      sourceId,
+      href,
+      title: name,
+      kind: null as string | null,
+      mode: 'relative',
+      exists: availability === 'ready',
+      availability,
+      canRebind: false,
+      sourceLabel: sourceChipLabel(source),
+      crossSource: isCrossSourceLink(sourceId, page.storageSourceId),
+    }
+  })
+  return [...files, ...paths]
 })
 
 async function refreshFileResources() {
-  const root = filesWorkspaceRoot.value
-  if (!root) {
+  const page = store.activePage
+  if (!page) {
+    fileResources.value = []
+    return
+  }
+  const fileRefs = collectFileRefsFromMarkdown(page.markdown)
+  const pathRefs = collectPathRefsFromMarkdown(page.markdown)
+  const sourceIds = new Set(
+    [...fileRefs.map((ref) => ref.sourceId || page.storageSourceId), ...pathRefs.map((ref) => ref.sourceId || page.storageSourceId)],
+  )
+  const sources = [...sourceIds]
+    .map((sourceId) => sourceById(store.allSources, sourceId))
+    .filter((source): source is NonNullable<typeof source> => Boolean(source))
+  if (!sources.length) {
     fileResources.value = []
     return
   }
   try {
-    fileResources.value = await listWorkspaceFiles(root)
+    const lists = await Promise.all(sources.map((source) => listRegisteredFiles(source)))
+    fileResources.value = lists.flat()
+    await Promise.all(pathRefs.map(async (ref) => {
+      const source = sourceById(store.allSources, ref.sourceId || page.storageSourceId)
+      if (!source) return
+      try {
+        await probeRelativePath(source, ref.relativePath)
+      } catch {
+        // ignore
+      }
+    }))
   } catch {
     fileResources.value = []
   }
@@ -77,19 +145,42 @@ watch(
   { immediate: true },
 )
 
-async function openOutgoingFile(fileId: string) {
-  const root = filesWorkspaceRoot.value
-  if (!root) {
-    window.alert('当前页面没有可用的本地/SMB 工作区，无法打开文件资源。')
+async function openOutgoingFile(file: { type: 'file' | 'path'; id: string; sourceId: string; href: string; kind?: string | null }) {
+  const source = sourceById(store.allSources, file.sourceId)
+  if (!source) {
+    window.alert('当前链接所属存储源不可用，无法打开文件资源。')
     return
   }
-  openingFileId.value = fileId
+  openingFileId.value = file.id
   try {
-    await openWorkspaceFile(root, fileId)
+    if (file.type === 'path') {
+      await openLocalLink(file.href, linkContext.value)
+      return
+    }
+    await openRegisteredFile(source, file.id)
   } catch (error) {
     window.alert(error instanceof Error ? error.message : '无法打开文件资源')
   } finally {
     openingFileId.value = null
+  }
+}
+
+const rebindingId = ref<string | null>(null)
+
+async function rebindOutgoingFile(file: { id: string; sourceId: string; kind?: string | null }) {
+  const source = sourceById(store.allSources, file.sourceId)
+  if (!source) {
+    window.alert('当前链接所属存储源不可用。')
+    return
+  }
+  rebindingId.value = file.id
+  try {
+    const rebound = await rebindLinkedResource(source, file.id, file.kind === 'directory' ? 'directory' : 'file')
+    if (rebound) await refreshFileResources()
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : '无法重新绑定')
+  } finally {
+    rebindingId.value = null
   }
 }
 
@@ -148,16 +239,29 @@ async function unlinkPage(pageId: string) {
       </section>
       <section>
         <h3>文件资源</h3>
-        <p v-if="!outgoingFiles.length" class="muted">正文中的 tie://file/… 会显示在这里（文件 / 目录；副本 / 外链样式不同）。</p>
-        <div v-for="file in outgoingFiles" :key="`file-${file.id}`" class="mention-row file-link-row">
+        <p v-if="!outgoingFiles.length" class="muted">正文中的 tie://file/… 与 tie://path/… 会显示在这里（实心=库内，空心=本机；找不到会单独标出）。</p>
+        <div v-for="file in outgoingFiles" :key="`file-${file.type}-${file.sourceId}-${file.id}`" class="mention-row file-link-row">
           <button
             class="file-resource-open"
-            :class="{ directory: file.kind === 'directory' }"
+            :class="{ directory: file.kind === 'directory', missing: file.availability === 'missing' || file.availability === 'offline' }"
             :disabled="openingFileId === file.id"
-            :title="file.exists === false ? '路径不可用' : (file.kind === 'directory' ? '打开目录' : file.id)"
-            @click="openOutgoingFile(file.id)"
+            :title="file.availability === 'missing' ? '路径不可用' : (file.kind === 'directory' ? '打开目录' : file.id)"
+            @click="openOutgoingFile(file)"
           >{{ file.title }}</button>
-          <em class="file-mode-badge" :class="file.mode === 'copy' || file.mode === 'link' ? file.mode : undefined">{{ fileLinkLabel(file.mode, file.kind) }}</em>
+          <em
+            class="file-mode-badge"
+            :class="[resolveLinkForm(file.mode) || undefined, file.availability]"
+            :title="fileLinkTitle(file.mode, file.kind, file.availability)"
+          >{{ fileLinkLabel(file.mode, file.kind, file.availability) }}</em>
+          <small v-if="file.crossSource && file.sourceLabel" class="file-source-badge" :title="file.sourceLabel">{{ file.sourceLabel }}</small>
+          <button
+            v-if="file.canRebind"
+            class="mention-link-action"
+            type="button"
+            :disabled="rebindingId === file.id"
+            title="选择新的本机路径，保持原来的链接 id"
+            @click="rebindOutgoingFile(file)"
+          >{{ rebindingId === file.id ? '绑定中…' : '重新绑定' }}</button>
         </div>
       </section>
       <section>

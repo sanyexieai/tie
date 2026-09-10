@@ -2,6 +2,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createFileRegistry } from './files.js'
 import { stripWindowsExtendedPrefix } from './fs-path.js'
+import { rewriteLegacyWorkspaceHrefs } from './links.js'
+import {
+  MIGRATION_CATALOG,
+  readAppliedMigrations,
+  scanFileProtocolResiduals,
+} from './migrations.js'
 import { ensureTitleMarkdown, frontmatter, newPageId, parsePage } from './page-format.js'
 
 const LINK_TITLE_RE = /\[\[([^\]]+)\]\]/g
@@ -48,8 +54,8 @@ export function createWorkspace(workspacePath) {
   const root = resolveWorkspaceRoot(workspacePath)
   const pagesDir = path.join(root, 'pages')
   const historyRoot = path.join(root, '.tie', 'history')
-  const files = createFileRegistry(root)
-  const storageSourceId = process.env.TIE_STORAGE_SOURCE_ID || ''
+  const envSourceId = String(process.env.TIE_SOURCE_ID || process.env.TIE_STORAGE_SOURCE_ID || '').trim()
+  const storageSourceId = envSourceId
 
   function listPageFiles() {
     return fs.readdirSync(pagesDir)
@@ -70,6 +76,27 @@ export function createWorkspace(workspacePath) {
     }
     return pages
   }
+
+  function inferStorageSourceId() {
+    if (envSourceId) return envSourceId
+    const counts = new Map()
+    for (const page of loadAll({ includeDeleted: true })) {
+      const id = String(page.storageSourceId || '').trim()
+      if (!id) continue
+      counts.set(id, (counts.get(id) || 0) + 1)
+    }
+    let best = ''
+    let n = 0
+    for (const [id, count] of counts) {
+      if (count > n || (count === n && id < best)) {
+        best = id
+        n = count
+      }
+    }
+    return best
+  }
+
+  const files = createFileRegistry(root, { getSourceId: inferStorageSourceId })
 
   function getById(pageId) {
     const file = path.join(pagesDir, `${pageId}.md`)
@@ -228,9 +255,12 @@ export function createWorkspace(workspacePath) {
       }
     }
 
-    const markdown = ensureTitleMarkdown(
-      title || existing?.title || '无标题',
-      normalizeMarkdownInput(input.markdown ?? input.body ?? existing?.markdown ?? ''),
+    const markdown = rewriteLegacyWorkspaceHrefs(
+      ensureTitleMarkdown(
+        title || existing?.title || '无标题',
+        normalizeMarkdownInput(input.markdown ?? input.body ?? existing?.markdown ?? ''),
+      ),
+      existing?.storageSourceId || storageSourceId,
     )
 
     const page = {
@@ -266,6 +296,70 @@ export function createWorkspace(workspacePath) {
     }))
   }
 
+  /**
+   * Report stamp + catalog. Only migrations with agentFollowUp get residual scans.
+   * Do not treat a bare app update as a reason to call this unless a migration id applies.
+   */
+  function migrationStatus({ migrationId, limit = 50 } = {}) {
+    const stamp = readAppliedMigrations(root, fs, path)
+    const catalog = migrationId
+      ? MIGRATION_CATALOG.filter((item) => item.id === migrationId)
+      : MIGRATION_CATALOG
+    if (migrationId && !catalog.length) {
+      return {
+        workspace: root,
+        error: `未知 migrationId：${migrationId}`,
+        knownIds: MIGRATION_CATALOG.map((item) => item.id),
+        applied: stamp.applied,
+      }
+    }
+
+    const pages = loadAll()
+    const migrations = catalog.map((entry) => {
+      const applied = stamp.applied.includes(entry.id)
+      const base = {
+        ...entry,
+        applied,
+        agentAction: !entry.agentFollowUp
+          ? 'none'
+          : !applied
+            ? 'wait_for_app_stamp'
+            : 'scan_residuals_if_any',
+      }
+      if (!entry.agentFollowUp || !applied) {
+        return { ...base, remainingPages: [], remainingHrefs: 0, remaining: 0 }
+      }
+      if (entry.id === 'href-file-protocol-v1') {
+        const scan = scanFileProtocolResiduals(pages, { limit })
+        return {
+          ...base,
+          remaining: scan.remainingPages.length,
+          remainingPages: scan.remainingPages,
+          remainingHrefs: scan.remainingHrefs,
+          truncated: scan.truncated,
+        }
+      }
+      return { ...base, remainingPages: [], remainingHrefs: 0, remaining: 0 }
+    })
+
+    const needsAgent = migrations.filter(
+      (item) => item.agentFollowUp && item.applied && item.remaining > 0,
+    )
+    return {
+      workspace: root,
+      stampPath: stamp.stampPath,
+      stampExists: stamp.exists,
+      applied: stamp.applied,
+      /** Only true when a catalogued, stamped migration still has residuals. */
+      needsAgentFollowUp: needsAgent.length > 0,
+      needsAgent,
+      migrations,
+      guidance: needsAgent.length
+        ? '按 Skill tie-update 处理 needsAgent 中的 migration id；勿因应用版本号本身全库扫。'
+        : '当前无目录内需 Agent 收尾的残留；勿仅因「刚更新」启用 tie-update。',
+    }
+  }
+
   return {
     root,
     pagesDir,
@@ -278,5 +372,6 @@ export function createWorkspace(workspacePath) {
     writePage,
     listRecent,
     summarize,
+    migrationStatus,
   }
 }

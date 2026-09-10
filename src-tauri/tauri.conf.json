@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Tie",
-  "version": "1.0.34",
+  "version": "1.0.35",
   "identifier": "com.tie.knowledge",
   "build": {
     "frontendDist": "../dist",
@@ -38,7 +38,8 @@
       "../packages/tie-mcp/src": "tie-mcp/src",
       "../packages/tie-mcp/package.json": "tie-mcp/package.json",
       "../packages/tie-mcp/package-lock.json": "tie-mcp/package-lock.json",
-      "../packages/tie-mcp/SKILL.md": "tie-mcp/SKILL.md"
+      "../packages/tie-mcp/SKILL.md": "tie-mcp/SKILL.md",
+      "../packages/tie-mcp/skills": "tie-mcp/skills"
     },
     "windows": {
       "webviewInstallMode": {

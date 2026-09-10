@@ -1,27 +1,45 @@
-import { openPath } from '@tauri-apps/plugin-opener'
 import {
   cachedFileKind,
   cachedFileMode,
-  FILE_URL_PREFIX,
   fileLinkClass as workspaceFileLinkClass,
-  openWorkspaceFile,
-  parseFileUrl,
+  ingestRegisteredFile,
+  openRegisteredFile,
+  resourceAvailability,
 } from '@/services/files'
+import { getPlatformAccess } from '@/services/platform-access'
+import { blobStoreFor } from '@/services/storage/blobs'
+import { isCrossSourceLink, sourceChipLabel } from '@/services/link-actions'
+import {
+  buildFileUrl,
+  buildPathUrl,
+  classifyLocalLink,
+  collectFileProtocolHrefs,
+  fileRootForSource,
+  migratePageWorkspaceHrefs,
+  normalizeRelativePath,
+  relativePathIfInsideRoot,
+  replaceFileProtocolHrefs,
+  resolvedSourceId,
+  resolveFileRoot,
+  sourceById,
+  type ClassifiedLocalLink,
+  type LinkContext,
+} from '@/services/link-runtime'
 import { fileUrlToLocalPath } from '@/services/local-path'
+import type { StorageSource } from '@/types'
 
-/** Workspace-relative path link: `tie://path/docs/spec.pdf` */
-export const PATH_URL_PREFIX = 'tie://path/'
-
-export type LocalLinkKind = 'workspace-file' | 'absolute' | 'relative'
-
-export interface ClassifiedLocalLink {
-  kind: LocalLinkKind
-  href: string
-  fileId?: string
-  absolutePath?: string
-  /** POSIX-style path relative to workspace root (no leading slash). */
-  relativePath?: string
-}
+export {
+  buildPathUrl,
+  classifyLocalLink,
+  FILE_URL_PREFIX,
+  normalizeRelativePath,
+  parsePathUrl,
+  pastedTextToHtml,
+  PATH_URL_PREFIX,
+  type ClassifiedLocalLink,
+  type LinkContext,
+  type LocalLinkKind,
+} from '@/services/link-runtime'
 
 const LOCAL_LINK_CLASSES = [
   'file-link',
@@ -30,67 +48,12 @@ const LOCAL_LINK_CLASSES = [
   'file-link-directory',
   'file-link-absolute',
   'file-link-relative',
+  'file-link-ready',
+  'file-link-missing',
+  'file-link-offline',
+  'file-link-unknown',
+  'file-link-cross-source',
 ] as const
-
-/** Normalize to workspace-relative POSIX segments; rejects empty / absolute / `..`. */
-export function normalizeRelativePath(raw: string): string {
-  const text = String(raw || '').trim().replace(/\\/g, '/')
-  if (!text) throw new Error('相对路径不能为空')
-  if (/^(tie:|file:|https?:|mailto:)/i.test(text)) {
-    throw new Error('请输入工作区内的相对路径，不要使用完整 URL')
-  }
-  if (/^[A-Za-z]:\//.test(text) || text.startsWith('/') || text.startsWith('//')) {
-    throw new Error('相对路径不能是绝对路径')
-  }
-  const parts = text.split('/').filter((part) => part && part !== '.')
-  if (!parts.length) throw new Error('相对路径不能为空')
-  if (parts.some((part) => part === '..')) {
-    throw new Error('相对路径不能包含 ..')
-  }
-  return parts.join('/')
-}
-
-export function buildPathUrl(relativePath: string) {
-  const normalized = normalizeRelativePath(relativePath)
-  return `${PATH_URL_PREFIX}${normalized.split('/').map(encodeURIComponent).join('/')}`
-}
-
-export function parsePathUrl(href: string): { relativePath: string } | null {
-  if (!href.startsWith(PATH_URL_PREFIX)) return null
-  const raw = href.slice(PATH_URL_PREFIX.length).split(/[?#]/)[0] ?? ''
-  if (!raw) return null
-  try {
-    const decoded = raw
-      .split('/')
-      .map((segment) => decodeURIComponent(segment))
-      .join('/')
-    return { relativePath: normalizeRelativePath(decoded) }
-  } catch {
-    return null
-  }
-}
-
-export function classifyLocalLink(href: string): ClassifiedLocalLink | null {
-  const trimmed = String(href || '').trim()
-  if (!trimmed) return null
-
-  const file = parseFileUrl(trimmed)
-  if (file) {
-    return { kind: 'workspace-file', href: trimmed, fileId: file.fileId }
-  }
-
-  const relative = parsePathUrl(trimmed)
-  if (relative) {
-    return { kind: 'relative', href: trimmed, relativePath: relative.relativePath }
-  }
-
-  const absolutePath = fileUrlToLocalPath(trimmed)
-  if (absolutePath) {
-    return { kind: 'absolute', href: trimmed, absolutePath }
-  }
-
-  return null
-}
 
 /** Join workspace root + relative path using the root's separator style. */
 export function resolveRelativeToWorkspace(workspaceRoot: string, relativePath: string): string {
@@ -104,22 +67,24 @@ export function resolveRelativeToWorkspace(workspaceRoot: string, relativePath: 
 
 export function localLinkClass(
   link: ClassifiedLocalLink,
-  options?: { workspaceRoot?: string | null },
+  options?: LinkContext & { workspaceRoot?: string | null },
 ): string {
+  const availability = resourceAvailability(link, options)
   if (link.kind === 'workspace-file' && link.fileId) {
-    const mode = cachedFileMode(options?.workspaceRoot, link.fileId)
-    const kind = cachedFileKind(options?.workspaceRoot, link.fileId)
-    return workspaceFileLinkClass(mode, kind)
+    const sourceId = resolvedSourceId(link, options)
+    const mode = cachedFileMode(sourceId, link.fileId)
+    const kind = cachedFileKind(sourceId, link.fileId)
+    const form = mode === 'copy' ? 'relative' : 'absolute'
+    return workspaceFileLinkClass(mode, kind, availability, form)
   }
-  if (link.kind === 'absolute') return 'file-link file-link-absolute'
-  if (link.kind === 'relative') return 'file-link file-link-relative'
+  if (link.kind === 'absolute') return workspaceFileLinkClass(null, null, availability, 'absolute')
+  if (link.kind === 'relative') return workspaceFileLinkClass(null, null, availability, 'relative')
   return 'file-link'
 }
 
 export function localLinkLabel(link: ClassifiedLocalLink): string {
-  if (link.kind === 'absolute') return '绝对'
-  if (link.kind === 'relative') return '相对'
-  return '文件'
+  if (link.form === 'relative' || link.kind === 'relative') return '库内'
+  return '本机'
 }
 
 export function clearLocalLinkClasses(anchor: HTMLAnchorElement) {
@@ -129,12 +94,17 @@ export function clearLocalLinkClasses(anchor: HTMLAnchorElement) {
   delete anchor.dataset.fileMode
   delete anchor.dataset.fileKind
   delete anchor.dataset.localLink
+  delete anchor.dataset.linkForm
+  delete anchor.dataset.linkAvail
+  delete anchor.dataset.linkSource
+  delete anchor.dataset.linkSourceName
+  delete anchor.dataset.linkCross
 }
 
 export function applyLocalLinkClasses(
   anchor: HTMLAnchorElement,
   href: string,
-  options?: { workspaceRoot?: string | null },
+  options?: LinkContext & { workspaceRoot?: string | null },
 ) {
   const link = classifyLocalLink(href)
   clearLocalLinkClasses(anchor)
@@ -142,10 +112,24 @@ export function applyLocalLinkClasses(
   for (const token of localLinkClass(link, options).split(/\s+/)) {
     if (token) anchor.classList.add(token)
   }
+  const sourceId = resolvedSourceId(link, options)
+  const availability = resourceAvailability(link, options)
+  const form = link.kind === 'workspace-file'
+    ? (cachedFileMode(sourceId, link.fileId!) === 'copy' ? 'relative' : 'absolute')
+    : link.form
   anchor.dataset.localLink = link.kind
+  anchor.dataset.linkForm = form
+  anchor.dataset.linkAvail = availability
+  if (sourceId) anchor.dataset.linkSource = sourceId
+  const source = sourceById(options?.sources, sourceId)
+  if (source) anchor.dataset.linkSourceName = sourceChipLabel(source)
+  if (isCrossSourceLink(sourceId, options?.pageSourceId)) {
+    anchor.dataset.linkCross = '1'
+    anchor.classList.add('file-link-cross-source')
+  }
   if (link.kind === 'workspace-file' && link.fileId) {
-    const mode = cachedFileMode(options?.workspaceRoot, link.fileId)
-    const kind = cachedFileKind(options?.workspaceRoot, link.fileId)
+    const mode = cachedFileMode(sourceId, link.fileId)
+    const kind = cachedFileKind(sourceId, link.fileId)
     if (mode === 'copy' || mode === 'link') anchor.dataset.fileMode = mode
     if (kind === 'directory') anchor.dataset.fileKind = 'directory'
   }
@@ -154,7 +138,7 @@ export function applyLocalLinkClasses(
 
 export async function openLocalLink(
   href: string,
-  options?: { workspaceRoot?: string | null },
+  options?: LinkContext & { workspaceRoot?: string | null },
 ) {
   const link = classifyLocalLink(href)
   if (!link) throw new Error('不是可打开的本地链接')
@@ -168,19 +152,33 @@ export async function openLocalLink(
   }
 
   if (link.kind === 'workspace-file') {
-    const root = options?.workspaceRoot?.trim()
-    if (!root) throw new Error('当前页面没有可用的本地/SMB 工作区，无法打开文件资源。')
-    await openWorkspaceFile(root, link.fileId!)
+    const source = sourceById(options?.sources, resolvedSourceId(link, options))
+    if (!source) {
+      throw new Error('当前链接所属存储源不是本地或 SMB，无法在本机打开登记文件。')
+    }
+    await openRegisteredFile(source, link.fileId!)
     return link
   }
 
   if (link.kind === 'absolute') {
-    await openPath(link.absolutePath!)
+    await getPlatformAccess().openNative(link.absolutePath!)
     return link
   }
 
-  const full = resolveRelativeToWorkspace(options?.workspaceRoot ?? '', link.relativePath!)
-  await openPath(full)
+  const root = resolveFileRoot(link, options)
+  if (!root) {
+    const source = sourceById(options?.sources, resolvedSourceId(link, options))
+    if (source) {
+      const store = blobStoreFor(source)
+      if (store.openRelative) {
+        await store.openRelative(source, link.relativePath!)
+        return link
+      }
+    }
+    throw new Error('当前链接所属存储源不是本地或 SMB，无法打开相对路径。')
+  }
+  const full = resolveRelativeToWorkspace(root, link.relativePath!)
+  await getPlatformAccess().openNative(full)
   return link
 }
 
@@ -188,4 +186,77 @@ export function isLocalLinkHref(href: string) {
   return Boolean(classifyLocalLink(href))
 }
 
-export { FILE_URL_PREFIX }
+export async function convertFileProtocolHref(
+  href: string,
+  context: LinkContext & { ingestExternal?: boolean },
+): Promise<string> {
+  const abs = fileUrlToLocalPath(href)
+  if (!abs) throw new Error(`无法解析路径：${href}`)
+  const sources = context.sources ?? []
+  // Prefer relative path if the file sits inside any local/SMB source root.
+  for (const source of sources) {
+    const root = fileRootForSource(source)
+    if (!root) continue
+    const relative = relativePathIfInsideRoot(root, abs)
+    if (relative) return buildPathUrl(relative, source.id)
+  }
+  if (context.ingestExternal === false) {
+    throw new Error('区外路径留给 Agent 收尾，启动迁移不 ingest')
+  }
+  const pageSource = sourceById(sources, context.pageSourceId)
+  if (!pageSource) {
+    throw new Error('当前页面未绑定存储源，无法把区外路径改写成工作区链接')
+  }
+  if (!fileRootForSource(pageSource) && !blobStoreFor(pageSource).canRegister) {
+    throw new Error('当前页面未绑定本地或 SMB 存储源，无法把区外路径改写成工作区链接')
+  }
+  if (!blobStoreFor(pageSource).canRegister) {
+    throw new Error('当前存储源不能登记区外路径')
+  }
+  const resource = await ingestRegisteredFile(pageSource, abs, 'link')
+  return buildFileUrl(resource.id, pageSource.id)
+}
+
+export async function rewriteFileProtocolText(
+  text: string,
+  context: LinkContext & { ingestExternal?: boolean },
+): Promise<{ text: string; converted: number; skipped: string[] }> {
+  const skipped: string[] = []
+  const replacements = new Map<string, string>()
+  let converted = 0
+  for (const href of collectFileProtocolHrefs(text)) {
+    try {
+      replacements.set(href, await convertFileProtocolHref(href, context))
+      converted += 1
+    } catch {
+      skipped.push(href)
+    }
+  }
+  return {
+    text: replaceFileProtocolHrefs(text, (href) => replacements.get(href) ?? href),
+    converted,
+    skipped,
+  }
+}
+
+/** Unified page href migration: sourceId backfill + file:/// → tie://path|file. */
+export async function migratePageLocalHrefs<T extends { markdown: string; storageSourceId?: string | null }>(
+  page: T,
+  sources: StorageSource[],
+  options?: { ingestExternal?: boolean },
+): Promise<{ page: T; converted: number; skipped: string[] }> {
+  const withSources = migratePageWorkspaceHrefs(page)
+  if (!/file:\/\//i.test(withSources.markdown)) {
+    return { page: withSources, converted: 0, skipped: [] }
+  }
+  const result = await rewriteFileProtocolText(withSources.markdown, {
+    pageSourceId: withSources.storageSourceId,
+    sources,
+    ingestExternal: options?.ingestExternal,
+  })
+  return {
+    page: { ...withSources, markdown: result.text },
+    converted: result.converted,
+    skipped: result.skipped,
+  }
+}

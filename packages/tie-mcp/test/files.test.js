@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { createWorkspace } from '../src/workspace.js'
+import { frontmatter } from '../src/page-format.js'
 
 function makeWorkspace() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tie-mcp-files-'))
@@ -22,7 +23,8 @@ test('file ingest copy and link with distinct modes and idempotency', () => {
   assert.equal(copied.mode, 'copy')
   assert.equal(copied.ext, 'pdf')
   assert.equal(copied.mime, 'application/pdf')
-  assert.ok(copied.url.startsWith('tie://file/'))
+  assert.ok(copied.url.startsWith('tie://path/'))
+  assert.ok(copied.url.includes('.tie/files/'))
   assert.ok(fs.existsSync(copied.openPath))
   assert.ok(copied.storedPath.startsWith('.tie/files/'))
 
@@ -82,9 +84,8 @@ test('directory ingest link and copy', () => {
   assert.ok(linked.url.startsWith('tie://file/'))
   assert.equal(path.resolve(linked.openPath), path.resolve(folder))
   assert.ok(linked.preview?.includes('a.txt'))
-  assert.ok(linked.entryCount)
-  assert.equal(linked.entryCount.files, 2)
-  assert.equal(linked.entryCount.dirs, 1)
+  // link 不递归扫树（避免大目录卡死）；entryCount 仅 copy 需要
+  assert.equal(linked.entryCount, null)
 
   const again = ws.files.ingest({ path: folder, mode: 'link' })
   assert.equal(again.created, false)
@@ -95,10 +96,65 @@ test('directory ingest link and copy', () => {
   assert.equal(copied.kind, 'directory')
   assert.notEqual(copied.id, linked.id)
   assert.ok(copied.storedPath.startsWith('.tie/files/'))
+  assert.ok(copied.url.startsWith('tie://path/'))
+  assert.ok(copied.entryCount)
+  assert.equal(copied.entryCount.files, 2)
+  assert.equal(copied.entryCount.dirs, 1)
   assert.ok(fs.existsSync(path.join(copied.openPath, 'a.txt')))
   assert.ok(fs.existsSync(path.join(copied.openPath, 'nested', 'b.md')))
 
   const hint = ws.files.openHint(linked.id)
   assert.equal(hint.exists, true)
   assert.match(hint.hint, /文件管理器打开目录/)
+})
+
+test('copy rejects directories deeper than 8 levels', () => {
+  const root = makeWorkspace()
+  const ws = createWorkspace(root)
+  const src = path.join(root, 'tree')
+  fs.mkdirSync(src)
+  let current = src
+  for (let i = 0; i < 9; i += 1) {
+    current = path.join(current, `l${i}`)
+    fs.mkdirSync(current)
+  }
+  fs.writeFileSync(path.join(current, 'a.txt'), 'x')
+  assert.throws(
+    () => ws.files.ingest({ path: src, mode: 'copy' }),
+    /不能超过 8 层/,
+  )
+  const linked = ws.files.ingest({ path: src, mode: 'link' })
+  assert.equal(linked.mode, 'link')
+})
+
+test('ingest urls include source id inferred from pages', () => {
+  const root = makeWorkspace()
+  const sourceId = 'src_local_2e27348a0aa628a6'
+  fs.writeFileSync(path.join(root, 'pages', 'pg_home.md'), frontmatter({
+    id: 'pg_home',
+    title: 'Home',
+    icon: '',
+    parentId: null,
+    sortKey: 0,
+    markdown: '# Home\n',
+    tags: [],
+    createdAt: '2026-09-10T00:00:00.000Z',
+    updatedAt: '2026-09-10T00:00:00.000Z',
+    deletedAt: null,
+    storageSourceId: sourceId,
+    storageSourceIds: [sourceId],
+  }))
+  const ws = createWorkspace(root)
+  const file = path.join(root, 'note.txt')
+  fs.writeFileSync(file, 'hello')
+  const copied = ws.files.ingest({ path: file, mode: 'copy' })
+  assert.equal(copied.sourceId, sourceId)
+  assert.ok(copied.url.includes(encodeURIComponent(sourceId)))
+  const linked = ws.files.ingest({ path: file, mode: 'link' })
+  assert.ok(linked.url.startsWith(`tie://file/${encodeURIComponent(sourceId)}/`))
+  const meta = JSON.parse(fs.readFileSync(path.join(root, '.tie', 'files', linked.id, 'meta.json'), 'utf8'))
+  assert.equal(meta.sourceId, sourceId)
+  assert.equal(meta.locator.type, 'desktop')
+  assert.ok(meta.locator.desktopPath)
+  assert.ok(meta.locator.displayPath)
 })

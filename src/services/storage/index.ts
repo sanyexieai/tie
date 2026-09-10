@@ -1,4 +1,5 @@
 export * from '@/services/storage/types'
+export { blobStoreFor } from '@/services/storage/blobs'
 export { sourceStatusStore } from '@/services/storage/source-status'
 export { syncQueue } from '@/services/storage/sync-queue'
 export { mergeSyncPages, emptySyncResult } from '@/services/storage/sync-merge'

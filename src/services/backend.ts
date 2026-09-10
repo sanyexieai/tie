@@ -79,6 +79,20 @@ export function parseBackendWorkspaceId(sourceId: string) {
 }
 
 type BackendPagePayload = Omit<Page, 'storageSourceId'>
+type BackendFileResource = {
+  id: string
+  title: string
+  kind?: string
+  mode: string
+  ext: string
+  mime: string
+  size: number
+  sourcePath: string
+  storedPath: string
+  openPath: string
+  exists: boolean
+  updatedAt: string
+}
 
 const storageKey = 'tie-backend-profile-v1'
 export const defaultBackendEndpoint = 'http://127.0.0.1:8787'
@@ -290,6 +304,46 @@ export const backendService = {
   async listWorkspacePageAssets(profile: BackendProfile, workspaceId: string, pageId: string) {
     const result = await request<{ assets: string[] }>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/assets`)
     return result.assets ?? []
+  },
+  async listWorkspaceFiles(profile: BackendProfile, workspaceId: string) {
+    const result = await request<{ files: BackendFileResource[] }>(profile, `/api/v1/workspaces/${workspaceId}/files`)
+    return result.files ?? []
+  },
+  async getWorkspaceFile(profile: BackendProfile, workspaceId: string, fileId: string) {
+    return request<BackendFileResource>(profile, `/api/v1/workspaces/${workspaceId}/files/${encodeURIComponent(fileId)}`)
+  },
+  async upsertWorkspaceFile(profile: BackendProfile, workspaceId: string, file: BackendFileResource) {
+    return request<BackendFileResource>(profile, `/api/v1/workspaces/${workspaceId}/files/${encodeURIComponent(file.id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(file),
+    })
+  },
+  async uploadWorkspaceFileBlob(profile: BackendProfile, workspaceId: string, fileId: string, blobName: string, data: Uint8Array) {
+    await uploadBinary(profile, `/api/v1/workspaces/${workspaceId}/files/${encodeURIComponent(fileId)}/blob/${encodeURIComponent(blobName)}`, data)
+    return blobName
+  },
+  async readWorkspaceFileBlob(profile: BackendProfile, workspaceId: string, fileId: string) {
+    return readBinary(profile, `/api/v1/workspaces/${workspaceId}/files/${encodeURIComponent(fileId)}/blob`)
+  },
+  async listProviderFiles(profile: BackendProfile, providerId: string) {
+    const result = await request<{ files: BackendFileResource[] }>(profile, `/api/v1/providers/${providerId}/files`)
+    return result.files ?? []
+  },
+  async getProviderFile(profile: BackendProfile, providerId: string, fileId: string) {
+    return request<BackendFileResource>(profile, `/api/v1/providers/${providerId}/files/${encodeURIComponent(fileId)}`)
+  },
+  async upsertProviderFile(profile: BackendProfile, providerId: string, file: BackendFileResource) {
+    return request<BackendFileResource>(profile, `/api/v1/providers/${providerId}/files/${encodeURIComponent(file.id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(file),
+    })
+  },
+  async uploadProviderFileBlob(profile: BackendProfile, providerId: string, fileId: string, blobName: string, data: Uint8Array) {
+    await uploadBinary(profile, `/api/v1/providers/${providerId}/files/${encodeURIComponent(fileId)}/blob/${encodeURIComponent(blobName)}`, data)
+    return blobName
+  },
+  async readProviderFileBlob(profile: BackendProfile, providerId: string, fileId: string) {
+    return readBinary(profile, `/api/v1/providers/${providerId}/files/${encodeURIComponent(fileId)}/blob`)
   },
   async uploadProviderPageAsset(profile: BackendProfile, providerId: string, pageId: string, assetName: string, data: Uint8Array) {
     await uploadBinary(profile, `/api/v1/providers/${providerId}/pages/${pageId}/assets/${encodeURIComponent(assetName)}`, data)

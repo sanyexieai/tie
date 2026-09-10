@@ -12,14 +12,18 @@
     {
       "identifier": "opener:allow-open-path",
       "allow": [
-        { "path": "**/*" },
+        { "path": "$HOME/**" },
         { "path": "$HOME/**/*" },
         { "path": "$APPDATA/**/*" },
         { "path": "$APPLOCALDATA/**/*" },
         { "path": "$DOCUMENT/**/*" },
         { "path": "$DOWNLOAD/**/*" },
         { "path": "$DESKTOP/**/*" },
-        { "path": "$RESOURCE/**/*" }
+        { "path": "$RESOURCE/**/*" },
+        { "path": "/tmp/**/*" },
+        { "path": "/mnt/**/*" },
+        { "path": "/media/**/*" },
+        { "path": "/run/media/**/*" }
       ]
     },
     "opener:allow-reveal-item-in-dir",

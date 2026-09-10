@@ -2,6 +2,7 @@ mod common;
 mod local;
 mod mobile;
 mod s3;
+mod saf;
 mod update;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -38,7 +39,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_process::init());
+        .plugin(tauri_plugin_process::init())
+        .plugin(saf::init());
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
@@ -50,10 +52,8 @@ pub fn run() {
                 set_desktop_window_icon(_app);
                 let handle = _app.handle().clone();
                 std::thread::spawn(move || {
-                    match codex_mcp::refresh_installed_mcp_runtime(&handle) {
-                        Ok(true) => eprintln!("[tie] MCP runtime refreshed from app package"),
-                        Ok(false) => {}
-                        Err(error) => eprintln!("[tie] MCP runtime refresh skipped: {error}"),
+                    if let Err(error) = codex_mcp::refresh_mcp_and_skills_on_startup(&handle) {
+                        eprintln!("[tie] MCP/Skill startup sync skipped: {error}");
                     }
                 });
             }
@@ -81,6 +81,10 @@ pub fn run() {
             s3::list_s3_page_assets,
             s3::save_s3_page_asset,
             s3::read_s3_page_asset,
+            s3::files::list_s3_workspace_files,
+            s3::files::resolve_s3_workspace_file,
+            s3::files::ingest_s3_workspace_file,
+            s3::files::prepare_s3_workspace_file,
             local::commands::load_workspace,
             local::commands::save_page,
             local::commands::add_storage_source,
@@ -93,6 +97,12 @@ pub fn run() {
             local::commands::list_workspace_files,
             local::commands::resolve_workspace_file,
             local::commands::ingest_workspace_file,
+            local::commands::native_path_exists,
+            local::commands::native_path_stat,
+            local::commands::read_native_file_bytes,
+            local::commands::write_temp_file_bytes,
+            saf::pick_native_resource,
+            saf::open_native_resource,
             local::commands::list_page_revisions,
             local::commands::read_page_revision,
             local::commands::restore_page_revision,

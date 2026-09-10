@@ -1,132 +1,234 @@
-import { invoke } from '@tauri-apps/api/core'
-import { openPath } from '@tauri-apps/plugin-opener'
+import type { StorageSource } from '@/types'
+import {
+  availabilityForSource,
+  buildFileUrl,
+  collectFileIdsFromMarkdown,
+  collectFileRefsFromMarkdown,
+  collectPathRefsFromMarkdown,
+  parseFileUrl,
+  resolvedSourceId,
+  sourceById,
+  type ClassifiedLocalLink,
+  type LinkAvailability,
+  type LinkContext,
+} from '@/services/link-runtime'
+import { getPlatformAccess } from '@/services/platform-access'
+import {
+  blobStoreFor,
+  type WorkspaceFileKind,
+  type WorkspaceFileMode,
+  type WorkspaceFileResource,
+} from '@/services/storage/blobs'
 
-export const FILE_URL_PREFIX = 'tie://file/'
+export { buildFileUrl, collectFileIdsFromMarkdown, collectFileRefsFromMarkdown, collectPathRefsFromMarkdown, parseFileUrl }
+export { FILE_URL_PREFIX } from '@/services/link-runtime'
+export type { WorkspaceFileKind, WorkspaceFileMode, WorkspaceFileResource }
 
-export type WorkspaceFileMode = 'copy' | 'link'
-export type WorkspaceFileKind = 'file' | 'directory'
-
-export interface WorkspaceFileResource {
-  id: string
-  title: string
-  kind?: WorkspaceFileKind | string
-  mode: WorkspaceFileMode | string
-  ext: string
-  mime: string
-  size: number
-  sourcePath: string
-  storedPath: string
-  openPath: string
-  exists: boolean
-  updatedAt: string
+export function resolveLinkForm(
+  mode?: string | null,
+  form?: ClassifiedLocalLink['form'] | null,
+): ClassifiedLocalLink['form'] | null {
+  if (form === 'relative' || form === 'absolute') return form
+  if (mode === 'copy' || mode === 'relative') return 'relative'
+  if (mode === 'link' || mode === 'absolute') return 'absolute'
+  return null
 }
 
-export function buildFileUrl(fileId: string) {
-  return `${FILE_URL_PREFIX}${fileId}`
+/** Style axis per ADR: relative/absolute × ready/missing/offline (directory is only a kind modifier). */
+export function fileLinkClass(
+  mode: string | null | undefined,
+  kind?: string | null,
+  availability?: LinkAvailability | null,
+  form?: ClassifiedLocalLink['form'] | null,
+) {
+  const tokens = ['file-link']
+  if (kind === 'directory') tokens.push('file-link-directory')
+  const resolved = resolveLinkForm(mode, form)
+  if (resolved === 'relative') tokens.push('file-link-relative')
+  else if (resolved === 'absolute') tokens.push('file-link-absolute')
+  if (availability === 'ready') tokens.push('file-link-ready')
+  if (availability === 'missing') tokens.push('file-link-missing')
+  if (availability === 'offline') tokens.push('file-link-offline')
+  if (availability === 'unknown') tokens.push('file-link-unknown')
+  return tokens.join(' ')
 }
 
-export function parseFileUrl(href: string) {
-  if (!href.startsWith(FILE_URL_PREFIX)) return null
-  const fileId = href.slice(FILE_URL_PREFIX.length).split(/[?#]/)[0]?.trim()
-  if (!fileId || !/^[A-Za-z0-9_-]+$/.test(fileId)) return null
-  return { fileId }
-}
-
-export function collectFileIdsFromMarkdown(markdown: string) {
-  const ids = new Set<string>()
-  const pattern = /\]\(tie:\/\/file\/([A-Za-z0-9_-]+)\)/g
-  for (const match of markdown.matchAll(pattern)) {
-    if (match[1]) ids.add(match[1])
+/** Visible status text; healthy links rely on icon color (empty string). */
+export function fileLinkLabel(
+  mode: string | null | undefined,
+  kind?: string | null,
+  availability?: LinkAvailability | null,
+  form?: ClassifiedLocalLink['form'] | null,
+) {
+  const resolved = resolveLinkForm(mode, form)
+  if (availability === 'missing') {
+    return resolved === 'absolute' ? '找不到' : '缺失'
   }
-  return [...ids]
+  if (availability === 'offline') return '源不可用'
+  return ''
 }
 
-export function fileLinkClass(mode: string | null | undefined, kind?: string | null) {
-  const base = kind === 'directory' ? 'file-link file-link-directory' : 'file-link'
-  if (mode === 'copy') return `${base} file-link-copy`
-  if (mode === 'link') return `${base} file-link-link`
-  return base
+/** Tooltip / aria: form in plain language + optional status. */
+export function fileLinkTitle(
+  mode: string | null | undefined,
+  kind?: string | null,
+  availability?: LinkAvailability | null,
+  form?: ClassifiedLocalLink['form'] | null,
+) {
+  const resolved = resolveLinkForm(mode, form)
+  const formLabel = resolved === 'relative' ? '库内' : resolved === 'absolute' ? '本机' : (kind === 'directory' ? '目录' : '文件')
+  const kindLabel = kind === 'directory' ? '目录' : '文件'
+  const base = resolved ? `${formLabel}${kindLabel}` : kindLabel
+  const status = fileLinkLabel(mode, kind, availability, form)
+  return status ? `${base} · ${status}` : base
 }
 
-export function fileLinkLabel(mode: string | null | undefined, kind?: string | null) {
-  if (kind === 'directory') return mode === 'copy' ? '目录副本' : '目录'
-  if (mode === 'copy') return '副本'
-  if (mode === 'link') return '外链'
-  return '文件'
+const cacheBySource = new Map<string, Map<string, WorkspaceFileResource>>()
+const relativeExistsBySource = new Map<string, Map<string, boolean>>()
+
+function remember(sourceId: string, items: WorkspaceFileResource[]) {
+  cacheBySource.set(sourceId, new Map(items.map((item) => [item.id, item])))
 }
 
-const cacheByRoot = new Map<string, Map<string, WorkspaceFileResource>>()
+function rememberOne(sourceId: string, item: WorkspaceFileResource) {
+  const map = cacheBySource.get(sourceId) ?? new Map()
+  map.set(item.id, item)
+  cacheBySource.set(sourceId, map)
+}
 
-export async function listWorkspaceFiles(root: string): Promise<WorkspaceFileResource[]> {
-  if (!('__TAURI_INTERNALS__' in window)) return []
-  const trimmed = root.trim()
-  if (!trimmed) return []
-  const list = await invoke<WorkspaceFileResource[]>('list_workspace_files', { root: trimmed })
-  const map = new Map(list.map((item) => [item.id, item]))
-  cacheByRoot.set(trimmed, map)
+export function rememberRelativeExists(sourceId: string, relativePath: string, exists: boolean) {
+  const map = relativeExistsBySource.get(sourceId) ?? new Map()
+  map.set(relativePath, exists)
+  relativeExistsBySource.set(sourceId, map)
+}
+
+export function cachedRelativeExists(sourceId: string | null | undefined, relativePath: string): boolean | null {
+  if (!sourceId) return null
+  const value = relativeExistsBySource.get(sourceId)?.get(relativePath)
+  return value === undefined ? null : value
+}
+
+export async function listRegisteredFiles(source: StorageSource): Promise<WorkspaceFileResource[]> {
+  const list = await blobStoreFor(source).list(source)
+  remember(source.id, list)
   return list
 }
 
-export async function resolveWorkspaceFile(root: string, fileId: string): Promise<WorkspaceFileResource | null> {
-  if (!('__TAURI_INTERNALS__' in window)) return null
-  const trimmed = root.trim()
-  if (!trimmed || !fileId) return null
-  const cached = cacheByRoot.get(trimmed)?.get(fileId)
+export async function resolveRegisteredFile(source: StorageSource, fileId: string): Promise<WorkspaceFileResource | null> {
+  const cached = cacheBySource.get(source.id)?.get(fileId)
   if (cached) return cached
-  try {
-    const item = await invoke<WorkspaceFileResource>('resolve_workspace_file', { root: trimmed, fileId })
-    const map = cacheByRoot.get(trimmed) ?? new Map()
-    map.set(fileId, item)
-    cacheByRoot.set(trimmed, map)
-    return item
-  } catch {
-    return null
-  }
+  const item = await blobStoreFor(source).resolve(source, fileId)
+  if (item) rememberOne(source.id, item)
+  return item
 }
 
-export function cachedFileMode(root: string | null | undefined, fileId: string) {
-  if (!root) return null
-  return cacheByRoot.get(root)?.get(fileId)?.mode ?? null
-}
-
-export function cachedFileKind(root: string | null | undefined, fileId: string) {
-  if (!root) return null
-  return cacheByRoot.get(root)?.get(fileId)?.kind ?? null
-}
-
-export async function openWorkspaceFile(root: string, fileId: string) {
-  const resource = await resolveWorkspaceFile(root, fileId)
+export async function openRegisteredFile(source: StorageSource, fileId: string) {
+  const resource = await resolveRegisteredFile(source, fileId)
   if (!resource) throw new Error(`文件资源不存在：${fileId}`)
   if (!resource.exists) {
     throw new Error(
       resource.mode === 'link'
-        ? `外链失效：${resource.openPath || resource.sourcePath}`
+        ? `找不到已登记的文件：${resource.openPath || resource.sourcePath}`
         : `副本缺失：${resource.openPath || resource.storedPath}`,
     )
   }
-  await openPath(resource.openPath)
+  const store = blobStoreFor(source)
+  if (store.open) {
+    await store.open(source, resource)
+    return resource
+  }
+  await getPlatformAccess().openNative(resource.openPath)
   return resource
 }
 
-export async function ingestWorkspaceFile(
-  root: string,
+export function cachedFileResource(sourceId: string | null | undefined, fileId: string) {
+  if (!sourceId) return null
+  return cacheBySource.get(sourceId)?.get(fileId) ?? null
+}
+
+export function cachedFileMode(sourceId: string | null | undefined, fileId: string) {
+  return cachedFileResource(sourceId, fileId)?.mode ?? null
+}
+
+export function cachedFileKind(sourceId: string | null | undefined, fileId: string) {
+  return cachedFileResource(sourceId, fileId)?.kind ?? null
+}
+
+export function cachedFileExists(sourceId: string | null | undefined, fileId: string): boolean | null {
+  const resource = cachedFileResource(sourceId, fileId)
+  if (!resource) return null
+  return resource.exists
+}
+
+export function resourceAvailability(
+  link: ClassifiedLocalLink,
+  context?: LinkContext | null,
+): LinkAvailability {
+  const sourceId = resolvedSourceId(link, context)
+  const source = sourceById(context?.sources, sourceId)
+  if (link.kind === 'relative') {
+    const exists = link.relativePath ? cachedRelativeExists(sourceId, link.relativePath) : null
+    return availabilityForSource(source, exists)
+  }
+  if (link.kind === 'absolute') return 'unknown'
+  if (!sourceId || !link.fileId) return availabilityForSource(source, null)
+  const cached = cacheBySource.get(sourceId)
+  if (!cached) return availabilityForSource(source, null)
+  const resource = cached.get(link.fileId)
+  if (!resource) return 'missing'
+  return availabilityForSource(source, resource.exists)
+}
+
+export function canRebindRegisteredFile(resource: WorkspaceFileResource | null | undefined) {
+  return Boolean(resource && resource.mode === 'link' && resource.exists === false)
+}
+
+export async function probeRelativePath(source: StorageSource, relativePath: string): Promise<boolean | null> {
+  const rel = relativePath.trim()
+  if (!rel) return false
+  const cached = cachedRelativeExists(source.id, rel)
+  if (cached !== null) return cached
+  const exists = await blobStoreFor(source).existsRelative?.(source, rel) ?? null
+  if (exists !== null) rememberRelativeExists(source.id, rel, exists)
+  return exists
+}
+
+export async function rebindRegisteredFile(
+  source: StorageSource,
+  fileId: string,
+  nativePath: string,
+): Promise<WorkspaceFileResource> {
+  const store = blobStoreFor(source)
+  if (!store.rebind) throw new Error('当前存储源不能重新绑定文件')
+  const item = await store.rebind(source, fileId, nativePath)
+  rememberOne(source.id, item)
+  return item
+}
+
+export async function ingestRegisteredFile(
+  source: StorageSource,
   path: string,
   mode: WorkspaceFileMode = 'link',
   title?: string,
 ): Promise<WorkspaceFileResource> {
-  if (!('__TAURI_INTERNALS__' in window)) {
-    throw new Error('仅桌面端可登记本地文件')
-  }
-  const trimmed = root.trim()
-  if (!trimmed) throw new Error('当前页面未绑定本地存储源')
-  const item = await invoke<WorkspaceFileResource>('ingest_workspace_file', {
-    root: trimmed,
-    path,
-    mode,
-    title: title?.trim() || null,
+  const item = await blobStoreFor(source).ingest(source, path, mode, title)
+  rememberOne(source.id, item)
+  return item
+}
+
+export async function ingestCopiedBlob(
+  source: StorageSource,
+  file: File,
+): Promise<WorkspaceFileResource> {
+  const store = blobStoreFor(source)
+  if (!store.ingestBytes) throw new Error('当前存储源不能导入文件副本')
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  const item = await store.ingestBytes(source, bytes, {
+    name: file.name || 'upload.bin',
+    mime: file.type || undefined,
+    title: file.name || undefined,
   })
-  const map = cacheByRoot.get(trimmed) ?? new Map()
-  map.set(item.id, item)
-  cacheByRoot.set(trimmed, map)
+  rememberOne(source.id, item)
+  if (item.storedPath) rememberRelativeExists(source.id, item.storedPath, true)
   return item
 }

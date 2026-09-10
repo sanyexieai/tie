@@ -117,3 +117,59 @@ test('writePage accepts JSON-wrapped markdown payload and restores markdown body
   assert.ok(!page.markdown.includes('\\"title\\"'))
   assert.ok(!page.markdown.includes('"id":'))
 })
+
+test('writePage rewrites legacy file and path hrefs with sourceId', () => {
+  const root = makeWorkspace()
+  const sourceId = 'src_local_2e27348a0aa628a6'
+  const ws = createWorkspace(root)
+  const created = ws.writePage({
+    title: '旧链迁移',
+    markdown: '# 旧链迁移\n\n[书](tie://file/file_abc)\n[稿](tie://path/docs/a.pdf)\n![](tie://asset/pg_x/a.png)\n',
+  })
+  // no storage source on a brand-new workspace without env; set via existing page
+  fs.writeFileSync(path.join(root, 'pages', `${created.page.id}.md`), frontmatter({
+    ...ws.getById(created.page.id),
+    storageSourceId: sourceId,
+    storageSourceIds: [sourceId],
+  }))
+  const ws2 = createWorkspace(root)
+  const updated = ws2.writePage({
+    pageId: created.page.id,
+    markdown: '# 旧链迁移\n\n[书](tie://file/file_abc)\n[稿](tie://path/docs/a.pdf)\n![](tie://asset/pg_x/a.png)\n',
+  })
+  const page = ws2.getById(updated.page.id)
+  assert.ok(page.markdown.includes(`tie://file/${encodeURIComponent(sourceId)}/file_abc`))
+  assert.ok(page.markdown.includes(`tie://path/${encodeURIComponent(sourceId)}/docs/a.pdf`))
+  assert.ok(page.markdown.includes('tie://asset/pg_x/a.png'))
+})
+
+test('migrationStatus is version-gated and only scans after stamp', () => {
+  const root = makeWorkspace()
+  const ws = createWorkspace(root)
+  ws.writePage({
+    title: '仍含 file',
+    markdown: '# 仍含 file\n\n[旧](file:///tmp/legacy.pdf)\n',
+  })
+
+  const before = ws.migrationStatus({ migrationId: 'href-file-protocol-v1' })
+  assert.equal(before.needsAgentFollowUp, false)
+  assert.equal(before.migrations[0].applied, false)
+  assert.equal(before.migrations[0].agentAction, 'wait_for_app_stamp')
+  assert.equal(before.migrations[0].remaining, 0)
+
+  fs.mkdirSync(path.join(root, '.tie'), { recursive: true })
+  fs.writeFileSync(
+    path.join(root, '.tie', 'migrations.json'),
+    `${JSON.stringify({ applied: ['href-file-protocol-v1'] }, null, 2)}\n`,
+  )
+
+  const after = ws.migrationStatus({ migrationId: 'href-file-protocol-v1' })
+  assert.equal(after.needsAgentFollowUp, true)
+  assert.equal(after.migrations[0].applied, true)
+  assert.equal(after.migrations[0].remaining, 1)
+  assert.equal(after.needsAgent[0].id, 'href-file-protocol-v1')
+  assert.ok(after.migrations[0].remainingPages[0].hrefs[0].startsWith('file://'))
+
+  const unknown = ws.migrationStatus({ migrationId: 'no-such-migration' })
+  assert.ok(unknown.error)
+})

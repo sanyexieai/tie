@@ -15,24 +15,26 @@
 | `tie_write` | 安全写入（自动 frontmatter；更新前写入 `.tie/history`） |
 | `tie_related` | 出链 / 入链 / 子页 / 同标签 |
 | `tie_list_recent` | 最近更新 |
-| `tie_file_ingest` | 登记外部**文件或目录**：`copy` 导入副本 / `link` 外链；返回元数据与 `tie://file/{id}` |
+| `tie_file_ingest` | 登记外部**文件或目录**：`link` 绝对登记 / `copy` 导入相对副本；返回 `url` |
 | `tie_file_get` | 按 fileId 读文件资源元数据 |
 | `tie_file_list` | 列出已登记文件资源 |
 | `tie_file_open_hint` | 返回可打开路径（不替用户打开） |
+| `tie_migration_status` | 版本化迁移 stamp + 是否需 Agent 收尾（**不是**每次更新都要调） |
 
 记忆类型 `kind`：`decision` | `bug` | `preference` | `note`（自动加 `memory` 等标签）。
+
+Skill `tie-update`（`packages/tie-mcp/skills/tie-update`）只跟目录里标了 `agentFollowUp` 的 migration；发布说明未点名时不要因「刚更新」启用。
 
 ## 正文链接协议
 
 | 用途 | 写法 | 桌面样式 |
 |------|------|----------|
 | 页面 | `[[标题]]` / `tie://page/{id}` | 普通链接 |
-| 已登记文件/目录 | `tie://file/{id}`（须 `tie_file_ingest`） | 副本 / 外链 / 目录 |
-| 工作区内相对路径 | `tie://path/{相对路径}`（相对工作区根，禁 `..`） | 相对 |
-| 本机绝对路径 | `file:///...`（不推荐作稳定链接） | 绝对 |
-| 页面图片附件 | `tie://asset/{pageId}/{文件名}` | 图片 |
+| 已登记文件/目录 | `tie://file/{sourceId}/{id}` 或旧写法 `tie://file/{id}` | 登记；缺失会标出 |
+| 工作区内相对路径 | `tie://path/{sourceId}/{相对路径}` | 相对（含 copy 导入） |
+| 页面图片附件 | `tie://asset/{pageId}/{文件名}` | 图片（相对路径 `.tie/assets/{pageId}/{文件名}` 的显示别名） |
 
-文件资源落在工作区 `.tie/files/`（与页面图片附件 `.tie/assets/` 分开）。**外部**资源写 `tie://file/{id}`；**区内**路径写 `tie://path/…`；`file:///` 行为保持独立，不要当作 ingest 替代。
+文件资源落在工作区 `.tie/files/`（与页面图片附件 `.tie/assets/` 分开）。**区外**登记写 `tie://file/…`；**区内**（含 copy）写 `tie://path/…`。不要写 `file:///`。新写入的 `url` 会带上 `sourceId`：优先环境变量 `TIE_SOURCE_ID` / `TIE_STORAGE_SOURCE_ID`，否则从工作区页面的 `storage_source_id` 推断。
 
 ## 准备
 
@@ -158,5 +160,5 @@ TIE_WORKSPACE=/path/to/workspace npm run mcp
 
 - 只读写指定工作区下的 `pages/`、`.tie/history/`、`.tie/files/`
 - 禁止 Agent 手写裸 frontmatter；一律走 `tie_write`
-- 外部文件必须走 `tie_file_ingest` → 正文写 `tie://file/{id}`；工作区内路径写 `tie://path/…`；不要用 `file:///` 冒充稳定资源链接
+- 区外文件走 `tie_file_ingest`（link → `tie://file/…`，copy → `tie://path/…`）；区内路径写 `tie://path/…`；不要用 `file:///`
 - 不要把密钥、token 写入知识库页面

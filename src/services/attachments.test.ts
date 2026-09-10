@@ -64,6 +64,13 @@ describe('attachments', () => {
     })
   })
 
+  it('allows demo source attachments in the browser', () => {
+    expect(assetWriteSourceIds({
+      storageSourceId: 'source-demo-local',
+      storageSourceIds: ['source-demo-local'],
+    })).toEqual(['source-demo-local'])
+  })
+
   it('prepares export bundle and rewrites markdown when assets are unavailable', async () => {
     const page: Page = {
       id: 'pg_export',

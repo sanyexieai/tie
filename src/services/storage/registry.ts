@@ -5,6 +5,7 @@ import { copyPageAssets as copyPageAssetsBetweenSources, ensurePageAssetsOnSourc
 import { mergePagesById, normalizePageSources, pageBoundToSource, pageForStorageWrite, pageMirrorSourceIds, pageSourceIds, pageWriteEqual, remapPageSourceIds, withPageSources } from '@/services/page-sources'
 import { canTransferBetweenSources, transferBlockedMessage } from '@/services/transfer-policy'
 import { isS3SourceId, s3ConnectionForSource, buildS3SourceIdHealingRemap } from '@/services/s3'
+import { migratePageWorkspaceHrefs } from '@/services/link-runtime'
 import { isCloudStorageSourceId } from '@/services/storage-identity'
 import { backendStorageAdapter, loadAllBackendPages } from '@/services/storage/backend-adapter'
 import { backendS3StorageAdapter, loadAllBackendS3Pages } from '@/services/storage/backend-s3-adapter'
@@ -129,7 +130,7 @@ export const storageRegistry = {
   },
 
   async savePage(page: Page, options?: SavePageOptions): Promise<Page> {
-    const normalized = normalizePageSources(page)
+    const normalized = migratePageWorkspaceHrefs(normalizePageSources(page))
     const primaryWrite = options?.writeSourceId ?? normalized.storageSourceId
     if (!options?.force) {
       const latest = await this.readLatestPage({
@@ -139,6 +140,7 @@ export const storageRegistry = {
       if (latest && pageWriteEqual(latest, normalized)) {
         return normalizePageSources({
           ...latest,
+          markdown: normalized.markdown,
           storageSourceId: normalized.storageSourceId,
           storageSourceIds: pageSourceIds(normalized),
         })
@@ -161,6 +163,7 @@ export const storageRegistry = {
     })
     return normalizePageSources({
       ...saved,
+      markdown: saved.markdown || normalized.markdown,
       storageSourceId: normalized.storageSourceId,
       storageSourceIds: pageSourceIds(normalized),
     })
@@ -168,7 +171,7 @@ export const storageRegistry = {
 
   /** 把当前主源内容强制推到所有备份镜像（正文 + 附件）。 */
   async pushPageToMirrors(page: Page): Promise<Page> {
-    const normalized = normalizePageSources(page)
+    const normalized = migratePageWorkspaceHrefs(normalizePageSources(page))
     const mirrors = pageMirrorSourceIds(normalized)
     if (!mirrors.length) return normalized
     for (const sourceId of mirrors) {

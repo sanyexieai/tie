@@ -3,6 +3,7 @@ import { backendService, backendWorkspaceSource, isBackendSourceId, parseBackend
 import { isRetryableStorageError, queueFailureMessage } from '@/services/storage/retry'
 import { emptySyncResult, mergeSyncPages } from '@/services/storage/sync-merge'
 import { syncQueue } from '@/services/storage/sync-queue'
+import { backendWorkspaceBlobStore } from '@/services/storage/blobs-remote'
 import type { SavePageOptions, StorageAdapter, StorageCapabilities, SyncResult, SyncSourceContext } from '@/services/storage/types'
 
 const capabilities: StorageCapabilities = {
@@ -19,6 +20,7 @@ const capabilities: StorageCapabilities = {
 export const backendStorageAdapter: StorageAdapter = {
   kind: 'backend',
   capabilities,
+  blobs: backendWorkspaceBlobStore,
   matches(sourceId) {
     return isBackendSourceId(sourceId)
   },

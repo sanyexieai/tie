@@ -6,6 +6,7 @@ import { emptySyncResult, mergeSyncPages } from '@/services/storage/sync-merge'
 import { syncQueue } from '@/services/storage/sync-queue'
 import type { SavePageOptions, StorageAdapter, StorageCapabilities, SyncSourceContext } from '@/services/storage/types'
 import { isFileSourceId } from '@/services/storage/types'
+import { fileBlobStore } from '@/services/storage/blobs'
 
 const capabilities: StorageCapabilities = {
   load: true,
@@ -25,6 +26,7 @@ async function isTauri() {
 export const fileStorageAdapter: StorageAdapter = {
   kind: 'local',
   capabilities,
+  blobs: fileBlobStore,
   matches(sourceId) {
     return isFileSourceId(sourceId)
   },

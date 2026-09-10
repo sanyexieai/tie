@@ -165,4 +165,51 @@ describe('tie backend api', { concurrency: 1 }, () => {
     assert.equal(listed.response.status, 200)
     assert.deepEqual(listed.body.assets, ['a1.png'])
   })
+
+  it('stores workspace file registry and copy blobs', async () => {
+    const fileId = 'file_aabbccddeeff0011'
+    const meta = await request(`/api/v1/workspaces/${workspaceId}/files/${fileId}`, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: fileId,
+        title: '手册',
+        kind: 'file',
+        mode: 'copy',
+        ext: 'pdf',
+        mime: 'application/pdf',
+        size: 4,
+        sourcePath: '/tmp/a.pdf',
+        storedPath: `.tie/files/${fileId}/original.pdf`,
+      }),
+    })
+    assert.equal(meta.response.status, 200)
+    assert.equal(meta.body.id, fileId)
+
+    const uploaded = await request(`/api/v1/workspaces/${workspaceId}/files/${fileId}/blob/original.pdf`, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/octet-stream',
+      },
+      body: Buffer.from('%PDF'),
+    })
+    assert.equal(uploaded.response.status, 201)
+
+    const listed = await request(`/api/v1/workspaces/${workspaceId}/files`, {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    assert.equal(listed.response.status, 200)
+    assert.equal(listed.body.files[0].id, fileId)
+    assert.equal(listed.body.files[0].exists, true)
+
+    const blob = await request(`/api/v1/workspaces/${workspaceId}/files/${fileId}/blob`, {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    assert.equal(blob.response.status, 200)
+    assert.equal(Buffer.from(blob.body).toString(), '%PDF')
+  })
 })

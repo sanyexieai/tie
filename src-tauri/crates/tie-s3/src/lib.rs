@@ -7,6 +7,7 @@ use minio::s3::{
     MinioClient, MinioClientBuilder,
 };
 use serde::{Deserialize, Serialize};
+use tie_common::file_meta;
 use tie_common::{Page, PageRevision, MAX_PAGE_REVISIONS};
 use tie_local::{frontmatter, page_has_changed, parse_page, revision_id, sanitize_asset_name};
 
@@ -450,4 +451,352 @@ pub async fn read_s3_page_asset(
         .await
         .map_err(|error| format!("无法读取 S3 附件内容：{error}"))?
         .to_vec())
+}
+
+const S3_FILES_PREFIX: &str = "tie/files/";
+const MAX_REMOTE_COPY_BYTES: usize = 20 * 1024 * 1024;
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileResource {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub mode: String,
+    pub ext: String,
+    pub mime: String,
+    pub size: u64,
+    pub source_path: String,
+    pub stored_path: String,
+    pub open_path: String,
+    pub exists: bool,
+    pub updated_at: String,
+}
+
+pub fn s3_files_index_object() -> &'static str {
+    "tie/files/index.json"
+}
+
+pub fn s3_file_meta_object(file_id: &str) -> String {
+    format!("{S3_FILES_PREFIX}{file_id}/meta.json")
+}
+
+pub fn s3_file_blob_object(file_id: &str, name: &str) -> String {
+    format!("{S3_FILES_PREFIX}{file_id}/{name}")
+}
+
+fn sanitize_file_id(file_id: &str) -> Result<String, String> {
+    let id = file_id.trim();
+    if id.starts_with("file_")
+        && id.len() <= 40
+        && id[5..].chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        return Ok(id.to_owned());
+    }
+    Err("fileId 无效".into())
+}
+
+fn sanitize_blob_name(name: &str) -> Result<String, String> {
+    let base = std::path::Path::new(name)
+        .file_name()
+        .and_then(|item| item.to_str())
+        .unwrap_or("");
+    if base.is_empty() || base == "." || base == ".." || !base.chars().all(|ch| {
+        ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-'
+    }) {
+        return Err("副本文件名无效".into());
+    }
+    Ok(base.to_owned())
+}
+
+fn is_missing_object(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("nosuchkey") || lower.contains("not found") || lower.contains("404")
+}
+
+async fn put_s3_bytes(
+    connection: &S3Connection,
+    credential_payload: &str,
+    key: &str,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let (client, bucket) = s3_client(connection, credential_payload)?;
+    client
+        .put_object_content(bucket, key, ObjectContent::from(data))
+        .map_err(|error| format!("无法创建 S3 写入请求：{error}"))?
+        .build()
+        .send()
+        .await
+        .map_err(|error| format!("无法写入 S3 对象：{error}"))?;
+    Ok(())
+}
+
+async fn get_s3_bytes(
+    connection: &S3Connection,
+    credential_payload: &str,
+    key: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let (client, bucket) = s3_client(connection, credential_payload)?;
+    let response = match client
+        .get_object(bucket, key)
+        .map_err(|error| format!("无法读取 S3 对象：{error}"))?
+        .build()
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let message = error.to_string();
+            if is_missing_object(&message) {
+                return Ok(None);
+            }
+            return Err(format!("无法下载 S3 对象：{message}"));
+        }
+    };
+    Ok(Some(
+        response
+            .into_bytes()
+            .await
+            .map_err(|error| format!("无法读取 S3 对象内容：{error}"))?
+            .to_vec(),
+    ))
+}
+
+async fn copy_blob_exists(
+    connection: &S3Connection,
+    credential_payload: &str,
+    file_id: &str,
+) -> Result<bool, String> {
+    let (client, bucket) = s3_client(connection, credential_payload)?;
+    let keys = list_s3_object_keys(
+        &client,
+        bucket,
+        &format!("{S3_FILES_PREFIX}{file_id}/"),
+    )
+    .await?;
+    Ok(keys
+        .iter()
+        .any(|key| !key.ends_with("/meta.json") && !key.ends_with("meta.json")))
+}
+
+fn resource_from_file_meta(meta: &serde_json::Value) -> Option<WorkspaceFileResource> {
+    let id = meta.get("id")?.as_str()?.to_owned();
+    let title = meta
+        .get("title")
+        .and_then(|item| item.as_str())
+        .unwrap_or(&id)
+        .to_owned();
+    let mode = meta.get("mode")?.as_str()?.to_owned();
+    let kind = meta
+        .get("kind")
+        .and_then(|item| item.as_str())
+        .unwrap_or("file")
+        .to_owned();
+    let ext = meta
+        .get("ext")
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let mime = meta
+        .get("mime")
+        .and_then(|item| item.as_str())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let size = meta.get("size").and_then(|item| item.as_u64()).unwrap_or(0);
+    let source_path = file_meta::source_path_from_meta(meta);
+    let stored_path = meta
+        .get("storedPath")
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let updated_at = meta
+        .get("updatedAt")
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let open_path = if mode == "copy" {
+        stored_path.clone()
+    } else if stored_path.trim().is_empty() {
+        source_path.clone()
+    } else {
+        stored_path.clone()
+    };
+    Some(WorkspaceFileResource {
+        id,
+        title,
+        kind,
+        mode,
+        ext,
+        mime,
+        size,
+        source_path,
+        stored_path,
+        open_path,
+        exists: false,
+        updated_at,
+    })
+}
+
+async fn read_s3_json(
+    connection: &S3Connection,
+    credential_payload: &str,
+    key: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(bytes) = get_s3_bytes(connection, credential_payload, key).await? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| format!("S3 JSON 无效：{error}"))
+}
+
+async fn write_s3_json(
+    connection: &S3Connection,
+    credential_payload: &str,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let raw = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    put_s3_bytes(connection, credential_payload, key, raw).await
+}
+
+pub async fn list_s3_workspace_files(
+    connection: &S3Connection,
+    credential_payload: &str,
+) -> Result<Vec<WorkspaceFileResource>, String> {
+    let index = read_s3_json(connection, credential_payload, s3_files_index_object())
+        .await?
+        .unwrap_or_else(|| serde_json::json!([]));
+    let entries = index.as_array().cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    for entry in entries {
+        let id = entry
+            .get("id")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default();
+        if sanitize_file_id(id).is_err() {
+            continue;
+        }
+        let Some(meta) =
+            read_s3_json(connection, credential_payload, &s3_file_meta_object(id)).await?
+        else {
+            continue;
+        };
+        if let Some(mut resource) = resource_from_file_meta(&meta) {
+            if resource.mode == "copy" {
+                resource.exists = copy_blob_exists(connection, credential_payload, &resource.id).await?;
+            }
+            out.push(resource);
+        }
+    }
+    Ok(out)
+}
+
+pub async fn resolve_s3_workspace_file(
+    connection: &S3Connection,
+    credential_payload: &str,
+    file_id: &str,
+) -> Result<WorkspaceFileResource, String> {
+    let id = sanitize_file_id(file_id)?;
+    let meta = read_s3_json(connection, credential_payload, &s3_file_meta_object(&id))
+        .await?
+        .ok_or_else(|| format!("文件资源不存在：{id}"))?;
+    let mut resource =
+        resource_from_file_meta(&meta).ok_or_else(|| format!("文件资源元数据无效：{id}"))?;
+    if resource.mode == "copy" {
+        resource.exists = copy_blob_exists(connection, credential_payload, &resource.id).await?;
+    }
+    Ok(resource)
+}
+
+pub async fn read_s3_workspace_file_bytes(
+    connection: &S3Connection,
+    credential_payload: &str,
+    file_id: &str,
+) -> Result<Vec<u8>, String> {
+    let resource = resolve_s3_workspace_file(connection, credential_payload, file_id).await?;
+    if resource.mode != "copy" {
+        return Err("只有导入副本才能从存储源读取字节".into());
+    }
+    let name = std::path::Path::new(&resource.stored_path)
+        .file_name()
+        .and_then(|item| item.to_str())
+        .unwrap_or("original.bin");
+    let name = sanitize_blob_name(name)?;
+    get_s3_bytes(
+        connection,
+        credential_payload,
+        &s3_file_blob_object(&resource.id, &name),
+    )
+    .await?
+    .ok_or_else(|| format!("副本缺失：{}", resource.stored_path))
+}
+
+pub async fn put_s3_workspace_file_blob(
+    connection: &S3Connection,
+    credential_payload: &str,
+    file_id: &str,
+    blob_name: &str,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let id = sanitize_file_id(file_id)?;
+    let name = sanitize_blob_name(blob_name)?;
+    if data.is_empty() {
+        return Err("导入内容为空".into());
+    }
+    if data.len() > MAX_REMOTE_COPY_BYTES {
+        return Err("远程导入不能超过 20 MB，请改用登记或缩小文件".into());
+    }
+    put_s3_bytes(
+        connection,
+        credential_payload,
+        &s3_file_blob_object(&id, &name),
+        data,
+    )
+    .await
+}
+
+pub async fn upsert_s3_workspace_file_meta(
+    connection: &S3Connection,
+    credential_payload: &str,
+    meta: serde_json::Value,
+) -> Result<WorkspaceFileResource, String> {
+    let meta = file_meta::normalize_file_meta(&meta, None);
+    let resource =
+        resource_from_file_meta(&meta).ok_or_else(|| "文件资源元数据无效".to_string())?;
+    let id = sanitize_file_id(&resource.id)?;
+    write_s3_json(
+        connection,
+        credential_payload,
+        &s3_file_meta_object(&id),
+        &meta,
+    )
+    .await?;
+    let mut index = read_s3_json(connection, credential_payload, s3_files_index_object())
+        .await?
+        .unwrap_or_else(|| serde_json::json!([]));
+    let mut entries = index.as_array().cloned().unwrap_or_default();
+    entries.retain(|entry| entry.get("id").and_then(|item| item.as_str()) != Some(id.as_str()));
+    entries.insert(
+        0,
+        serde_json::json!({
+            "id": id,
+            "title": resource.title,
+            "kind": resource.kind,
+            "mode": resource.mode,
+            "ext": resource.ext,
+            "mime": resource.mime,
+            "size": resource.size,
+            "updatedAt": resource.updated_at,
+        }),
+    );
+    index = serde_json::Value::Array(entries);
+    write_s3_json(
+        connection,
+        credential_payload,
+        s3_files_index_object(),
+        &index,
+    )
+    .await?;
+    resolve_s3_workspace_file(connection, credential_payload, &id).await
 }

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileMetaToJson, normalizeFileMeta } from '../../../shared/file-meta.js'
 import { pathsEqual, resolveFsPath } from './fs-path.js'
 
 const TEXT_EXTS = new Set([
@@ -66,6 +67,46 @@ function readTextPreview(filePath, ext, maxChars = 1200) {
   }
 }
 
+const MAX_COPY_FILE_BYTES = 50 * 1024 * 1024
+const MAX_COPY_DIR_BYTES = 50 * 1024 * 1024
+const MAX_COPY_DIR_FILES = 200
+const MAX_COPY_DIR_DEPTH = 8
+
+function assertCopyLimits(absPath, isDirectory, size) {
+  if (!isDirectory) {
+    if (size > MAX_COPY_FILE_BYTES) {
+      throw new Error('导入文件不能超过 50 MB，请改用登记（绝对链接）')
+    }
+    return
+  }
+  const walk = (current, depth) => {
+    if (depth > MAX_COPY_DIR_DEPTH) {
+      throw new Error(`导入目录不能超过 ${MAX_COPY_DIR_DEPTH} 层，请改用登记或缩小范围`)
+    }
+    let totalSize = 0
+    let files = 0
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) {
+        const nested = walk(full, depth + 1)
+        totalSize += nested.size
+        files += nested.files
+      } else if (entry.isFile()) {
+        files += 1
+        try { totalSize += fs.statSync(full).size } catch { /* ignore */ }
+      }
+      if (files > MAX_COPY_DIR_FILES) {
+        throw new Error(`导入目录不能超过 ${MAX_COPY_DIR_FILES} 个文件，请改用登记或缩小范围`)
+      }
+      if (totalSize > MAX_COPY_DIR_BYTES) {
+        throw new Error('导入目录不能超过 50 MB，请改用登记或缩小范围')
+      }
+    }
+    return { size: totalSize, files }
+  }
+  walk(absPath, 1)
+}
+
 function copyDirectoryRecursive(src, dest) {
   fs.mkdirSync(dest, { recursive: true })
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
@@ -98,25 +139,41 @@ function directoryStats(dirPath) {
 
 function directoryPreview(dirPath, maxEntries = 24) {
   try {
-    const names = fs.readdirSync(dirPath).slice(0, maxEntries)
-    if (!names.length) return '(空目录)'
-    const more = fs.readdirSync(dirPath).length > maxEntries ? '\n…' : ''
-    return names.map((name) => {
-      const full = path.join(dirPath, name)
-      try {
-        return fs.statSync(full).isDirectory() ? `${name}/` : name
-      } catch {
-        return name
+    const dir = fs.opendirSync(dirPath)
+    const names = []
+    let truncated = false
+    try {
+      let entry = dir.readSync()
+      while (entry) {
+        if (names.length >= maxEntries) {
+          truncated = true
+          break
+        }
+        try {
+          const full = path.join(dirPath, entry.name)
+          const isDir = entry.isDirectory() || (() => {
+            try { return fs.statSync(full).isDirectory() } catch { return false }
+          })()
+          names.push(isDir ? `${entry.name}/` : entry.name)
+        } catch {
+          names.push(entry.name)
+        }
+        entry = dir.readSync()
       }
-    }).join('\n') + more
+    } finally {
+      dir.closeSync()
+    }
+    if (!names.length) return '(空目录)'
+    return names.join('\n') + (truncated ? '\n…' : '')
   } catch {
     return null
   }
 }
 
-export function createFileRegistry(workspaceRoot) {
+export function createFileRegistry(workspaceRoot, options = {}) {
   const filesRoot = path.join(workspaceRoot, '.tie', 'files')
   const indexPath = path.join(filesRoot, 'index.json')
+  const getSourceId = typeof options.getSourceId === 'function' ? options.getSourceId : null
 
   function ensureRoot() {
     fs.mkdirSync(filesRoot, { recursive: true })
@@ -153,9 +210,12 @@ export function createFileRegistry(workspaceRoot) {
   }
 
   function writeMeta(meta) {
-    const dir = path.join(filesRoot, meta.id)
+    const normalized = normalizeFileMeta(meta, {
+      sourceId: typeof getSourceId === 'function' ? getSourceId() : '',
+    })
+    const dir = path.join(filesRoot, normalized.id)
     fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(metaPath(meta.id), `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
+    fs.writeFileSync(metaPath(normalized.id), `${JSON.stringify(fileMetaToJson(normalized), null, 2)}\n`, 'utf8')
   }
 
   function upsertIndexEntry(meta) {
@@ -187,10 +247,31 @@ export function createFileRegistry(workspaceRoot) {
       if (!meta) continue
       if (mode && meta.mode !== mode) continue
       if (sha256 && meta.sha256 && meta.sha256 === sha256) return meta
-      if (absPath && pathsEqual(meta.sourcePath, absPath) && meta.mode === mode) return meta
-      if (mode === 'link' && absPath && pathsEqual(meta.storedPath, absPath)) return meta
+      const locatorPath = meta.sourcePath || meta.locator?.desktopPath
+      if (absPath && locatorPath && pathsEqual(locatorPath, absPath) && meta.mode === mode) return meta
+      if (mode === 'link' && absPath && pathsEqual(meta.storedPath || locatorPath, absPath)) return meta
     }
     return null
+  }
+
+  function resourceUrl(meta) {
+    const sourceId = String(
+      (typeof getSourceId === 'function' ? getSourceId() : '')
+      || process.env.TIE_SOURCE_ID
+      || process.env.TIE_STORAGE_SOURCE_ID
+      || '',
+    ).trim()
+    const withSource = (prefix, rest) => (
+      sourceId
+        ? `${prefix}${encodeURIComponent(sourceId)}/${rest}`
+        : `${prefix}${rest}`
+    )
+    if (meta.mode === 'copy' && meta.storedPath) {
+      const relative = String(meta.storedPath).replace(/\\/g, '/').replace(/^\.\/+/, '')
+      const encoded = relative.split('/').filter(Boolean).map((segment) => encodeURIComponent(segment)).join('/')
+      return withSource('tie://path/', encoded)
+    }
+    return withSource('tie://file/', meta.id)
   }
 
   function summarize(meta) {
@@ -212,7 +293,13 @@ export function createFileRegistry(workspaceRoot) {
       entryCount: meta.entryCount ?? null,
       createdAt: meta.createdAt,
       updatedAt: meta.updatedAt,
-      url: `tie://file/${meta.id}`,
+      sourceId: String(
+        (typeof getSourceId === 'function' ? getSourceId() : '')
+        || process.env.TIE_SOURCE_ID
+        || process.env.TIE_STORAGE_SOURCE_ID
+        || '',
+      ).trim() || null,
+      url: resourceUrl(meta),
     }
   }
 
@@ -259,7 +346,7 @@ export function createFileRegistry(workspaceRoot) {
         ? (isDirectory
           ? `可用系统文件管理器打开目录：${openPath}`
           : `可用系统默认应用打开：${openPath}`)
-        : `路径不可用（${meta.mode === 'link' ? '外链失效' : '副本缺失'}）：${openPath || '未知'}`,
+        : `路径不可用（${meta.mode === 'link' ? '找不到已登记文件' : '副本缺失'}）：${openPath || '未知'}`,
     }
   }
 
@@ -283,10 +370,18 @@ export function createFileRegistry(workspaceRoot) {
     const ext = isDirectory ? 'dir' : extensionOf(absPath)
     const mime = isDirectory ? 'inode/directory' : guessMime(ext)
     const sha256 = !isDirectory && normalizedMode === 'copy' ? sha256File(absPath) : null
-    const dirStats = isDirectory ? directoryStats(absPath) : null
+    // link 不扫树：大模型库等目录会卡死；copy 才需要统计体积/数量做限额
+    const dirStats = isDirectory && normalizedMode === 'copy' ? directoryStats(absPath) : null
+    if (normalizedMode === 'copy') {
+      assertCopyLimits(absPath, isDirectory, isDirectory ? (dirStats?.size ?? 0) : stat.size)
+    }
 
     const existing = findExisting({ absPath, sha256, mode: normalizedMode })
     if (existing) {
+      // link 已登记则直接复用，勿再扫大目录做 preview/stats（会卡死）
+      if (normalizedMode === 'link') {
+        return { ...summarize(existing), created: false }
+      }
       const preview = existing.preview
         ?? (isDirectory ? directoryPreview(absPath) : readTextPreview(absPath, ext))
       let changed = false

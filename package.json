@@ -1,7 +1,7 @@
 {
   "name": "tie",
   "private": true,
-  "version": "1.0.34",
+  "version": "1.0.35",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -25,6 +25,7 @@
     "android:debug": "bash scripts/android-debug.sh",
     "mcp": "node packages/tie-mcp/src/server.js",
     "mcp:setup": "node scripts/setup-codex-mcp.mjs",
+    "migrate:file-hrefs": "node scripts/migrate-file-hrefs.mjs",
     "test:mcp": "npm --prefix packages/tie-mcp test",
     "release": "node scripts/release-version.mjs"
   },

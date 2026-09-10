@@ -25,6 +25,7 @@ import { isRetryableStorageError, queueFailureMessage } from '@/services/storage
 import { pageBoundToSource } from '@/services/page-sources'
 import { emptySyncResult, mergeSyncPages } from '@/services/storage/sync-merge'
 import { syncQueue } from '@/services/storage/sync-queue'
+import { s3BlobStore } from '@/services/storage/blobs-remote'
 import type { S3ConnectionInput, SavePageOptions, StorageAdapter, StorageCapabilities, SyncResult, SyncSourceContext } from '@/services/storage/types'
 
 const capabilities: StorageCapabilities = {
@@ -116,6 +117,7 @@ async function loadIndexedPages(sourceId: string, context?: SyncSourceContext) {
 export const s3StorageAdapter: StorageAdapter = {
   kind: 's3',
   capabilities,
+  blobs: s3BlobStore,
   matches(sourceId) {
     return isS3SourceId(sourceId)
   },

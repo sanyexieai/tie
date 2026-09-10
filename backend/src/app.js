@@ -16,6 +16,11 @@ import {
   listProviderPageIds,
   listProviderRevisions,
   listProviderAssetNames,
+  listProviderFiles,
+  getProviderFile,
+  upsertProviderFileMeta,
+  putProviderFileBlob,
+  getProviderFileBlob,
   putProviderAsset,
   putProviderPage,
 } from './s3.js'
@@ -33,6 +38,13 @@ import {
   readWorkspaceRevision,
   saveWorkspacePage,
 } from './workspace-pages.js'
+import {
+  listWorkspaceFiles,
+  getWorkspaceFile,
+  upsertWorkspaceFileMeta,
+  saveWorkspaceFileBlob,
+  readWorkspaceFileBlob,
+} from './workspace-files.js'
 import { assertAssetPayload, mimeFromAssetName, sanitizeAssetName } from './assets.js'
 import { suggestTags } from './ai.js'
 import { assertProductionReady, createCorsMiddleware, resolveJwtSecret } from './config.js'
@@ -434,6 +446,99 @@ app.get('/api/v1/providers/:providerId/pages/:pageId/assets', auth, async (req, 
     const bucket = String(provider.publicConfig.bucket ?? '')
     const assets = await listProviderAssetNames(client, bucket, req.params.pageId)
     res.json({ assets })
+  } catch (error) { handleError(res, error) }
+})
+
+app.get('/api/v1/workspaces/:workspaceId/files', auth, (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  res.json({ files: listWorkspaceFiles(workspace.id) })
+})
+
+app.get('/api/v1/workspaces/:workspaceId/files/:fileId', auth, (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try {
+    res.json(getWorkspaceFile(workspace.id, req.params.fileId))
+  } catch (error) { handleError(res, error) }
+})
+
+app.put('/api/v1/workspaces/:workspaceId/files/:fileId', auth, (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try {
+    res.json(upsertWorkspaceFileMeta(workspace.id, { ...req.body, id: req.params.fileId }))
+  } catch (error) { handleError(res, error) }
+})
+
+app.put('/api/v1/workspaces/:workspaceId/files/:fileId/blob/:blobName', auth, express.raw({ type: 'application/octet-stream', limit: '20mb' }), (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try {
+    const data = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? [])
+    const blobName = saveWorkspaceFileBlob(workspace.id, req.params.fileId, req.params.blobName, data)
+    res.status(201).json({ blobName })
+  } catch (error) { handleError(res, error) }
+})
+
+app.get('/api/v1/workspaces/:workspaceId/files/:fileId/blob', auth, (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try {
+    const blob = readWorkspaceFileBlob(workspace.id, req.params.fileId)
+    res.setHeader('content-type', 'application/octet-stream')
+    res.setHeader('content-disposition', `attachment; filename="${blob.name}"`)
+    res.send(blob.data)
+  } catch (error) { handleError(res, error) }
+})
+
+app.get('/api/v1/providers/:providerId/files', auth, async (req, res) => {
+  try {
+    const provider = findProvider(req.params.providerId, req.user.sub)
+    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
+    const client = createS3Client(provider.publicConfig, provider.credentials)
+    const files = await listProviderFiles(client, String(provider.publicConfig.bucket ?? ''))
+    res.json({ files })
+  } catch (error) { handleError(res, error) }
+})
+
+app.get('/api/v1/providers/:providerId/files/:fileId', auth, async (req, res) => {
+  try {
+    const provider = findProvider(req.params.providerId, req.user.sub)
+    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
+    const client = createS3Client(provider.publicConfig, provider.credentials)
+    res.json(await getProviderFile(client, String(provider.publicConfig.bucket ?? ''), req.params.fileId))
+  } catch (error) { handleError(res, error) }
+})
+
+app.put('/api/v1/providers/:providerId/files/:fileId', auth, async (req, res) => {
+  try {
+    const provider = findProvider(req.params.providerId, req.user.sub)
+    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
+    const client = createS3Client(provider.publicConfig, provider.credentials)
+    res.json(await upsertProviderFileMeta(client, String(provider.publicConfig.bucket ?? ''), { ...req.body, id: req.params.fileId }))
+  } catch (error) { handleError(res, error) }
+})
+
+app.put('/api/v1/providers/:providerId/files/:fileId/blob/:blobName', auth, express.raw({ type: 'application/octet-stream', limit: '20mb' }), async (req, res) => {
+  try {
+    const provider = findProvider(req.params.providerId, req.user.sub)
+    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
+    const data = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? [])
+    const client = createS3Client(provider.publicConfig, provider.credentials)
+    const blobName = await putProviderFileBlob(client, String(provider.publicConfig.bucket ?? ''), req.params.fileId, req.params.blobName, data)
+    res.status(201).json({ blobName })
+  } catch (error) { handleError(res, error) }
+})
+
+app.get('/api/v1/providers/:providerId/files/:fileId/blob', auth, async (req, res) => {
+  try {
+    const provider = findProvider(req.params.providerId, req.user.sub)
+    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
+    const client = createS3Client(provider.publicConfig, provider.credentials)
+    const data = await getProviderFileBlob(client, String(provider.publicConfig.bucket ?? ''), req.params.fileId)
+    res.setHeader('content-type', 'application/octet-stream')
+    res.send(data)
   } catch (error) { handleError(res, error) }
 })
 

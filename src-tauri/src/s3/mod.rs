@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tie_storage::s3::{S3Connection, S3PageIndexEntry};
 
+pub(crate) mod files;
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::credentials;
 

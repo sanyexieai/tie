@@ -1,6 +1,13 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { Page } from '@/types'
 import {
+  ASSET_URL_PREFIX,
+  assetRelativePath,
+  assetToPathUrl,
+  buildAssetUrl,
+  parseAssetUrl,
+} from '@/services/link-runtime'
+import {
   backendService,
   isBackendManagedS3SourceId,
   isBackendSourceId,
@@ -9,23 +16,15 @@ import {
 } from '@/services/backend'
 import { isS3SourceId, loadLocalS3Providers, s3ConnectionForSource, s3SourceId } from '@/services/s3'
 import { pageCloudSourceIds, pageSourceIds } from '@/services/page-sources'
-import { isFileSourceId } from '@/services/storage/types'
+import { blobStoreFor } from '@/services/storage/blobs'
+import { isFileSourceId, sourceStubFromId } from '@/services/storage/types'
 
-export const ASSET_URL_PREFIX = 'tie://asset/'
-
-export function buildAssetUrl(pageId: string, assetName: string) {
-  return `${ASSET_URL_PREFIX}${pageId}/${assetName}`
-}
-
-export function parseAssetUrl(src: string) {
-  if (!src.startsWith(ASSET_URL_PREFIX)) return null
-  const rest = src.slice(ASSET_URL_PREFIX.length)
-  const slash = rest.indexOf('/')
-  if (slash <= 0) return null
-  const pageId = rest.slice(0, slash)
-  const assetName = rest.slice(slash + 1)
-  if (!pageId || !assetName) return null
-  return { pageId, assetName }
+export {
+  ASSET_URL_PREFIX,
+  assetRelativePath,
+  assetToPathUrl,
+  buildAssetUrl,
+  parseAssetUrl,
 }
 
 export function collectAssetNamesFromMarkdown(markdown: string, pageId: string) {
@@ -148,6 +147,7 @@ function canStoreAssetsOnSource(sourceId: string) {
   if (isBackendSourceId(sourceId) || isBackendManagedS3SourceId(sourceId)) {
     return Boolean(backendService.loadProfile().accessToken)
   }
+  if (sourceId === 'source-demo-local') return true
   if (!('__TAURI_INTERNALS__' in window)) return false
   return isFileSourceId(sourceId) || isS3SourceId(sourceId)
 }
@@ -165,40 +165,10 @@ export function assetWriteSourceIds(page: Pick<Page, 'storageSourceId' | 'storag
 }
 
 async function readPageAssetFromSource(page: Page, sourceId: string, assetName: string): Promise<Uint8Array> {
-  const scoped = { ...page, storageSourceId: sourceId }
-  if (isBackendSourceId(sourceId)) {
-    const profile = backendService.loadProfile()
-    if (!profile.accessToken) throw new Error('请先连接自定义后台')
-    return toUint8Array(await backendService.readWorkspacePageAsset(
-      profile,
-      parseBackendWorkspaceId(sourceId),
-      page.id,
-      assetName,
-    ))
-  }
-  if (isBackendManagedS3SourceId(sourceId)) {
-    const profile = backendService.loadProfile()
-    if (!profile.accessToken) throw new Error('请先连接自定义后台')
-    return toUint8Array(await backendService.readProviderPageAsset(
-      profile,
-      parseBackendProviderId(sourceId),
-      page.id,
-      assetName,
-    ))
-  }
-  if (isS3SourceId(sourceId)) {
-    const bytes = await invoke<unknown>('read_s3_page_asset', {
-      connection: s3ConnectionForSource(sourceId),
-      page: scoped,
-      assetName,
-    })
-    return toUint8Array(bytes)
-  }
-  if (isFileSourceId(sourceId)) {
-    const bytes = await invoke<unknown>('read_file_page_asset', { page: scoped, assetName })
-    return toUint8Array(bytes)
-  }
-  throw new Error('该存储源不支持附件')
+  const source = sourceStubFromId(sourceId)
+  const store = blobStoreFor(source)
+  if (!store.readRelative) throw new Error('该存储源不支持附件')
+  return toUint8Array(await store.readRelative(source, assetRelativePath(page.id, assetName)))
 }
 
 async function readPageAsset(page: Page, assetName: string): Promise<Uint8Array> {
@@ -223,47 +193,10 @@ async function readPageAsset(page: Page, assetName: string): Promise<Uint8Array>
 }
 
 async function writePageAssetToSource(page: Page, sourceId: string, assetName: string, data: Uint8Array) {
-  const scoped = { ...page, storageSourceId: sourceId }
-  if (isBackendSourceId(sourceId)) {
-    const profile = backendService.loadProfile()
-    if (!profile.accessToken) throw new Error('请先连接自定义后台')
-    await backendService.uploadWorkspacePageAsset(
-      profile,
-      parseBackendWorkspaceId(sourceId),
-      page.id,
-      assetName,
-      data,
-    )
-    return
-  }
-  if (isBackendManagedS3SourceId(sourceId)) {
-    const profile = backendService.loadProfile()
-    if (!profile.accessToken) throw new Error('请先连接自定义后台')
-    await backendService.uploadProviderPageAsset(
-      profile,
-      parseBackendProviderId(sourceId),
-      page.id,
-      assetName,
-      data,
-    )
-    return
-  }
-  if (isS3SourceId(sourceId)) {
-    if (!(await isTauri())) throw new Error('S3 附件仅支持桌面端')
-    await invoke<string>('save_s3_page_asset', {
-      connection: s3ConnectionForSource(sourceId),
-      page: scoped,
-      fileName: assetName,
-      data: [...data],
-    })
-    return
-  }
-  if (isFileSourceId(sourceId)) {
-    if (!(await isTauri())) throw new Error('附件上传仅支持桌面端')
-    await invoke<string>('save_file_page_asset', { page: scoped, fileName: assetName, data: [...data] })
-    return
-  }
-  throw new Error('该存储源不支持附件')
+  const source = sourceStubFromId(sourceId)
+  const store = blobStoreFor(source)
+  if (!store.writeRelative) throw new Error('该存储源不支持附件')
+  await store.writeRelative(source, assetRelativePath(page.id, assetName), data)
 }
 
 async function writePageAsset(page: Page, assetName: string, data: Uint8Array) {

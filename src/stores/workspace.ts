@@ -10,6 +10,8 @@ import { dedupeStorageSources, isWorkspaceFileSource, uniqueSourceIds } from '@/
 import { sourceStatusStore, syncQueue, storageRegistry } from '@/services/storage'
 import { transferPreservesHistory } from '@/services/transfer-policy'
 import { isMobileSupportedStorageKind, isMobileSupportedStorageSource, usesMobileUi } from '@/services/platform'
+import { migratePageWorkspaceHrefs } from '@/services/link-runtime'
+import { runFileHrefMigrationOnce } from '@/services/workspace-migrations'
 import { workspaceService } from '@/services/workspace'
 import { useBackendStore } from '@/stores/backend'
 import type { SyncConflict, SyncResult } from '@/services/storage/types'
@@ -291,6 +293,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         : snapshot.pages
       workspace.value = snapshot.workspace
       setPages(healed)
+      void persistLegacyWorkspaceHrefs(healed)
+      void runPendingWorkspaceMigrations()
       const preferences = workspaceService.loadPreferences(snapshot.workspace.id)
       favoritePageIds.value = preferences.favoritePageIds
       recentPageIds.value = preferences.recentPageIds
@@ -346,6 +350,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       const { snapshot, syncResults } = await workspaceService.loadWithSync(pages.value)
       workspace.value = snapshot.workspace
       setPages([...snapshot.pages, ...pages.value])
+      void persistLegacyWorkspaceHrefs(snapshot.pages)
       applySyncResults(syncResults)
       syncStorageSourceOrder()
     } catch (error) {
@@ -379,6 +384,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     // 快照未带回的本机页（同步缺口、仅内存）不能静默丢掉。
     const retained = [...beforeById.values()].filter((page) => !incomingIds.has(page.id))
     setPages([...incoming, ...retained])
+    void persistLegacyWorkspaceHrefs(incoming)
     applySyncResults(syncResults)
     const availablePageIds = new Set(pages.value.filter((page) => !page.deletedAt).map((page) => page.id))
     favoritePageIds.value = favoritePageIds.value.filter((pageId) => availablePageIds.has(pageId))
@@ -789,10 +795,45 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
+  async function runPendingWorkspaceMigrations() {
+    try {
+      await runFileHrefMigrationOnce({
+        pages: pages.value,
+        sources: allSources.value,
+        adoptPageMarkdown: (pageId, markdown) => {
+          pages.value = pages.value.map((item) => (
+            item.id === pageId ? { ...item, markdown } : item
+          ))
+        },
+        persistPage: async (page) => {
+          await persist(page)
+        },
+      })
+    } catch (error) {
+      console.warn('[tie] workspace migration failed', error)
+    }
+  }
+
+  /** Cheap idempotent sourceId backfill only — not file:/// (that is a one-shot update migration). */
+  async function persistLegacyWorkspaceHrefs(originals: Page[]) {
+    for (const page of originals) {
+      if (page.deletedAt) continue
+      const migrated = migratePageWorkspaceHrefs(page)
+      if (migrated.markdown === page.markdown) continue
+      const current = pages.value.find((item) => item.id === page.id)
+      if (current && current.markdown !== page.markdown && current.markdown !== migrated.markdown) continue
+      try {
+        await persist(migrated)
+      } catch (error) {
+        console.warn('旧工作区链接写回失败', page.id, error)
+      }
+    }
+  }
+
   async function persistUnlocked(page: Page, options?: { force?: boolean }) {
     const previous = pages.value.find((item) => item.id === page.id)
     // 树层级只认 frontmatter.parent_id；正文里的 tie://page 链接只做关联，不回写子页列表。
-    const contentDraft = page
+    const contentDraft = migratePageWorkspaceHrefs(page)
     // 无正文/标题/标签/删除态/树结构差异时不写盘、不刷新 updatedAt（避免自动保存空转）。
     if (!options?.force && previous && pageWriteEqual(contentDraft, previous)) {
       return
