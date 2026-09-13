@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import TieSelect from '@/components/TieSelect.vue'
 import { pageBoundToSource } from '@/services/page-sources'
+import { drawGraphLabels } from '@/services/graph-labels'
 import { readGraphPalette } from '@/services/theme'
 import { useWorkspaceStore } from '@/stores/workspace'
 
@@ -387,18 +388,14 @@ function draw() {
       ctx.lineWidth = 2 / scale
       ctx.stroke()
     }
-
-    if (active && scale > 0.55) {
-      ctx.font = `${Math.max(10, 11 / scale)}px ui-sans-serif, system-ui, sans-serif`
-      ctx.fillStyle = isFocus ? palette.textStrong : palette.text
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'top'
-      const label = node.label.length > 16 ? `${node.label.slice(0, 15)}…` : node.label
-      ctx.fillText(label, node.x, node.y + node.radius + 4 / scale)
-    }
   }
 
   ctx.restore()
+  drawGraphLabels(ctx, simNodes, {
+    width, height, scale, offsetX: width / 2 + viewX, offsetY: height / 2 + viewY,
+    focusId: hoveredId.value || selectedId.value, neighbors: focus,
+    text: palette.text, textStrong: palette.textStrong, background: palette.bg0, maxChars: 16,
+  })
 }
 
 function frame() {
@@ -563,13 +560,14 @@ onBeforeUnmount(() => {
         class="obsidian-graph-canvas"
         @pointerdown="onPointerDown"
         @pointermove="onPointerMove"
+        @pointerleave="hoveredId = null; rebuildNeighborCache(); needsDraw = true"
         @pointerup="onPointerUp"
         @pointercancel="onPointerUp"
         @wheel.prevent="onWheel"
       />
       <div class="obsidian-graph-hint">
         <span>{{ pageNodeCount }} 页面 · {{ edgeCount }} 连线{{ tagNodeCount ? ` · ${tagNodeCount} 标签` : '' }}</span>
-        <span>悬停高亮 · 点页面打开 · 点标签筛选 · 拖拽 / 缩放</span>
+        <span>文字自动避让 · 放大查看更多 · 悬停高亮 · 点页面打开 · 点标签筛选 · 拖拽 / 缩放</span>
       </div>
       <p v-if="!nodeCount" class="obsidian-graph-empty">没有可显示的页面。创建页面、加标签，或用 `[[` / 页面链接关联后会出现网络。</p>
     </section>

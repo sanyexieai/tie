@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import TieSelect from '@/components/TieSelect.vue'
+import { drawGraphLabels } from '@/services/graph-labels'
 import { readGraphPalette } from '@/services/theme'
 import { useWorkspaceStore } from '@/stores/workspace'
 
@@ -350,18 +351,14 @@ function draw() {
       ctx.lineWidth = 1.6 / scale
       ctx.stroke()
     }
-
-    if (active) {
-      ctx.font = `${node.current ? 11 : 10}px ui-sans-serif, system-ui, sans-serif`
-      ctx.fillStyle = node.current ? palette.textStrong : palette.text
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'top'
-      const label = node.label.length > 10 ? `${node.label.slice(0, 9)}…` : node.label
-      ctx.fillText(label, node.x, node.y + node.radius + 3)
-    }
   }
 
   ctx.restore()
+  drawGraphLabels(ctx, simNodes, {
+    width, height, scale, offsetX: width / 2 + viewX, offsetY: height / 2 + viewY,
+    focusId: hoveredId.value || selectedId.value, neighbors: focus,
+    text: palette.text, textStrong: palette.textStrong, background: palette.bg0, maxChars: 10,
+  })
 }
 
 function frame() {
@@ -500,6 +497,7 @@ onBeforeUnmount(() => {
         class="local-obsidian-canvas"
         @pointerdown="onPointerDown"
         @pointermove="onPointerMove"
+        @pointerleave="hoveredId = null; rebuildNeighborCache(); needsDraw = true"
         @pointerup="onPointerUp"
         @pointercancel="onPointerUp"
         @wheel.prevent="onWheel"

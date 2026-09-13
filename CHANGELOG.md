@@ -74,6 +74,13 @@ All notable changes to Tie are documented in this file.
 
 ## [1.0.37] - 2026-09-10
 
+## [1.0.38] - 2026-09-13
+
+### Improved
+
+- 全局和局部知识图谱文字自动避让，优先显示悬停节点、当前页面及连接较多的节点。
+- 缩放时保持字号稳定，放大后显示更多名称；悬停显示更完整的标题，文字描边减少连线干扰。
+
 ## [Unreleased]
 
 ### Added
@@ -105,7 +112,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.37...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.38...HEAD
+[1.0.38]: https://github.com/sanyexieai/tie/releases/tag/v1.0.38
 [1.0.37]: https://github.com/sanyexieai/tie/releases/tag/v1.0.37
 [1.0.36]: https://github.com/sanyexieai/tie/releases/tag/v1.0.36
 [1.0.35]: https://github.com/sanyexieai/tie/releases/tag/v1.0.35
