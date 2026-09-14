@@ -281,5 +281,7 @@ jobs:
           PACKHUB_URL: https://3ye.co:32810
           PACKHUB_SLUG: tie
           PACKHUB_UPLOAD_KEY: ${{ secrets.PACKHUB_UPLOAD_KEY }}
+          PACKHUB_TIMEOUT: "1800"
           GITHUB_REF_NAME: ${{ github.ref_name }}
+        timeout-minutes: 40
         run: python3 scripts/publish-packhub-release.py dist --manifest dist/tauri-latest.json

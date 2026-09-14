@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,11 +17,13 @@ DEFAULT_URL = "https://3ye.co:32810"
 DEFAULT_SLUG = "tie"
 TAURI_LATEST_PATH = "tauri-latest.json"
 ENV_FILES = (".env", "deploy/.env", "packhub.env")
+DEFAULT_TIMEOUT_SEC = 1800
+UPLOAD_ATTEMPTS = 3
 
 PLATFORM_FILES = (
-    ("android", (".apk",)),
     ("linux", (".deb",)),
     ("windows", (".exe",)),
+    ("android", (".apk",)),
 )
 
 
@@ -65,31 +68,65 @@ def version_build(version: str) -> str:
     return str(parts[0] * 10000 + parts[1] * 100 + parts[2])
 
 
+def upload_timeout_sec() -> float:
+    raw = env_first("PACKHUB_TIMEOUT", default=str(DEFAULT_TIMEOUT_SEC))
+    try:
+        value = float(raw)
+    except ValueError as err:
+        raise SystemExit(f"PACKHUB_TIMEOUT 无效: {raw}") from err
+    return max(60.0, value)
+
+
+def is_retryable(err: BaseException) -> bool:
+    reason = str(getattr(err, "reason", err)).lower()
+    text = f"{type(err).__name__} {reason}".lower()
+    return any(token in text for token in ("timed out", "timeout", "temporarily", "reset", "broken pipe"))
+
+
 def put(url: str, key: str, data: bytes, content_type: str) -> dict:
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method="PUT",
-        headers={
-            "X-Upload-Key": key,
-            "Content-Type": content_type,
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            status = resp.status
-    except urllib.error.HTTPError as err:
-        detail = err.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"上传失败 HTTP {err.code}: {detail or err.reason}") from err
-    except urllib.error.URLError as err:
-        raise SystemExit(f"连不上 PackHub: {err.reason}") from err
-    try:
-        parsed = json.loads(body) if body else {}
-    except json.JSONDecodeError:
-        parsed = {"raw": body}
-    parsed["_http"] = status
-    return parsed
+    timeout = upload_timeout_sec()
+    last_error: BaseException | None = None
+    for attempt in range(1, UPLOAD_ATTEMPTS + 1):
+        started = time.monotonic()
+        req = urllib.request.Request(
+            url,
+            data=data,
+            method="PUT",
+            headers={
+                "X-Upload-Key": key,
+                "Content-Type": content_type,
+                "Content-Length": str(len(data)),
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                status = resp.status
+            elapsed = time.monotonic() - started
+            try:
+                parsed = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                parsed = {"raw": body}
+            parsed["_http"] = status
+            parsed["_elapsed_sec"] = round(elapsed, 1)
+            return parsed
+        except urllib.error.HTTPError as err:
+            detail = err.read().decode("utf-8", errors="replace")
+            raise SystemExit(f"上传失败 HTTP {err.code}: {detail or err.reason}") from err
+        except (urllib.error.URLError, TimeoutError, OSError) as err:
+            last_error = err
+            elapsed = time.monotonic() - started
+            if attempt < UPLOAD_ATTEMPTS and is_retryable(err):
+                wait = 2 ** attempt
+                print(
+                    f"upload attempt {attempt}/{UPLOAD_ATTEMPTS} failed after {elapsed:.0f}s ({err}); retry in {wait}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(wait)
+                continue
+            raise SystemExit(f"连不上 PackHub: {getattr(err, 'reason', err)}") from err
+    raise SystemExit(f"连不上 PackHub: {getattr(last_error, 'reason', last_error)}")
 
 
 def pick_artifact(artifacts_dir: Path, suffixes: tuple[str, ...]) -> Path | None:
@@ -118,7 +155,8 @@ def upload_package(base: str, key: str, slug: str, platform: str, path: Path, ve
     }
     qs = urllib.parse.urlencode({k: v for k, v in query.items() if v})
     target = f"{base}/api/upload/{urllib.parse.quote(slug)}/{platform}?{qs}"
-    print(f"uploading {platform}: {path.name}", file=sys.stderr)
+    size_mb = path.stat().st_size / (1024 * 1024)
+    print(f"uploading {platform}: {path.name} ({size_mb:.1f} MiB)", file=sys.stderr, flush=True)
     result = put(target, key, path.read_bytes(), "application/octet-stream")
     if not result.get("ok"):
         raise SystemExit(f"PackHub {platform} 上传未成功: {json.dumps(result, ensure_ascii=False)}")
