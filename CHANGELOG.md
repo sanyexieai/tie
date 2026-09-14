@@ -83,6 +83,10 @@ All notable changes to Tie are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- 桌面端默认从 PackHub 检查更新（GitHub 作为回退）；打 tag 发布时 CI 会把安装包同步到 PackHub。
+
 ### Added
 
 - Playwright browser E2E smoke tests (workspace load, navigation, Markdown export).

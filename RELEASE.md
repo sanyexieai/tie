@@ -46,7 +46,9 @@ keytool -genkey -v -keystore tie-release.jks -keyalg RSA -keysize 2048 -validity
 base64 -w0 tie-release.jks   # 输出写入 ANDROID_KEY_BASE64
 ```
 
-桌面端启动时会静默检查 `https://github.com/sanyexieai/tie/releases/latest/download/latest.json`；发现新版本会提示，也可在「设置 → 应用更新」手动检查。
+桌面端启动时会静默检查 PackHub 的 Tauri 清单 `https://3ye.co:32810/v1/tie/site/tauri-latest.json`（GitHub `latest.json` 为回退）；发现新版本会提示，也可在「设置 → 应用更新」手动检查。
+
+打 `v*` tag 后，Release 工作流会把 Android / Linux / Windows 安装包同步到 PackHub，并更新上述 Tauri 清单。CI 需要仓库 Secret `PACKHUB_UPLOAD_KEY`（项目上传密钥 `phk_...`）。
 
 示例：
 
@@ -103,6 +105,7 @@ git push origin v1.0.0
 - [ ] `CHANGELOG.md` 已更新 1.0.0 条目
 - [ ] README 安装说明与「已知限制」准确
 - [ ] GitHub Release 附 `.deb` / `.rpm` / `.msi` / `.exe`（NSIS）、对应 `.sig` 与 `latest.json`
+- [ ] PackHub 已同步 apk / deb / exe，且 `https://3ye.co:32810/v1/tie/site/tauri-latest.json` 版本号正确
 - [ ] 版本号一致：`package.json`、`src-tauri/tauri.conf.json`、`backend/package.json`
 
 ## 已知限制（1.0 可接受，需在 Release Notes 写明）

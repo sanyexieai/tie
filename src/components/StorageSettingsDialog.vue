@@ -799,7 +799,7 @@ function saveUpdateEndpointConfig() {
 function restoreDefaultUpdateEndpoints() {
   resetUpdateEndpoints()
   updateEndpointDraft.value = loadUpdateEndpoints().join('\n')
-  updateConfigNotice.value = '已恢复默认 GitHub 更新源'
+  updateConfigNotice.value = '已恢复默认 PackHub 更新源'
 }
 </script>
 
@@ -866,7 +866,7 @@ function restoreDefaultUpdateEndpoints() {
       <div v-if="updateConfigVisible" class="theme-mode-row app-update-config-row">
         <div class="app-update-config-panel">
           <strong>更新服务地址</strong>
-          <small>每行一个 latest.json 地址，按顺序尝试；支持 MinIO / 自建 HTTPS 静态站</small>
+          <small>每行一个 latest.json 地址，按顺序尝试；默认 PackHub，GitHub 为回退</small>
           <textarea
             v-model="updateEndpointDraft"
             rows="4"

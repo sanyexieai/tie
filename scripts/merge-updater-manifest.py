@@ -17,6 +17,14 @@ PLATFORM_PICKS: tuple[tuple[str, str], ...] = (
     ("android-aarch64", ".apk"),
 )
 
+PACKHUB_PLATFORM_DIRS = {
+    "linux-x86_64": "linux",
+    "windows-x86_64": "windows",
+    "android-aarch64": "android",
+}
+
+DEFAULT_PACKHUB_PUBLIC_BASE = "https://3ye.co:32810/v1/tie"
+
 
 def read_signature(sig_path: Path) -> str:
     return sig_path.read_text(encoding="utf-8").strip()
@@ -65,7 +73,31 @@ def pick_platform_artifacts(artifacts_dir: Path) -> dict[str, tuple[Path, Path |
     return platforms
 
 
+def updater_url_mode() -> str:
+    mode = os.environ.get("UPDATER_URL_MODE", "github").strip().lower()
+    if mode not in {"github", "packhub"}:
+        raise ValueError(f"UPDATER_URL_MODE must be github or packhub, got {mode!r}")
+    return mode
+
+
+def packhub_public_base() -> str:
+    return os.environ.get("PACKHUB_PUBLIC_BASE", DEFAULT_PACKHUB_PUBLIC_BASE).rstrip("/")
+
+
+def artifact_url(platform_key: str, file_name: str, *, repo: str, tag: str) -> str:
+    if updater_url_mode() == "packhub":
+        folder = PACKHUB_PLATFORM_DIRS.get(platform_key)
+        if not folder:
+            raise ValueError(f"no PackHub folder mapping for {platform_key}")
+        return f"{packhub_public_base()}/releases/{folder}/{file_name}"
+    if tag:
+        return f"https://github.com/{repo}/releases/download/{tag}/{file_name}"
+    return file_name
+
+
 def main() -> int:
+    if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
+        return self_test()
     if len(sys.argv) != 3:
         print("usage: merge-updater-manifest.py <artifacts-dir> <output.json>", file=sys.stderr)
         return 1
@@ -74,7 +106,6 @@ def main() -> int:
     output_path = Path(sys.argv[2])
     repo = os.environ.get("GITHUB_REPOSITORY", "sanyexieai/tie")
     tag = os.environ.get("GITHUB_REF_NAME", "").strip()
-    release_base = f"https://github.com/{repo}/releases/download/{tag}/" if tag else ""
 
     if not artifacts_dir.is_dir():
         print(f"Artifacts directory not found: {artifacts_dir}", file=sys.stderr)
@@ -101,7 +132,7 @@ def main() -> int:
     }
 
     for platform_key, (bundle_path, sig_path) in platform_pairs.items():
-        url = release_base + bundle_path.name if release_base else bundle_path.name
+        url = artifact_url(platform_key, bundle_path.name, repo=repo, tag=tag)
         entry: dict[str, str] = {"url": url}
         if platform_key.startswith("android") or sig_path is None:
             # Android sideload updates are downloaded and installed manually.
@@ -113,10 +144,54 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(
-        f"Wrote {output_path} v{version} with platforms: {', '.join(sorted(manifest['platforms']))}",
+        f"Wrote {output_path} v{version} ({updater_url_mode()}) "
+        f"with platforms: {', '.join(sorted(manifest['platforms']))}",
         file=sys.stderr,
     )
     return 0
+
+
+def self_test() -> int:
+    previous_mode = os.environ.get("UPDATER_URL_MODE")
+    previous_base = os.environ.get("PACKHUB_PUBLIC_BASE")
+    try:
+        os.environ["UPDATER_URL_MODE"] = "github"
+        github = artifact_url(
+            "linux-x86_64",
+            "Tie_1.0.38_amd64.deb",
+            repo="sanyexieai/tie",
+            tag="v1.0.38",
+        )
+        assert github.endswith("/Tie_1.0.38_amd64.deb"), github
+        assert "github.com/sanyexieai/tie/releases/download/v1.0.38" in github, github
+
+        os.environ["UPDATER_URL_MODE"] = "packhub"
+        os.environ.pop("PACKHUB_PUBLIC_BASE", None)
+        packhub = artifact_url(
+            "linux-x86_64",
+            "Tie_1.0.38_amd64.deb",
+            repo="sanyexieai/tie",
+            tag="v1.0.38",
+        )
+        assert packhub == f"{DEFAULT_PACKHUB_PUBLIC_BASE}/releases/linux/Tie_1.0.38_amd64.deb", packhub
+        android = artifact_url(
+            "android-aarch64",
+            "tie-1.0.38-android-universal.apk",
+            repo="sanyexieai/tie",
+            tag="v1.0.38",
+        )
+        assert android.endswith("/releases/android/tie-1.0.38-android-universal.apk"), android
+        print("self-test ok", file=sys.stderr)
+        return 0
+    finally:
+        if previous_mode is None:
+            os.environ.pop("UPDATER_URL_MODE", None)
+        else:
+            os.environ["UPDATER_URL_MODE"] = previous_mode
+        if previous_base is None:
+            os.environ.pop("PACKHUB_PUBLIC_BASE", None)
+        else:
+            os.environ["PACKHUB_PUBLIC_BASE"] = previous_base
 
 
 if __name__ == "__main__":

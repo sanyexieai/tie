@@ -26,7 +26,8 @@ describe('app-update-config', () => {
   })
 
   it('loads defaults when unset', () => {
-    expect(loadUpdateEndpoints()[0]).toContain('latest.json')
+    expect(loadUpdateEndpoints()[0]).toBe('https://3ye.co:32810/v1/tie/site/tauri-latest.json')
+    expect(loadUpdateEndpoints()[1]).toContain('github.com/sanyexieai/tie')
     expect(hasCustomUpdateEndpoints()).toBe(false)
   })
 

@@ -171,7 +171,7 @@ Tie 内的页面 ID 与跨源链接写在 Markdown Frontmatter 中；迁移目�
 - 涉及后台源的页面迁移**不保留**历史版本（file ↔ S3 迁移会保留）
 - 浏览器模式不支持 `tie://asset/` 真实附件存储
 - Linux AppImage 安装包尚未提供（当前 Release 为 deb/rpm；Windows 为 msi/nsis）
-- 桌面版支持应用内自动更新（需 Release 已签名并上传 `latest.json`）；浏览器演示模式与 Android 精简版不支持
+- 桌面版支持应用内自动更新（默认 PackHub，GitHub 为回退；需 Release 已签名）；浏览器演示模式与 Android 精简版不支持
 - Codex / Agent 外接知识库为可选本地包 `@tie/mcp`（`packages/tie-mcp`），不依赖自定义后台
 
 ## 运行

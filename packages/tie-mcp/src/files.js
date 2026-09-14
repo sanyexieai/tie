@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileMetaToJson, normalizeFileMeta } from '../../../shared/file-meta.js'
+import { fileMetaToJson, normalizeFileMeta } from './file-meta.js'
 import { pathsEqual, resolveFsPath } from './fs-path.js'
 
 const TEXT_EXTS = new Set([

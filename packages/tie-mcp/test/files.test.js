@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { createWorkspace } from '../src/workspace.js'
 import { frontmatter } from '../src/page-format.js'
 
@@ -157,4 +158,11 @@ test('ingest urls include source id inferred from pages', () => {
   assert.equal(meta.locator.type, 'desktop')
   assert.ok(meta.locator.desktopPath)
   assert.ok(meta.locator.displayPath)
+})
+
+test('vendored file-meta.js stays identical to shared/file-meta.js', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const vendored = fs.readFileSync(path.join(here, '../src/file-meta.js'), 'utf8')
+  const canonical = fs.readFileSync(path.join(here, '../../../shared/file-meta.js'), 'utf8')
+  assert.equal(vendored, canonical)
 })
