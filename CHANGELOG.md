@@ -91,6 +91,12 @@ All notable changes to Tie are documented in this file.
 
 - 桌面端默认从 PackHub 检查更新（GitHub 作为回退）；打 tag 发布时 CI 会把安装包同步到 PackHub。
 
+## [1.0.40] - 2026-09-14
+
+### Fixed
+
+- GitHub Actions 向 PackHub 上传大 APK 时不再因 300 秒超时失败（加长超时并重试）。
+
 ## [Unreleased]
 
 ### Added
@@ -122,7 +128,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.39...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.40...HEAD
+[1.0.40]: https://github.com/sanyexieai/tie/releases/tag/v1.0.40
 [1.0.39]: https://github.com/sanyexieai/tie/releases/tag/v1.0.39
 [1.0.38]: https://github.com/sanyexieai/tie/releases/tag/v1.0.38
 [1.0.37]: https://github.com/sanyexieai/tie/releases/tag/v1.0.37
