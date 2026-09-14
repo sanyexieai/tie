@@ -81,11 +81,17 @@ All notable changes to Tie are documented in this file.
 - 全局和局部知识图谱文字自动避让，优先显示悬停节点、当前页面及连接较多的节点。
 - 缩放时保持字号稳定，放大后显示更多名称；悬停显示更完整的标题，文字描边减少连线干扰。
 
-## [Unreleased]
+## [1.0.39] - 2026-09-14
+
+### Fixed
+
+- 打包后的 Tie MCP 因找不到仓库外的 `shared/file-meta.js` 无法启动。
 
 ### Changed
 
 - 桌面端默认从 PackHub 检查更新（GitHub 作为回退）；打 tag 发布时 CI 会把安装包同步到 PackHub。
+
+## [Unreleased]
 
 ### Added
 
@@ -116,7 +122,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.38...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.39...HEAD
+[1.0.39]: https://github.com/sanyexieai/tie/releases/tag/v1.0.39
 [1.0.38]: https://github.com/sanyexieai/tie/releases/tag/v1.0.38
 [1.0.37]: https://github.com/sanyexieai/tie/releases/tag/v1.0.37
 [1.0.36]: https://github.com/sanyexieai/tie/releases/tag/v1.0.36
