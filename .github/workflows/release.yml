@@ -161,6 +161,9 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # 默认会装已下线的 `tools` 包，sdkmanager 会直接失败
+          packages: platform-tools
 
       - name: Install Android SDK components
         run: |
