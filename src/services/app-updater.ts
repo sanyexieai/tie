@@ -149,7 +149,7 @@ export function humanizeUpdaterError(raw: string, context: 'check' | 'install'):
   if (/plugin|not allowed|forbidden|updater|unsupported|未实现|not found.*plugin/.test(lower)) {
     return `当前环境不支持应用内自动更新：${raw}。请改用「下载到本地」。`
   }
-  if (/platform|arch|unsupported target|不支持的平台/.test(lower)) {
+  if (/\bplatform\b|\barch\b|unsupported target|不支持的平台/.test(lower)) {
     return `当前平台无可用更新包：${raw}。请确认 latest.json 包含本机平台条目。`
   }
 
@@ -235,9 +235,9 @@ function manualUpdateFromManifest(manifest: UpdateManifest, artifactUrl: string,
 }
 
 async function checkViaManifest(currentVersion: string): Promise<PendingManualUpdate | null> {
-  const manifest = await fetchUpdateManifest(loadUpdateEndpoints())
-  if (!isAppVersionNewer(manifest.version, currentVersion)) return null
   const candidates = await resolvePlatformCandidates()
+  const manifest = await fetchUpdateManifest(loadUpdateEndpoints(), { platformCandidates: candidates })
+  if (!isAppVersionNewer(manifest.version, currentVersion)) return null
   const artifact = pickPlatformArtifact(manifest, candidates)
   if (!artifact) {
     throw new Error(`latest.json 中未找到当前平台条目（${candidates.join(' / ') || 'unknown'}）`)

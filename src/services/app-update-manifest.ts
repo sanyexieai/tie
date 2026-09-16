@@ -96,8 +96,12 @@ export function parseUpdateManifest(raw: unknown): UpdateManifest | null {
   }
 }
 
-export async function fetchUpdateManifest(endpoints: string[]): Promise<UpdateManifest> {
+export async function fetchUpdateManifest(
+  endpoints: string[],
+  options: { platformCandidates?: readonly string[] } = {},
+): Promise<UpdateManifest> {
   let lastError = '无法获取更新清单'
+  const candidates = options.platformCandidates ?? []
   for (const endpoint of endpoints) {
     try {
       const response = await fetch(endpoint, {
@@ -111,6 +115,10 @@ export async function fetchUpdateManifest(endpoints: string[]): Promise<UpdateMa
       const manifest = parseUpdateManifest(await response.json())
       if (!manifest) {
         lastError = `${endpoint} 的 latest.json 格式无效`
+        continue
+      }
+      if (candidates.length && !pickPlatformArtifact(manifest, candidates)) {
+        lastError = `${endpoint} 缺少当前平台条目（${candidates.join(' / ')}）`
         continue
       }
       return manifest
