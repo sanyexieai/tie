@@ -1,9 +1,10 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { backendService, type BackendProfile, type BackendStorageSource, type BackendWorkspace } from '@/services/backend'
+import { backendService, type BackendProfile, type BackendServer, type BackendStorageSource, type BackendWorkspace } from '@/services/backend'
 
 export const useBackendStore = defineStore('backend', () => {
   const profile = ref<BackendProfile>(backendService.loadProfile())
+  const servers = ref<BackendServer[]>(backendService.loadServers())
   const workspaces = ref<BackendWorkspace[]>([])
   const providers = ref<BackendStorageSource[]>([])
   const providerAvailability = ref<Record<string, boolean>>({})
@@ -15,15 +16,30 @@ export const useBackendStore = defineStore('backend', () => {
   const connected = computed(() => Boolean(profile.value.accessToken && profile.value.user))
 
   function saveProfile() { backendService.saveProfile(profile.value) }
+  function addServer(endpoint: string) { const server = backendService.addServer(endpoint); servers.value = backendService.loadServers(); return server }
+  async function updateServerEndpoint(id: string, endpoint: string) {
+    loading.value = true
+    error.value = ''
+    try {
+      await backendService.health(endpoint)
+      const server = backendService.updateServer(id, endpoint)
+      servers.value = backendService.loadServers()
+      profile.value.endpoint = server.endpoint
+      saveProfile()
+      return server
+    } catch (reason) {
+      error.value = reason instanceof Error ? reason.message : '保存后台服务设置失败'
+      throw reason
+    } finally { loading.value = false }
+  }
+  function removeServer(id: string) { const target = servers.value.find((s) => s.id === id); backendService.removeServer(id); servers.value = backendService.loadServers(); if (target && profile.value.endpoint === target.endpoint) logout() }
+  function setDefaultPrompt(id: string, enabled: boolean) { backendService.setDefaultPrompt(id, enabled); if (enabled) backendService.clearDefaultPromptDismissal(); servers.value = backendService.loadServers() }
+  function dismissDefaultPrompt() { backendService.dismissDefaultPrompt() }
   async function refreshWorkspaces() {
     if (!connected.value) { workspaces.value = []; providers.value = []; providerAvailability.value = {}; return }
     workspaces.value = await backendService.listWorkspaces(profile.value)
     providers.value = await backendService.listProviders(profile.value)
-    const availability: Record<string, boolean> = {}
-    await Promise.all(providers.value.filter((provider) => provider.kind === 's3').map(async (provider) => {
-      availability[provider.id] = await backendService.checkProviderHealth(profile.value, provider.id).then(() => true).catch(() => false)
-    }))
-    providerAvailability.value = availability
+    providerAvailability.value = {}
   }
   async function initialize() {
     if (initialized.value) return
@@ -154,5 +170,5 @@ export const useBackendStore = defineStore('backend', () => {
     error.value = ''
   }
 
-  return { profile, workspaces, providers, providerAvailability, loading, error, initialized, syncing, lastSyncedAt, connected, initialize, authenticate, checkHealth, refreshWorkspaces, createWorkspace, renameWorkspace, deleteWorkspace, createProvider, renameProvider, deleteProvider, sync, logout }
+  return { profile, servers, workspaces, providers, providerAvailability, loading, error, initialized, syncing, lastSyncedAt, connected, initialize, addServer, updateServerEndpoint, removeServer, setDefaultPrompt, dismissDefaultPrompt, authenticate, checkHealth, refreshWorkspaces, createWorkspace, renameWorkspace, deleteWorkspace, createProvider, renameProvider, deleteProvider, sync, logout }
 })

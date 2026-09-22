@@ -29,7 +29,7 @@ import {
   type AgentMcpStatus,
 } from '@/services/codex-mcp'
 import { pageBoundToSource } from '@/services/page-sources'
-import { isBackendSourceId, isBackendManagedS3SourceId, defaultBackendEndpoint } from '@/services/backend'
+import { isBackendSourceId, isBackendManagedS3SourceId, isBackendRemoteSourceId, defaultBackendEndpoint } from '@/services/backend'
 import { isS3SourceId, providerForS3Source } from '@/services/s3'
 import { storageRegistry } from '@/services/storage/registry'
 import type { S3ConnectionInput } from '@/services/storage/types'
@@ -77,6 +77,8 @@ const choosingWorkspace = ref(false)
 const importingMarkdown = ref(false)
 const openingFromFiles = ref(false)
 const syncingRemote = ref(false)
+const syncingDefaultBackend = ref(false)
+const defaultBackendSyncNotice = ref('')
 const isDesktop = isTauriDesktop()
 const storageListEl = ref<HTMLElement | null>(null)
 const draggingSourceId = ref<string | null>(null)
@@ -239,11 +241,19 @@ function onAiCliPathChange() {
 
 const localSources = computed(() => store.workspace?.sources ?? [])
 const orderedSources = computed(() => store.allSources)
-const settingsOrderedSources = computed(() => (
-  usesMobileUi.value
+const settingsOrderedSources = computed(() => {
+  const visible = usesMobileUi.value
     ? orderedSources.value.filter((source) => isMobileSupportedStorageSource(source))
     : orderedSources.value
-))
+  const cloudSources = visible.filter((source) => isBackendRemoteSourceId(source.id))
+  if (!backend.connected || !cloudSources.length) return visible
+  const cloudLabel = cloudSources[0]?.name || '云端'
+  return visible
+    .filter((source) => !isBackendRemoteSourceId(source.id))
+    .map((source) => source.kind === 'local' || source.kind === 'smb'
+      ? { ...source, name: `云 + 本 · ${source.name}`, path: `${source.path} · ${cloudLabel}` }
+      : source)
+})
 const defaultSourceId = computed(() => store.defaultStorageSourceId)
 const fileMcpSources = computed(() => orderedSources.value.filter((source) => (
   (source.kind === 'local' || source.kind === 'smb')
@@ -394,7 +404,7 @@ const sourcePageStats = computed(() => new Map(orderedSources.value.map((source)
 function sourceLabel(kind: StorageKind) {
   if (kind === 'smb') return 'SMB 挂载目录'
   if (kind === 's3') return 'S3 兼容对象存储'
-  if (kind === 'backend') return '自定义后台'
+  if (kind === 'backend') return '云服务'
   return '本地目录'
 }
 
@@ -425,7 +435,7 @@ function sourceDetail(source: StorageSource) {
   if (runtime.pendingCount > 0) return `离线队列 ${runtime.pendingCount} 项 · ${sourcePageLabel(source.id)}`
   if (runtime.lastError) return `同步失败 · ${runtime.lastError}`
   if (source.kind === 's3' && isBackendManagedS3SourceId(source.id)) {
-    if (!backend.connected) return '请先连接自定义后台'
+    if (!backend.connected) return '请先连接云服务'
     if (backend.syncing) return '正在同步后台 S3…'
     if (runtime.lastError) return `同步失败 · ${runtime.lastError}`
     return runtime.lastSyncedAt
@@ -449,7 +459,7 @@ function sourceDetail(source: StorageSource) {
 function sourceTitle(source: StorageSource) {
   if (source.kind === 's3' && isBackendManagedS3SourceId(source.id)) return `${source.path}\n后台托管 S3，凭据保存在服务端`
   if (source.kind === 's3') return `${source.path}\nS3 页面以 tie/pages/*.md 保存`
-  if (source.kind === 'backend') return `${source.path}\n自定义后台存储源`
+  if (source.kind === 'backend') return `${source.path}\n后台默认云工作区`
   return `${source.path}\n${source.available === false ? '当前不可访问，请检查挂载后同步并载入' : '可用'}`
 }
 
@@ -524,6 +534,24 @@ async function syncAndReload() {
     /* store / backend 会保留错误 */
   } finally {
     syncingRemote.value = false
+  }
+}
+
+async function syncToDefaultBackend() {
+  if (!backend.connected) {
+    emit('connect-backend')
+    return
+  }
+  syncingDefaultBackend.value = true
+  defaultBackendSyncNotice.value = ''
+  try {
+    const count = await store.syncLocalToDefaultBackend()
+    defaultBackendSyncNotice.value = `已同步 ${count} 个本地页面和文件资源到默认服务端`
+    window.setTimeout(() => { defaultBackendSyncNotice.value = '' }, 2600)
+  } catch (error) {
+    defaultBackendSyncNotice.value = error instanceof Error ? error.message : '同步到默认服务端失败'
+  } finally {
+    syncingDefaultBackend.value = false
   }
 }
 
@@ -884,6 +912,21 @@ function restoreDefaultUpdateEndpoints() {
 
       <div class="storage-settings-toolbar">
         <button
+          v-if="backend.connected"
+          type="button"
+          title="修改后台服务地址和连接设置"
+          @click="emit('connect-backend')"
+        >后台服务设置</button>
+        <button
+          v-if="backend.connected"
+          type="button"
+          :disabled="syncingDefaultBackend || syncingRemote || store.reloading"
+          title="把本地存储区的页面和文件资源同步到默认服务端"
+          @click="syncToDefaultBackend"
+        >
+          {{ syncingDefaultBackend ? '同步到默认服务端…' : '↑ 同步到默认服务端' }}
+        </button>
+        <button
           :disabled="syncingRemote || store.reloading"
           :title="store.pendingSyncCount > 0
             ? `含 ${store.pendingSyncCount} 条待推送的离线变更`
@@ -915,6 +958,7 @@ function restoreDefaultUpdateEndpoints() {
         <button v-if="store.syncConflictsCount > 0" class="storage-conflict-notice" type="button" disabled>{{ store.syncConflictsCount }} 个同步冲突 · 见下方列表</button>
         <button :class="{ active: storageMenuOpen }" @click="storageMenuOpen = !storageMenuOpen">+ 添加存储源</button>
       </div>
+      <p v-if="defaultBackendSyncNotice" class="backend-notice">{{ defaultBackendSyncNotice }}</p>
 
       <div v-if="store.syncConflictPages.length" class="storage-conflict-list">
         <strong>同步冲突</strong>
@@ -934,7 +978,7 @@ function restoreDefaultUpdateEndpoints() {
       <div v-if="storageMenuOpen" class="storage-menu storage-settings-menu">
         <button v-if="supportsLocalFileStorage" :disabled="choosingWorkspace" @click="chooseWorkspace('local')"><strong>本地目录</strong><small>{{ usesMobileUi ? '选择手机上的文件夹或应用内知识库' : '选择磁盘中的知识库' }}</small></button>
         <button v-if="supportsSmbStorage" :disabled="choosingWorkspace" @click="chooseWorkspace('smb')"><strong>SMB 挂载目录</strong><small>选择系统已挂载的共享目录</small></button>
-        <button @click="emit('connect-backend'); storageMenuOpen = false"><strong>自定义后台{{ backend.connected ? ' · 已连接' : '' }}</strong><small>{{ backend.connected ? '登录后可添加后台存储源' : '登录并添加后台存储源' }}</small></button>
+        <button @click="emit('connect-backend'); storageMenuOpen = false"><strong>云服务{{ backend.connected ? ' · 已连接' : '' }}</strong><small>{{ backend.connected ? '已使用后台默认云工作区' : '登录即可使用后台默认云工作区' }}</small></button>
         <button @click="openS3Form()"><strong>S3 兼容对象存储</strong><small>AWS S3、MinIO、R2、Ceph 等 · {{ usesMobileUi ? '密钥保存在应用私有目录' : '本地保存' }}</small></button>
         <button v-if="supportsLocalFileStorage && !usesMobileUi" :disabled="openingFromFiles" @click="openFromFiles"><strong>{{ openingFromFiles ? '正在打开…' : '从文件打开' }}</strong><small>打开 Markdown；不在已有源内时自动创建本地工作区</small></button>
         <button v-if="supportsLocalFileStorage && !usesMobileUi" :disabled="importingMarkdown || !defaultSourceId || isBackendSourceId(defaultSourceId)" @click="importMarkdown"><strong>{{ importingMarkdown ? '正在导入…' : '导入 Markdown 文件' }}</strong><small>导入到优先级最高的可用存储源</small></button>
@@ -1156,12 +1200,13 @@ function restoreDefaultUpdateEndpoints() {
             <button v-if="canSync(source)" :disabled="syncingRemote || store.reloading" title="同步此存储源" @click="syncSource(source.id)">↻</button>
             <button v-if="isDesktop && (source.kind === 'local' || source.kind === 'smb')" :disabled="source.available === false" title="在文件管理器中打开" @click="openSource(source.path)">↗</button>
             <button v-if="source.kind === 's3'" title="编辑连接" @click="openS3Form(source.id)">✎</button>
+            <button v-else-if="source.kind === 'backend'" title="修改后台服务" @click="emit('connect-backend')">✎</button>
             <button v-else-if="canRename(source)" title="重命名显示名称" @click="renameSource(source.id)">✎</button>
             <button v-if="canDisconnect(source)" title="断开存储源" @click="disconnectSource(source.id)">×</button>
           </div>
         </div>
       </div>
-      <p v-else class="storage-settings-empty">{{ usesMobileUi ? '还没有连接 S3 或后台存储源，点「添加存储源」配置。' : '还没有连接存储源，点击「添加存储源」开始。' }}</p>
+      <p v-else class="storage-settings-empty">{{ usesMobileUi ? '还没有连接 S3 或云服务，点「添加存储源」配置。' : '还没有连接存储源，点击「添加存储源」开始。' }}</p>
 
       <p class="storage-settings-note">{{ usesMobileUi ? '本地页面保存在所选目录；也可与 S3 / 后台远程源并存。连接远程源后点「同步并载入」。' : '所有存储源的页面都在左侧同一棵树里；Agent Skills 是并列的特殊工作区。这里只调整优先级和管理连接。' }}</p>
     </section>

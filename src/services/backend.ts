@@ -5,6 +5,7 @@ export interface BackendUser {
   email: string
   name: string
   createdAt: string
+  managedCloud?: boolean
 }
 
 export interface BackendWorkspace {
@@ -12,6 +13,7 @@ export interface BackendWorkspace {
   name: string
   ownerId: string
   createdAt: string
+  storageProviderId?: string | null
 }
 
 export interface BackendStorageSource {
@@ -28,6 +30,11 @@ export interface BackendProfile {
   endpoint: string
   accessToken: string | null
   user: BackendUser | null
+}
+export interface BackendServer {
+  id: string
+  endpoint: string
+  defaultPrompt: boolean
 }
 
 interface AuthResponse {
@@ -95,7 +102,18 @@ type BackendFileResource = {
 }
 
 const storageKey = 'tie-backend-profile-v1'
-export const defaultBackendEndpoint = 'http://127.0.0.1:8787'
+const serversKey = 'tie-backend-servers-v1'
+const workspaceMappingsKey = 'tie-backend-workspace-mappings-v1'
+const defaultPromptDismissedKey = 'tie-backend-default-prompt-dismissed-v1'
+export const defaultBackendEndpoint = 'https://3ye.co:32043'
+const legacyDefaultBackendEndpoint = 'http://127.0.0.1:8787'
+
+// Keep existing installations pointed at the published default server when
+// they still contain the old built-in localhost value. Custom endpoints are
+// left untouched.
+function migrateDefaultEndpoint(endpoint: string) {
+  return endpoint.replace(/\/+$/, '') === legacyDefaultBackendEndpoint ? defaultBackendEndpoint : endpoint
+}
 
 function normalizeEndpoint(value: string) {
   const endpoint = value.trim().replace(/\/+$/, '') || defaultBackendEndpoint
@@ -166,11 +184,67 @@ function initialProfile(): BackendProfile {
 }
 
 export const backendService = {
+  loadWorkspaceMappings(): Record<string, string> {
+    try {
+      const value = JSON.parse(localStorage.getItem(workspaceMappingsKey) ?? '{}')
+      return value && typeof value === 'object' ? value as Record<string, string> : {}
+    } catch { return {} }
+  },
+  saveWorkspaceMappings(mappings: Record<string, string>) {
+    localStorage.setItem(workspaceMappingsKey, JSON.stringify(mappings))
+  },
+  workspaceMapping(localSourceId: string) {
+    return this.loadWorkspaceMappings()[localSourceId] ?? null
+  },
+  mapWorkspace(localSourceId: string, workspaceId: string) {
+    const mappings = this.loadWorkspaceMappings()
+    mappings[localSourceId] = workspaceId
+    this.saveWorkspaceMappings(mappings)
+  },
+  loadServers(): BackendServer[] {
+    try {
+      const list = JSON.parse(localStorage.getItem(serversKey) ?? '[]') as BackendServer[]
+      const servers = Array.isArray(list) ? list.filter((s) => s && typeof s.id === 'string' && typeof s.endpoint === 'string') : []
+      if (servers.length) {
+        const migrated = servers.map((server) => {
+          const endpoint = migrateDefaultEndpoint(server.endpoint)
+          const wasLegacyDefault = endpoint !== server.endpoint && server.id === 'default-local'
+          return { ...server, endpoint, defaultPrompt: wasLegacyDefault ? true : server.defaultPrompt }
+        })
+        if (migrated.some((server, index) => server.endpoint !== servers[index]?.endpoint)) this.saveServers(migrated)
+        return migrated
+      }
+      const profile = JSON.parse(localStorage.getItem(storageKey) ?? 'null') as Partial<BackendProfile> | null
+      if (typeof profile?.endpoint === 'string' && profile.endpoint.trim()) return [{ id: 'migrated-default', endpoint: normalizeEndpoint(profile.endpoint), defaultPrompt: false }]
+      return [{ id: 'default-local', endpoint: defaultBackendEndpoint, defaultPrompt: true }]
+    } catch { return [] }
+  },
+  saveServers(servers: BackendServer[]) { localStorage.setItem(serversKey, JSON.stringify(servers)) },
+  addServer(endpoint: string) {
+    const normalized = normalizeEndpoint(endpoint); const servers = this.loadServers(); const found = servers.find((s) => s.endpoint === normalized)
+    if (found) return found
+    const server = { id: globalThis.crypto?.randomUUID?.() ?? `server-${Date.now()}`, endpoint: normalized, defaultPrompt: false }; this.saveServers([...servers, server]); return server
+  },
+  updateServer(id: string, endpoint: string) {
+    const normalized = normalizeEndpoint(endpoint)
+    const servers = this.loadServers()
+    if (!servers.some((server) => server.id === id)) throw new Error('后台服务器不存在')
+    const duplicate = servers.find((server) => server.id !== id && server.endpoint === normalized)
+    if (duplicate) throw new Error('该后台地址已经存在')
+    const updated = servers.map((server) => server.id === id ? { ...server, endpoint: normalized } : server)
+    this.saveServers(updated)
+    return updated.find((server) => server.id === id)!
+  },
+  removeServer(id: string) { this.saveServers(this.loadServers().filter((s) => s.id !== id)) },
+  setDefaultPrompt(id: string, enabled: boolean) { this.saveServers(this.loadServers().map((s) => ({ ...s, defaultPrompt: enabled ? s.id === id : s.id === id ? false : s.defaultPrompt }))) },
+  isDefaultPromptDismissed() { return localStorage.getItem(defaultPromptDismissedKey) === '1' },
+  dismissDefaultPrompt() { localStorage.setItem(defaultPromptDismissedKey, '1') },
+  clearDefaultPromptDismissal() { localStorage.removeItem(defaultPromptDismissedKey) },
   loadProfile(): BackendProfile {
     try {
       const saved = JSON.parse(localStorage.getItem(storageKey) ?? '') as Partial<BackendProfile>
       return {
-        endpoint: normalizeEndpoint(typeof saved.endpoint === 'string' ? saved.endpoint : defaultBackendEndpoint),
+        endpoint: normalizeEndpoint(migrateDefaultEndpoint(typeof saved.endpoint === 'string' ? saved.endpoint : defaultBackendEndpoint)),
         accessToken: typeof saved.accessToken === 'string' ? saved.accessToken : null,
         user: saved.user && typeof saved.user.id === 'string' ? saved.user as BackendUser : null,
       }
@@ -202,6 +276,15 @@ export const backendService = {
   async listWorkspaces(profile: BackendProfile) { return request<BackendWorkspace[]>(profile, '/api/v1/workspaces') },
   async createWorkspace(profile: BackendProfile, name: string) {
     return request<BackendWorkspace>(profile, '/api/v1/workspaces', { method: 'POST', body: JSON.stringify({ name }) })
+  },
+  async ensureWorkspaceForLocalSource(profile: BackendProfile, localSourceId: string, name: string, workspaces?: BackendWorkspace[]) {
+    const existingId = this.workspaceMapping(localSourceId)
+    const known = workspaces ?? await this.listWorkspaces(profile)
+    const existing = existingId ? known.find((workspace) => workspace.id === existingId) : undefined
+    if (existing) return existing
+    const workspace = await this.createWorkspace(profile, name)
+    this.mapWorkspace(localSourceId, workspace.id)
+    return workspace
   },
   async renameWorkspace(profile: BackendProfile, workspaceId: string, name: string) {
     return request<BackendWorkspace>(profile, `/api/v1/workspaces/${workspaceId}`, { method: 'PATCH', body: JSON.stringify({ name }) })
@@ -339,11 +422,16 @@ export const backendService = {
     })
   },
   async uploadProviderFileBlob(profile: BackendProfile, providerId: string, fileId: string, blobName: string, data: Uint8Array) {
-    await uploadBinary(profile, `/api/v1/providers/${providerId}/files/${encodeURIComponent(fileId)}/blob/${encodeURIComponent(blobName)}`, data)
+    const signed = await request<{ url: string }>(profile, `/api/v1/providers/${providerId}/files/${encodeURIComponent(fileId)}/blob-url/${encodeURIComponent(blobName)}`)
+    const response = await fetch(signed.url, { method: 'PUT', body: new Blob([new Uint8Array(data)]) })
+    if (!response.ok) throw new Error(`S3 上传失败（${response.status}）`)
     return blobName
   },
   async readProviderFileBlob(profile: BackendProfile, providerId: string, fileId: string) {
-    return readBinary(profile, `/api/v1/providers/${providerId}/files/${encodeURIComponent(fileId)}/blob`)
+    const signed = await request<{ url: string }>(profile, `/api/v1/providers/${providerId}/files/${encodeURIComponent(fileId)}/blob-url`)
+    const response = await fetch(signed.url)
+    if (!response.ok) throw new Error(`S3 读取失败（${response.status}）`)
+    return response.arrayBuffer()
   },
   async uploadProviderPageAsset(profile: BackendProfile, providerId: string, pageId: string, assetName: string, data: Uint8Array) {
     await uploadBinary(profile, `/api/v1/providers/${providerId}/pages/${pageId}/assets/${encodeURIComponent(assetName)}`, data)

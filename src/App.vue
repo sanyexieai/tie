@@ -18,6 +18,8 @@ import AppUpdateDialog from '@/components/AppUpdateDialog.vue'
 import AppIcon from '@/components/AppIcon.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
+import { startAutoSync } from '@/services/auto-sync'
+import { backendService } from '@/services/backend'
 import { checkForAppUpdateOnStartup } from '@/services/app-updater'
 import { installMobileBackHandler, resetMobileBackLeaveArm, uninstallMobileBackHandler } from '@/services/mobile-back'
 import { initPlatform, isMobileClient, usesMobileUi } from '@/services/platform'
@@ -319,6 +321,10 @@ onMounted(async () => {
   syncMobileLayout()
   syncContextDrawer()
   await backend.initialize()
+  const defaultServer = backend.servers.find((server) => server.defaultPrompt)
+  if (defaultServer && !backend.connected && !backendService.isDefaultPromptDismissed()) {
+    try { await backendService.health(defaultServer.endpoint); backendDialogOpen.value = true } catch { /* 后台未启动时不打扰用户 */ }
+  }
   await store.initialize()
   syncViewportHeight()
   if (usesMobileShell.value) goMobileHome()
@@ -326,6 +332,19 @@ onMounted(async () => {
   const update = await checkForAppUpdateOnStartup()
   if (update) updateDialogOpen.value = true
 })
+
+watch(
+  () => store.initialized && backend.connected && !backend.loading
+    ? `${backend.profile.endpoint}:${backend.profile.user?.id}` : '',
+  (identity, _, onCleanup) => {
+    if (!identity) return
+    onCleanup(startAutoSync(
+      () => store.syncLocalToDefaultBackend(true),
+      (error) => { backend.error = error instanceof Error ? error.message : '自动同步失败，将自动重试' },
+    ))
+  },
+  { immediate: true },
+)
 
 watch(usesMobileShell, () => ensureMobileBackHandler())
 watch(
@@ -453,7 +472,7 @@ onBeforeUnmount(() => {
   </template>
 
     <CommandPalette v-if="store.showingCommandPalette" />
-    <BackendConnectionDialog v-if="backendDialogOpen" @close="backendDialogOpen = false" />
+    <BackendConnectionDialog v-if="backendDialogOpen" :startup-prompt="backend.servers.some((server) => server.defaultPrompt) && !backend.connected" @close="backendDialogOpen = false" />
     <StorageSettingsDialog v-if="storageSettingsOpen" @close="storageSettingsOpen = false" @connect-backend="backendDialogOpen = true; storageSettingsOpen = false" />
     <AppUpdateDialog v-if="updateDialogOpen" @close="updateDialogOpen = false" />
     <p v-if="mobileBackHint && usesMobileShell" class="mobile-back-hint" role="status">{{ mobileBackHint }}</p>

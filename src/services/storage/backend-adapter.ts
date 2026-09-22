@@ -107,7 +107,13 @@ export async function loadAllBackendPages(localPages: Page[] = []): Promise<Sync
   const profile = backendService.loadProfile()
   if (!profile.accessToken) return []
   try {
-    const pages = await backendService.loadAllPages(profile, (workspaceId) => `backend:${workspaceId}`)
+    const workspaces = await backendService.listWorkspaces(profile)
+    const boundWorkspaceIds = new Set(workspaces.filter((workspace) => workspace.storageProviderId).map((workspace) => workspace.id))
+    const mappedWorkspaceIds = new Set(Object.values(backendService.loadWorkspaceMappings()))
+    const pages = (await Promise.all(workspaces.filter((workspace) => !boundWorkspaceIds.has(workspace.id) && !mappedWorkspaceIds.has(workspace.id)).map(async (workspace) => {
+      const items = await backendService.listPages(profile, workspace.id)
+      return items.map((page) => ({ ...page, storageSourceId: `backend:${workspace.id}` }))
+    }))).flat()
     const grouped = new Map<string, Page[]>()
     pages.forEach((page) => {
       const list = grouped.get(page.storageSourceId) ?? []

@@ -218,7 +218,12 @@ async function resolvePlatformCandidates(): Promise<string[]> {
     const { arch, type } = await import('@tauri-apps/plugin-os')
     return resolveDesktopPlatformCandidates(await type(), await arch())
   } catch {
-    return ['linux-x86_64', 'windows-x86_64', 'darwin-aarch64']
+    // Never mix platforms in the fallback list: a Linux artifact must not be
+    // offered to Windows or macOS when platform detection is unavailable.
+    const platform = typeof navigator !== 'undefined' ? navigator.userAgent.toLowerCase() : ''
+    if (platform.includes('windows')) return ['windows-x86_64']
+    if (platform.includes('mac os') || platform.includes('macintosh')) return ['darwin-aarch64', 'darwin-x86_64']
+    return ['linux-x86_64']
   }
 }
 
@@ -337,6 +342,21 @@ export async function checkForAppUpdate(options: { silent?: boolean } = {}) {
   try {
     await loadCurrentVersion()
     const currentVersion = state.currentVersion
+
+    // Check the PackHub manifest first. It is also the fallback path for
+    // installations whose Tauri updater endpoint still has an older config;
+    // this keeps update detection working while a signed plugin manifest is
+    // being rolled out.
+    const manifestUpdate = await checkViaManifest(currentVersion).catch(() => null)
+    if (manifestUpdate) {
+      setAvailableUpdate({
+        version: manifestUpdate.version,
+        notes: manifestUpdate.notes,
+        installMode: 'manual',
+        manual: manifestUpdate,
+      })
+      return manifestUpdate
+    }
 
     if (supportsAutoAppUpdate()) {
       try {

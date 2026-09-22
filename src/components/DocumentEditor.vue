@@ -2,11 +2,11 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
-import type { Page, PageRevision } from '@/types'
+import type { Page, PageRevision, StorageSource } from '@/types'
 import TiptapEditor from '@/components/TiptapEditor.vue'
 import DocumentMeta from '@/components/DocumentMeta.vue'
 import { aiTaggingReady, loadAiTaggingConfig, suggestTagsWithAi } from '@/services/ai-tagging'
-import { isBackendRemoteSourceId } from '@/services/backend'
+import { backendService, isBackendRemoteSourceId } from '@/services/backend'
 import { pageBoundToSource, pageContentEqual, pageSourceIds, pageSourceRoleLabel, sourceShortLabel } from '@/services/page-sources'
 import { isCloudStorageSourceId } from '@/services/storage-identity'
 import { isLocalWinningConflict } from '@/services/storage/sync-merge'
@@ -94,17 +94,64 @@ const status = computed(() => {
                     : savedLabel
 })
 const isFavorite = computed(() => Boolean(store.activePage && store.favoritePageIds.includes(store.activePage.id)))
-const activeSource = computed(() => store.allSources.find((source) => source.id === store.activePage?.storageSourceId) ?? null)
+const rawActiveSource = computed(() => store.allSources.find((source) => source.id === store.activePage?.storageSourceId) ?? null)
 const boundSourceIds = computed(() => {
   if (!store.activePage) return []
   const known = new Set(store.allSources.map((source) => source.id))
   return pageSourceIds(store.activePage).filter((id) => known.has(id))
 })
 const boundCloudSourceIds = computed(() => boundSourceIds.value.filter((id) => isCloudStorageSourceId(id)))
-const boundSourceCount = computed(() => boundSourceIds.value.length)
+function cloudWorkspaceId(source: StorageSource) {
+  if (source.id.startsWith('backend:')) return source.id.slice('backend:'.length)
+  if (source.id.startsWith('backend-s3:')) {
+    return backend.providers.find((provider) => `backend-s3:${provider.id}` === source.id)?.workspaceId ?? null
+  }
+  return null
+}
+function localPairForCloudSource(source: StorageSource) {
+  const workspaceId = cloudWorkspaceId(source)
+  if (!workspaceId) return null
+  const localSources = store.allSources.filter((item) => item.kind === 'local' || item.kind === 'smb')
+  return localSources.find((item) => backendService.workspaceMapping(item.id) === workspaceId)
+    ?? localSources.find((item) => item.name === source.name)
+    ?? null
+}
+const localCloudPairs = computed(() => {
+  const pairs = new Map<string, StorageSource>()
+  for (const source of store.allSources.filter((item) => isCloudStorageSourceId(item.id))) {
+    const local = localPairForCloudSource(source)
+    if (local) pairs.set(source.id, local)
+  }
+  return pairs
+})
+const pairedLocalSource = computed(() => {
+  const localSources = store.allSources.filter((source) => source.kind === 'local' || source.kind === 'smb')
+  const bound = localSources.find((source) => boundSourceIds.value.includes(source.id))
+  if (bound) return bound
+  const active = rawActiveSource.value
+  if (!active) return null
+  if (active.kind === 'local' || active.kind === 'smb') {
+    return [...localCloudPairs.value.values()].some((item) => item.id === active.id) ? active : null
+  }
+  if (!isCloudStorageSourceId(active.id)) return null
+  return localCloudPairs.value.get(active.id) ?? null
+})
+const activeSource = computed(() => {
+  const source = rawActiveSource.value
+  const local = pairedLocalSource.value
+  if (!source || !local) return source
+  if (isCloudStorageSourceId(source.id)) return { ...source, name: `云 + 本 · ${local.name}`, path: `${source.path}\n${local.path}` }
+  return source
+})
+const boundSourceCount = computed(() => pairedLocalSource.value ? boundSourceIds.value.length - 1 : boundSourceIds.value.length)
 const sourceChoices = computed(() => (
   store.activePage
-    ? store.allSources.filter((source) => store.canBindPageTo(source.id) || pageBoundToSource(store.activePage!, source.id))
+    ? store.allSources
+      .filter((source) => !(localCloudPairs.value.has(source.id) ? false : [...localCloudPairs.value.values()].some((item) => item.id === source.id)))
+      .filter((source) => store.canBindPageTo(source.id) || pageBoundToSource(store.activePage!, source.id))
+      .map((source) => localCloudPairs.value.get(source.id)
+        ? { ...source, name: `云 + 本 · ${localCloudPairs.value.get(source.id)!.name}`, path: `${source.path}\n${localCloudPairs.value.get(source.id)!.path}` }
+        : source)
     : []
 ))
 const canSwitchStorageSource = computed(() => sourceChoices.value.length > 0)
