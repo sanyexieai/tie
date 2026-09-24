@@ -900,7 +900,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   /** 同一页面的保存串行化，避免自动保存重叠时误用旧 expectedUpdatedAt。 */
   const persistChains = new Map<PageId, Promise<void>>()
 
-  async function persist(page: Page, options?: { force?: boolean }) {
+  async function persist(page: Page, options?: { force?: boolean; restore?: boolean }) {
     const prior = persistChains.get(page.id) ?? Promise.resolve()
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
@@ -952,8 +952,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function persistUnlocked(page: Page, options?: { force?: boolean }) {
+  async function persistUnlocked(page: Page, options?: { force?: boolean; restore?: boolean }) {
     const previous = pages.value.find((item) => item.id === page.id)
+    // Re-check after acquiring the per-page save lock: queued editor drafts
+    // must not resurrect a page that was trashed while they were waiting.
+    if (previous?.deletedAt && !page.deletedAt && !options?.restore) {
+      throw new Error('页面已移入回收站，请先恢复页面再编辑')
+    }
     // 树层级只认 frontmatter.parent_id；正文里的 tie://page 链接只做关联，不回写子页列表。
     const contentDraft = migratePageWorkspaceHrefs(page)
     // 无正文/标题/标签/删除态/树结构差异时不写盘、不刷新 updatedAt（避免自动保存空转）。
@@ -1281,7 +1286,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     try {
       const updated = await Promise.all(pages.value.filter((page) => restored.has(page.id)).map(async (page) => {
         const next = { ...page, parentId: restoreAtTopLevel && page.id === pageId ? null : page.parentId, deletedAt: null, updatedAt }
-        await persist(next, { force: true })
+        await persist(next, { force: true, restore: true })
         return pages.value.find((item) => item.id === page.id) ?? next
       }))
       pages.value = pages.value.map((page) => updated.find((candidate) => candidate.id === page.id) ?? page)

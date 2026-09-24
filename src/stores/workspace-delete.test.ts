@@ -28,6 +28,25 @@ beforeEach(() => {
 })
 
 describe('cloud deletion sync', () => {
+  it('rejects an editor draft queued behind trash, but allows explicit restore', async () => {
+    const store = useWorkspaceStore()
+    useBackendStore().profile.accessToken = null
+    const original = { ...page(), deletedAt: null }
+    store.pages = [original]
+    store.activePageId = original.id
+    const save = vi.spyOn(workspaceService, 'savePage').mockImplementation(async (page) => page)
+    const trash = store.trashPage(original.id)
+    const staleSave = expect(store.persist({ ...original }, { force: true })).rejects.toThrow('回收站')
+    await trash
+    await staleSave
+    expect(store.pages[0]?.deletedAt).toBeTruthy()
+    expect(store.activePageId).toBeNull()
+    expect(save).toHaveBeenCalledTimes(1)
+    await store.restorePage(original.id)
+    expect(store.pages[0]?.deletedAt).toBeNull()
+    expect(store.activePageId).toBe(original.id)
+  })
+
   it('uploads offline tombstones when reconnecting', async () => {
     const store = useWorkspaceStore()
     store.workspace = { id: 'local', name: 'Test', sources: [{ id: 'local:test', name: 'Test', kind: 'local', path: '/tmp/test' }] }

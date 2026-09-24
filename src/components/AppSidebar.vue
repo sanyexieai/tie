@@ -9,6 +9,7 @@ import { useBackendStore } from '@/stores/backend'
 const store = useWorkspaceStore()
 const backend = useBackendStore()
 const topLevelDragOver = ref(false)
+const deleteError = ref('')
 const emit = defineEmits<{ close: []; 'open-storage-settings': [] }>()
 const sourcesById = computed(() => Object.fromEntries(store.allSources.map((source) => [source.id, source])))
 const activePageCount = computed(() => store.pages.filter((page) => !page.deletedAt).length)
@@ -41,8 +42,9 @@ async function rename(pageId: string) {
   await store.renamePage(pageId, title)
 }
 async function remove(pageId: string) {
-  if (store.pages.length <= 1) return
-  await store.trashPage(pageId)
+  deleteError.value = ''
+  try { await store.trashPage(pageId) }
+  catch (error) { deleteError.value = error instanceof Error ? error.message : '删除页面失败，请重试' }
 }
 async function move(pageId: string, parentId: string) { await store.movePage(pageId, parentId) }
 async function reorder(pageId: string, targetId: string, position: 'before' | 'after') { await store.reorderPage(pageId, targetId, position) }
@@ -92,6 +94,7 @@ async function renameWorkspace() {
         <button type="button" title="新建顶层页面" aria-label="新建顶层页面" @click="createTopLevel">+</button>
       </div>
     </div>
+    <p v-if="deleteError" class="backend-error" role="alert">{{ deleteError }}</p>
     <div class="page-tree" role="tree" aria-label="我的页面">
       <div
         class="top-level-drop-zone"
