@@ -442,7 +442,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       )
       if (!backend.workspaces.some((item) => item.id === cloudWorkspace.id)) backend.workspaces.push(cloudWorkspace)
       const targetSourceId = `backend:${cloudWorkspace.id}`
-      const localPages = pages.value.filter((page) => !page.deletedAt && pageBoundToSource(page, source.id))
+      // Sync tombstones too, so offline deletions reach the cloud on reconnect.
+      const localPages = pages.value.filter((page) => pageBoundToSource(page, source.id))
       for (const page of localPages) {
         const key = `${identity}:${cloudWorkspace.id}:${page.id}`
         const signature = JSON.stringify({ ...page, storageSourceIds: undefined })
@@ -1019,6 +1020,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       try {
         await syncPageToMappedCloud(saved)
       } catch (error) {
+        if ((previous?.deletedAt ?? null) !== (saved.deletedAt ?? null)) throw error
         console.warn('自动同步到云工作区失败', error)
       }
       if (previous && previous.title !== saved.title) {
