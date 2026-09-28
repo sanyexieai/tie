@@ -87,13 +87,13 @@ fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource
         .to_owned();
     let root = fs_path::for_shell_open(root);
     let content_uri = crate::saf::is_content_uri(&source_path) || crate::saf::is_content_uri(&stored_path);
-    let (open_path, exists) = if content_uri {
+    let (open_path, exists, is_directory) = if content_uri {
         let uri = if crate::saf::is_content_uri(&stored_path) {
             stored_path.clone()
         } else {
             source_path.clone()
         };
-        (uri.clone(), crate::saf::uri_exists(&uri))
+        (uri.clone(), crate::saf::uri_exists(&uri), false)
     } else {
         let open_buf = if mode == "copy" {
             let stored = PathBuf::from(stored_path.replace('\\', "/"));
@@ -110,16 +110,17 @@ fn resource_from_meta(root: &Path, meta: &Value) -> Option<WorkspaceFileResource
             };
             fs_path::for_shell_open(&candidate)
         };
+        let metadata = crate::path_probe::metadata(open_buf.clone());
         (
             open_buf.to_string_lossy().into_owned(),
-            open_buf.exists(),
+            metadata.is_some(),
+            metadata.is_some_and(|value| value.is_dir()),
         )
     };
     let kind = if content_uri {
         kind
     } else {
-        let open_buf = PathBuf::from(&open_path);
-        if kind == "directory" || open_buf.is_dir() {
+        if kind == "directory" || is_directory {
             "directory".to_owned()
         } else {
             "file".to_owned()
@@ -154,7 +155,13 @@ fn ext_hint_is_directory(meta: &Value) -> bool {
 }
 
 #[tauri::command]
-pub(crate) fn list_workspace_files(root: String) -> Result<Vec<WorkspaceFileResource>, String> {
+pub(crate) async fn list_workspace_files(root: String) -> Result<Vec<WorkspaceFileResource>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_workspace_files_blocking(root))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn list_workspace_files_blocking(root: String) -> Result<Vec<WorkspaceFileResource>, String> {
     let root_path = PathBuf::from(root.trim());
     let index = files_index_path(&root_path);
     if !index.is_file() {
@@ -185,7 +192,13 @@ pub(crate) fn list_workspace_files(root: String) -> Result<Vec<WorkspaceFileReso
 }
 
 #[tauri::command]
-pub(crate) fn resolve_workspace_file(
+pub(crate) async fn resolve_workspace_file(root: String, file_id: String) -> Result<WorkspaceFileResource, String> {
+    tauri::async_runtime::spawn_blocking(move || resolve_workspace_file_blocking(root, file_id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn resolve_workspace_file_blocking(
     root: String,
     file_id: String,
 ) -> Result<WorkspaceFileResource, String> {
@@ -827,7 +840,13 @@ pub(crate) fn ingest_workspace_file(
 }
 
 #[tauri::command]
-pub(crate) fn native_path_exists(path: String) -> bool {
+pub(crate) async fn native_path_exists(path: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || native_path_exists_blocking(path))
+        .await
+        .unwrap_or(false)
+}
+
+fn native_path_exists_blocking(path: String) -> bool {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return false;
@@ -835,7 +854,7 @@ pub(crate) fn native_path_exists(path: String) -> bool {
     if crate::saf::is_content_uri(trimmed) {
         return crate::saf::uri_exists(trimmed);
     }
-    PathBuf::from(trimmed).exists()
+    crate::path_probe::metadata(PathBuf::from(trimmed)).is_some()
 }
 
 #[derive(Serialize)]
@@ -1092,4 +1111,20 @@ pub(crate) fn read_file_page_asset(
 ) -> Result<Vec<u8>, String> {
     let (sources, _) = workspace_sources(&app)?;
     io::read_file_page_asset(&sources, &page, &asset_name)
+}
+
+#[cfg(test)]
+mod offline_resource_tests {
+    use super::*;
+
+    #[test]
+    fn missing_link_keeps_identity_path_and_directory_hint() {
+        let meta = json!({"id":"file_offline", "title":"离线目录", "mode":"link",
+            "kind":"directory", "sourcePath":"/tie-test-missing-device/folder"});
+        let resource = resource_from_meta(Path::new("/tmp"), &meta).unwrap();
+        assert_eq!(resource.id, "file_offline");
+        assert_eq!(resource.kind, "directory");
+        assert_eq!(resource.open_path, "/tie-test-missing-device/folder");
+        assert!(!resource.exists);
+    }
 }

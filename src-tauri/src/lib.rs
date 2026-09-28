@@ -1,6 +1,7 @@
 mod common;
 mod local;
 mod mobile;
+mod path_probe;
 mod s3;
 mod saf;
 mod update;
