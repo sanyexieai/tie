@@ -10,6 +10,11 @@ async function waitForWorkspace(page: import('@playwright/test').Page) {
   await page.goto('/')
   await expect(page.locator('.editor-pane')).toBeVisible({ timeout: 15_000 })
   await expect(page.locator('.workspace-heading')).toContainText('我的知识库')
+  // A fresh profile offers cloud sign-in before local demo interactions.
+  const onboarding = page.getByRole('dialog', { name: '连接云服务' })
+  await expect(onboarding).toBeVisible()
+  await onboarding.getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(onboarding).toBeHidden()
 }
 
 test('loads browser demo workspace', async ({ page }) => {
