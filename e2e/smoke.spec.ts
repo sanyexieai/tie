@@ -37,3 +37,29 @@ test('exports markdown in browser mode', async ({ page }) => {
   const download = await downloadPromise
   expect(download.suggestedFilename()).toMatch(/欢迎使用 Tie\.md$/i)
 })
+
+test('renders Mermaid, recovers from invalid syntax, and preserves markdown', async ({ page }) => {
+  await waitForWorkspace(page)
+  const setMarkdown = async (markdown: string) => page.locator('.tiptap').evaluate((element, content) => {
+    const editor = (element as HTMLElement & { editor: import('@tiptap/core').Editor }).editor
+    editor.commands.setContent(content, { contentType: 'markdown' })
+  }, markdown)
+  await setMarkdown('```mermaid\nflowchart TD\n  A[开始] --> B[结束]\n```')
+  await expect(page.locator('.mermaid-preview svg')).toBeVisible()
+  await expect(page.locator('.mermaid-preview')).toContainText('开始')
+  await expect(page.locator('.mermaid-preview')).toContainText('结束')
+  const markdown = await page.locator('.tiptap').evaluate((element) => (
+    element as HTMLElement & { editor: import('@tiptap/core').Editor }
+  ).editor.getMarkdown())
+  expect(markdown).toContain('```mermaid\nflowchart TD')
+  expect(markdown).not.toContain('<svg')
+
+  await setMarkdown('```mermaid\nflowchart TD\n```')
+  await expect(page.locator('.mermaid-preview')).toContainText('添加节点和连线')
+  await setMarkdown('```mermaid\nflowchart TD\nA[\n```')
+  await expect(page.locator('.mermaid-preview')).toContainText('请检查 Mermaid 语法')
+  await setMarkdown('```mermaid\nflowchart TD\nA --> B\n```\n\n```mermaid\nsequenceDiagram\nAlice->>Bob: Hello\n```\n\n```js\nconst x = 1\n```')
+  await expect(page.locator('.mermaid-preview svg')).toHaveCount(2)
+  await expect(page.locator('code.language-js')).toContainText('const x = 1')
+  await expect(page.locator('.mermaid-preview').nth(1)).toContainText('Hello')
+})

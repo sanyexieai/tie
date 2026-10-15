@@ -7,7 +7,7 @@ import { Plugin } from '@tiptap/pm/state'
 import { TextSelection } from '@tiptap/pm/state'
 import StarterKit from '@tiptap/starter-kit'
 import Link from '@tiptap/extension-link'
-import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight'
+import { TieCodeBlock } from '@/extensions/code-block'
 import Placeholder from '@tiptap/extension-placeholder'
 import Image from '@tiptap/extension-image'
 import { Table } from '@tiptap/extension-table'
@@ -862,7 +862,7 @@ const editor = useEditor({
     }),
     TieLink,
     Markdown,
-    CodeBlockLowlight.configure({ lowlight }),
+    TieCodeBlock.configure({ lowlight }),
     createAssetImageExtension().configure({ allowBase64: false, inline: true }),
     createTieImagePasteExtension(),
     Placeholder.configure({ placeholder: '开始写作，支持 Markdown 快捷输入…' }),

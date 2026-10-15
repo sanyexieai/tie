@@ -2,6 +2,12 @@
 
 All notable changes to Tie are documented in this file.
 
+## [1.0.49] - 2026-10-15
+
+- 支持 Mermaid 代码块图表预览，保留源码编辑及 Markdown 保存格式。
+- 空流程图显示节点示例，语法错误显示提示，修改源码后自动重新渲染。
+- 增加流程图、时序图、错误恢复及 Markdown 源码保留的浏览器回归测试。
+
 ## [1.0.48] - 2026-09-29
 
 - 修复附件指向离线自动挂载磁盘时，启动及页面切换卡死的问题。
@@ -165,7 +171,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.42...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.49...HEAD
+[1.0.49]: https://github.com/sanyexieai/tie/releases/tag/v1.0.49
 [1.0.42]: https://github.com/sanyexieai/tie/releases/tag/v1.0.42
 [1.0.41]: https://github.com/sanyexieai/tie/releases/tag/v1.0.41
 [1.0.40]: https://github.com/sanyexieai/tie/releases/tag/v1.0.40
