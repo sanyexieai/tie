@@ -1,7 +1,11 @@
 #!/usr/bin/env node
+import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
+import { createCliPageBackend, resolveTieCli } from './tie-cli.js'
 import { createWorkspace } from './workspace.js'
 
 function text(data) {
@@ -10,13 +14,51 @@ function text(data) {
   }
 }
 
+function requireWorkspaceRoot() {
+  const raw = String(process.env.TIE_WORKSPACE || '').trim()
+  if (!raw) {
+    throw new Error('请设置 TIE_WORKSPACE 为 Tie 工作区根目录（含 pages/）')
+  }
+  const root = path.resolve(raw)
+  const pages = path.join(root, 'pages')
+  if (!fs.existsSync(pages) || !fs.statSync(pages).isDirectory()) {
+    throw new Error(`工作区无效：未找到 ${pages}`)
+  }
+  return root
+}
+
+function requireCli() {
+  const cliPath = resolveTieCli()
+  if (!cliPath) {
+    throw new Error(
+      [
+        'tie CLI 未找到（已取消 JS 回退）。',
+        '请启用 Skill `tie-upgrade-cli`，或本机执行：',
+        '  cargo build -p tie-cli --manifest-path src-tauri/Cargo.toml',
+        '  export TIE_CLI=$PWD/src-tauri/target/debug/tie',
+        '桌面端：设置 → Agent 知识库 → 重新接入（会写入 TIE_CLI）。',
+      ].join('\n'),
+    )
+  }
+  return cliPath
+}
+
+function openWorkspace() {
+  const root = requireWorkspaceRoot()
+  const cliPath = requireCli()
+  console.error(`[tie-mcp] backend = tie CLI (${cliPath})`)
+  return createCliPageBackend(root, cliPath, {
+    // migration stamp 仍由 JS 只读扫描；页面/文件读写只走 CLI
+    migrationStatus: (opts) => createWorkspace(root).migrationStatus(opts),
+  })
+}
+
 function main() {
   let workspace
   try {
-    workspace = createWorkspace(process.env.TIE_WORKSPACE)
+    workspace = openWorkspace()
   } catch (error) {
     console.error(`[tie-mcp] ${error.message}`)
-    console.error('[tie-mcp] 设置示例: TIE_WORKSPACE=/path/to/workspace node packages/tie-mcp/src/server.js')
     process.exit(1)
   }
 
@@ -24,6 +66,52 @@ function main() {
     name: 'tie',
     version: '0.1.0',
   })
+
+  server.tool(
+    'tie_doctor',
+    '诊断 Tie MCP 是否接到 Rust CLI、工作区是否可读。升级/接入出问题时先调这个；兼容与配置修复交给 Skill tie-upgrade-cli，不要手改 pages frontmatter。',
+    {},
+    async () => {
+      const cli = resolveTieCli() || workspace.cliPath || null
+      let formatCheck = null
+      let formatError = null
+      if (cli) {
+        const result = spawnSync(cli, ['--workspace', workspace.root, 'format', 'check'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, TIE_WORKSPACE: workspace.root },
+        })
+        const stdout = String(result.stdout || '').trim()
+        try {
+          formatCheck = stdout ? JSON.parse(stdout) : null
+        } catch {
+          formatCheck = { raw: stdout }
+        }
+        if (result.status !== 0) {
+          formatError = String(result.stderr || '').trim() || `exit ${result.status}`
+        }
+      }
+      const ok = Boolean(cli) && !formatError
+      return text({
+        ok,
+        workspace: workspace.root,
+        backend: 'cli',
+        tieCli: cli,
+        env: {
+          TIE_WORKSPACE: process.env.TIE_WORKSPACE || null,
+          TIE_CLI: process.env.TIE_CLI || null,
+          TIE_SOURCE_ID: process.env.TIE_SOURCE_ID || process.env.TIE_STORAGE_SOURCE_ID || null,
+        },
+        formatCheck,
+        formatError,
+        next: !cli
+          ? '缺少 tie CLI：启用 Skill tie-upgrade-cli'
+          : (formatError
+            ? 'format check 失败：启用 Skill tie-upgrade-cli，按 errors 用 tie_get/tie_write 修复，勿手写 frontmatter'
+            : 'MCP 已接到 CLI，可正常使用 tie_* tools'),
+      })
+    },
+  )
 
   server.tool(
     'tie_list_recent',
@@ -45,6 +133,7 @@ function main() {
     },
     async ({ query, tag, limit }) => text({
       workspace: workspace.root,
+      backend: 'cli',
       results: workspace.search({ query: query ?? '', tag, limit }).map((item) => ({
         ...workspace.summarize(item.page),
         score: item.score,
@@ -65,6 +154,7 @@ function main() {
       return text({
         ...page,
         path: `${workspace.pagesDir}/${page.id}.md`,
+        backend: 'cli',
       })
     },
   )
@@ -80,15 +170,15 @@ function main() {
 
   server.tool(
     'tie_write',
-    '安全写入 Tie 页面：自动补全 frontmatter；更新时先归档到 .tie/history。创建需 title；更新传 pageId。正文链接协议：页面用 [[标题]] 或 tie://page/{id}；区外登记用 tie://file/{sourceId}/{id}；区内相对路径用 tie://path/{sourceId}/{相对路径}；图片用 tie://asset/{pageId}/{文件名}（相对路径别名）。旧的无 sourceId 写法会在写入时补上。不要用手写 file:///。',
+    '安全写入 Tie 页面：自动补全 frontmatter；更新时先归档到 .tie/history。创建需 title；更新传 pageId。正文链接协议：页面用 [[标题]] 或 tie://page/{id}；区外登记用 tie://file/{sourceId}/{id}；区内相对路径用 tie://path/{sourceId}/{相对路径}；图片用 tie://asset/{pageId}/{文件名}。不要用手写 file:///。',
     {
       title: z.string().optional().describe('页面标题；创建时必填'),
-      markdown: z.string().optional().describe('Markdown 正文（纯文本，不要传 JSON 包装）；可省略一级标题，将自动补上。链接见工具说明中的协议表'),
-      body: z.string().optional().describe('markdown 的别名（同样应为纯 Markdown）'),
+      markdown: z.string().optional().describe('Markdown 正文（纯文本，不要传 JSON 包装）'),
+      body: z.string().optional().describe('markdown 的别名'),
       pageId: z.string().optional().describe('已有页面 id；提供则更新'),
       tags: z.array(z.string()).optional().describe('标签列表；更新时若省略则保留原标签'),
-      parentId: z.string().nullable().optional().describe('父页面 id；传 null 变为顶层。树只认 frontmatter parent_id，不写父页正文子链接'),
-      parentTitle: z.string().optional().describe('按标题设置父页面（推荐）；只写 parent_id'),
+      parentId: z.string().nullable().optional().describe('父页面 id；传 null 变为顶层'),
+      parentTitle: z.string().optional().describe('按标题设置父页面'),
       kind: z.enum(['decision', 'bug', 'preference', 'note']).optional()
         .describe('记忆类型，自动追加 memory 等相关标签'),
       matchTitle: z.boolean().optional().describe('若为 true 且未传 pageId，则按 title 匹配已有页并更新'),
@@ -99,11 +189,11 @@ function main() {
 
   server.tool(
     'tie_file_ingest',
-    '登记外部文件或目录。mode=link 登记为绝对引用，返回 tie://file/{id}（可带 sourceId）；mode=copy 导入工作区副本，返回 tie://path/… 相对链接。目录推荐 link。不要手写 file:///。工作区内已有路径直接写 tie://path/{相对路径}。',
+    '登记外部文件或目录。mode=link 登记为绝对引用；mode=copy 导入工作区副本。不要手写 file:///。',
     {
-      path: z.string().describe('本机文件或目录的绝对/相对路径（目录可直接传）'),
-      mode: z.enum(['copy', 'link']).describe('copy=导入工作区副本（相对路径）；link=登记原路径（绝对引用，目录推荐）'),
-      title: z.string().optional().describe('显示标题；默认用文件/目录名'),
+      path: z.string().describe('本机文件或目录路径'),
+      mode: z.enum(['copy', 'link']).describe('copy=导入副本；link=登记原路径'),
+      title: z.string().optional().describe('显示标题'),
     },
     async (args) => text(workspace.files.ingest(args)),
   )
@@ -123,7 +213,7 @@ function main() {
 
   server.tool(
     'tie_file_list',
-    '列出工作区已登记的文件资源（可按关键词 / 扩展名过滤）',
+    '列出工作区已登记的文件资源',
     {
       query: z.string().optional().describe('标题/路径/类型关键词'),
       ext: z.string().optional().describe('扩展名过滤，如 pdf'),
@@ -137,7 +227,7 @@ function main() {
 
   server.tool(
     'tie_file_open_hint',
-    '返回可打开路径与是否存在（copy→工作区副本；link→原路径）；不替用户打开文件',
+    '返回可打开路径与是否存在；不替用户打开文件',
     {
       fileId: z.string().describe('文件资源 id'),
     },
@@ -146,9 +236,9 @@ function main() {
 
   server.tool(
     'tie_migration_status',
-    '查询工作区数据迁移 stamp 与「需 Agent 收尾」的版本化目录。仅当某 migration 在目录中标了 agentFollowUp、且 stamp 已 applied、仍有残留时才需要跟 Skill tie-update。不要因「刚更新了 Tie」就调用并全库扫。',
+    '查询工作区数据迁移 stamp 与需 Agent 收尾的项。仅当 migration 标了 agentFollowUp 且仍有残留时跟 Skill tie-update。',
     {
-      migrationId: z.string().optional().describe('可选，只查某一 migration id，如 href-file-protocol-v1'),
+      migrationId: z.string().optional().describe('可选，只查某一 migration id'),
       limit: z.number().int().min(1).max(200).optional().describe('残留页条数上限，默认 50'),
     },
     async ({ migrationId, limit }) => text(workspace.migrationStatus({ migrationId, limit })),
@@ -156,7 +246,7 @@ function main() {
 
   const transport = new StdioServerTransport()
   server.connect(transport).then(() => {
-    console.error(`[tie-mcp] ready · workspace=${workspace.root}`)
+    console.error(`[tie-mcp] ready · workspace=${workspace.root} · backend=cli`)
   }).catch((error) => {
     console.error('[tie-mcp] failed to start', error)
     process.exit(1)

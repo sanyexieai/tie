@@ -664,7 +664,7 @@ fn mcp_package_cwd(server_path: &Path) -> Option<PathBuf> {
         .filter(|path| path.is_dir())
 }
 
-fn build_mcp_block(server_path: &Path, workspace_path: &Path) -> String {
+fn build_mcp_block(server_path: &Path, workspace_path: &Path, app: Option<&AppHandle>) -> String {
     let server_path = path_for_external_config(server_path);
     let workspace_path = path_for_external_config(workspace_path);
     let node = node_bin()
@@ -688,7 +688,7 @@ fn build_mcp_block(server_path: &Path, workspace_path: &Path) -> String {
         ));
     }
     block.push_str("\n[mcp_servers.tie.env]\n");
-    for (key, value) in mcp_runtime_env(&workspace_path) {
+    for (key, value) in mcp_runtime_env(&workspace_path, app) {
         block.push_str(&format!(
             "{} = {}\n",
             escape_toml_key(&key),
@@ -698,12 +698,97 @@ fn build_mcp_block(server_path: &Path, workspace_path: &Path) -> String {
     block
 }
 
-fn mcp_runtime_env(workspace_path: &Path) -> Vec<(String, String)> {
+fn look_like_tie_cli_name(name: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let lower = name.to_ascii_lowercase();
+        lower == "tie.exe" || (lower.starts_with("tie-") && lower.ends_with(".exe"))
+    }
+    #[cfg(not(windows))]
+    {
+        name == "tie" || (name.starts_with("tie-") && !name.contains('.'))
+    }
+}
+
+fn find_tie_cli_in_dir(dir: &Path) -> Option<PathBuf> {
+    let exact = dir.join(if cfg!(windows) { "tie.exe" } else { "tie" });
+    if exact.is_file() {
+        return Some(exact);
+    }
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // Avoid matching unrelated files; externalBin sidecars are `tie-<triple>`.
+        if look_like_tie_cli_name(&name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn resolve_tie_cli_binary(app: Option<&AppHandle>) -> Option<PathBuf> {
+    if let Ok(from_env) = std::env::var("TIE_CLI") {
+        let path = PathBuf::from(from_env.trim());
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            dirs.push(dir.to_path_buf());
+        }
+    }
+    if let Some(app) = app {
+        if let Ok(resource) = app.path().resource_dir() {
+            dirs.push(resource.clone());
+            dirs.push(resource.join("binaries"));
+        }
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for profile in ["release", "debug"] {
+        dirs.push(manifest_dir.join("target").join(profile));
+    }
+
+    for dir in dirs {
+        if let Some(found) = find_tie_cli_in_dir(&dir) {
+            return Some(found);
+        }
+    }
+
+    // Last resort: PATH
+    let which = if cfg!(windows) { "where" } else { "which" };
+    let output = Command::new(which).arg("tie").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+}
+
+fn mcp_runtime_env(workspace_path: &Path, app: Option<&AppHandle>) -> Vec<(String, String)> {
     let workspace = path_for_external_config(workspace_path);
     let mut env = vec![(
         "TIE_WORKSPACE".to_owned(),
         workspace.to_string_lossy().into_owned(),
     )];
+    if let Some(cli) = resolve_tie_cli_binary(app) {
+        env.push((
+            "TIE_CLI".to_owned(),
+            path_for_external_config(&cli).to_string_lossy().into_owned(),
+        ));
+    }
 
     // Windows 上 Codex 给 MCP 子进程的环境极精简，缺 PATH/SYSTEMROOT 时 node 经常起不来
     #[cfg(windows)]
@@ -787,7 +872,12 @@ fn mcp_runtime_env(workspace_path: &Path) -> Vec<(String, String)> {
     env
 }
 
-fn mcp_server_json(server_path: &Path, workspace_path: &Path, with_type: bool) -> Value {
+fn mcp_server_json(
+    server_path: &Path,
+    workspace_path: &Path,
+    with_type: bool,
+    app: Option<&AppHandle>,
+) -> Value {
     let server_path = path_for_external_config(server_path);
     let workspace_path = path_for_external_config(workspace_path);
     let mut entry = Map::new();
@@ -817,7 +907,7 @@ fn mcp_server_json(server_path: &Path, workspace_path: &Path, with_type: bool) -
         );
     }
     let mut env_map = Map::new();
-    for (key, value) in mcp_runtime_env(&workspace_path) {
+    for (key, value) in mcp_runtime_env(&workspace_path, app) {
         env_map.insert(key, json!(value));
     }
     entry.insert("env".into(), Value::Object(env_map));
@@ -850,7 +940,7 @@ fn write_codex_config(app: &AppHandle, server_path: &Path, workspace: &Path) -> 
     };
     backup_file(&config_path)?;
     let cleaned = strip_mcp_server_block(&existing);
-    let block = build_mcp_block(server_path, workspace);
+    let block = build_mcp_block(server_path, workspace, Some(app));
     let next = if cleaned.is_empty() {
         block
     } else {
@@ -860,6 +950,7 @@ fn write_codex_config(app: &AppHandle, server_path: &Path, workspace: &Path) -> 
 }
 
 fn upsert_json_mcp_config(
+    app: &AppHandle,
     config_path: &Path,
     server_path: &Path,
     workspace: &Path,
@@ -902,7 +993,7 @@ fn upsert_json_mcp_config(
 
     servers.as_object_mut().unwrap().insert(
         SERVER_NAME.to_owned(),
-        mcp_server_json(server_path, workspace, with_type),
+        mcp_server_json(server_path, workspace, with_type, Some(app)),
     );
 
     let pretty = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
@@ -1565,10 +1656,10 @@ fn configure_for_clients(
         match client {
             AgentClient::Codex => write_codex_config(app, &server_path, &workspace)?,
             AgentClient::Cursor => {
-                upsert_json_mcp_config(&cursor_config_path(app)?, &server_path, &workspace, false)?
+                upsert_json_mcp_config(app, &cursor_config_path(app)?, &server_path, &workspace, false)?
             }
             AgentClient::Claude => {
-                upsert_json_mcp_config(&claude_config_path(app)?, &server_path, &workspace, true)?
+                upsert_json_mcp_config(app, &claude_config_path(app)?, &server_path, &workspace, true)?
             }
         }
     }

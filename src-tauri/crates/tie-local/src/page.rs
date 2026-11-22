@@ -193,6 +193,15 @@ fn value(lines: &[&str], key: &str) -> String {
         .unwrap_or_default()
 }
 
+pub fn new_page_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mixed = nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    format!("pg_{:016x}", (mixed as u64) ^ ((mixed >> 64) as u64))
+}
+
 pub fn parse_page(content: &str) -> Result<Page, String> {
     let (_, rest) = content
         .split_once("---\n")
@@ -265,4 +274,57 @@ pub fn ensure_demo(root: &Path, storage_source_id: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata/page-format")
+            .join(name);
+        fs::read_to_string(path).expect("fixture")
+    }
+
+    fn assert_roundtrip(name: &str) {
+        let raw = fixture(name);
+        let page = parse_page(&raw).expect("parse");
+        let again = parse_page(&frontmatter(&page)).expect("reparse");
+        assert_eq!(page.id, again.id);
+        assert_eq!(page.title, again.title);
+        assert_eq!(page.icon, again.icon);
+        assert_eq!(page.parent_id, again.parent_id);
+        assert_eq!(page.sort_key, again.sort_key);
+        assert_eq!(page.tags, again.tags);
+        assert_eq!(page.created_at, again.created_at);
+        assert_eq!(page.updated_at, again.updated_at);
+        assert_eq!(page.deleted_at, again.deleted_at);
+        assert_eq!(page.storage_source_id, again.storage_source_id);
+        assert_eq!(page.storage_source_ids, again.storage_source_ids);
+        assert_eq!(page.markdown.trim(), again.markdown.trim());
+    }
+
+    #[test]
+    fn golden_minimal_roundtrip() {
+        assert_roundtrip("minimal.md");
+    }
+
+    #[test]
+    fn golden_full_roundtrip() {
+        let page = parse_page(&fixture("full.md")).unwrap();
+        assert_eq!(page.title, "完整页面");
+        assert_eq!(page.parent_id.as_deref(), Some("pg_0123456789abcdef"));
+        assert_eq!(page.tags, vec!["memory".to_owned(), "decision".to_owned()]);
+        assert_eq!(page.storage_source_ids.len(), 2);
+        assert_roundtrip("full.md");
+    }
+
+    #[test]
+    fn golden_deleted_roundtrip() {
+        let page = parse_page(&fixture("deleted.md")).unwrap();
+        assert!(page.deleted_at.is_some());
+        assert_roundtrip("deleted.md");
+    }
 }

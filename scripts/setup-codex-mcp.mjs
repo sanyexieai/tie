@@ -120,9 +120,25 @@ function nodeCommand() {
   return process.execPath && fs.existsSync(process.execPath) ? process.execPath : 'node'
 }
 
+function resolveBundledTieCli() {
+  const names = process.platform === 'win32' ? ['tie.exe', 'tie'] : ['tie']
+  for (const name of names) {
+    for (const profile of ['release', 'debug']) {
+      const candidate = path.join(root, 'src-tauri', 'target', profile, name)
+      if (fs.existsSync(candidate)) return candidate
+    }
+  }
+  if (process.env.TIE_CLI && fs.existsSync(process.env.TIE_CLI)) {
+    return path.resolve(process.env.TIE_CLI)
+  }
+  return null
+}
+
 function mcpRuntimeEnv(workspace) {
   const env = { TIE_WORKSPACE: workspace }
   env.PATH = process.env.PATH || ''
+  const tieCli = resolveBundledTieCli()
+  if (tieCli) env.TIE_CLI = tieCli
   if (process.platform === 'win32') {
     const keys = [
       'SystemRoot',
@@ -396,6 +412,31 @@ function main() {
     console.log('[dry-run] 跳过 npm install')
   }
 
+  // MCP 强制 Rust CLI：无二进制则尝试构建
+  let tieCli = resolveBundledTieCli()
+  if (!tieCli && !opts.dryRun) {
+    console.log('未找到 tie CLI，尝试 cargo build -p tie-cli…')
+    const built = run('cargo', ['build', '-p', 'tie-cli', '--manifest-path', path.join(root, 'src-tauri', 'Cargo.toml')], {
+      stdio: 'inherit',
+    })
+    if (built.status !== 0) {
+      console.error('构建 tie CLI 失败。请安装 Rust 后重试，或设置 TIE_CLI=/path/to/tie')
+      console.error('也可启用 Skill tie-upgrade-cli 让 Agent 处理。')
+      process.exit(built.status ?? 1)
+    }
+    tieCli = resolveBundledTieCli()
+  }
+  if (!tieCli && !opts.dryRun) {
+    console.error('仍未找到 tie CLI。请设置 TIE_CLI 或运行: npm run tie:prepare')
+    process.exit(1)
+  }
+  if (tieCli) {
+    process.env.TIE_CLI = tieCli
+    console.log(`TIE_CLI: ${tieCli}`)
+  } else {
+    console.log('[dry-run] 将要求 TIE_CLI（MCP 不再回退 JS）')
+  }
+
   if (opts.clients.includes('codex')) {
     writeCodexConfig({
       name: opts.name,
@@ -444,7 +485,8 @@ function main() {
     })
   }
 
-  console.log('\n完成。请新开对应客户端会话，然后试：用 tie_list_recent 列出最近页面')
+  console.log('\n完成。请新开对应客户端会话，然后试：tie_doctor → tie_list_recent')
+  console.log('若 MCP 报 CLI 未找到：启用 Skill tie-upgrade-cli')
 }
 
 try {

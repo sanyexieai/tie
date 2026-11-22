@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/tie-common", "crates/tie-local", "crates/tie-s3", "crates/tie-storage"]
+members = [".", "crates/tie-common", "crates/tie-local", "crates/tie-s3", "crates/tie-storage", "crates/tie-cli"]
 resolver = "2"
 
 [package]

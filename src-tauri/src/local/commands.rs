@@ -9,9 +9,11 @@ use std::{
 use tauri::AppHandle;
 use tie_storage::fs_path;
 use tie_storage::file_meta;
+// Page load/save goes through `tie_storage::local` (= `tie-local`): same frontmatter /
+// history rules as the headless `tie` CLI (`LocalWorkspace`). Multi-source fan-out stays here.
 use tie_storage::local::{
-    io, load_file_workspace, register_storage_source, resolve_directory_path, Page, PageRevision,
-    WorkspaceSettings, WorkspaceSnapshot,
+    io, load_file_workspace, register_storage_source, resolve_directory_path, FileRegistry, Page,
+    PageRevision, WorkspaceSettings, WorkspaceSnapshot,
 };
 
 #[derive(Serialize, Clone)]
@@ -163,29 +165,11 @@ pub(crate) async fn list_workspace_files(root: String) -> Result<Vec<WorkspaceFi
 
 fn list_workspace_files_blocking(root: String) -> Result<Vec<WorkspaceFileResource>, String> {
     let root_path = PathBuf::from(root.trim());
-    let index = files_index_path(&root_path);
-    if !index.is_file() {
-        return Ok(Vec::new());
-    }
-    let value = read_json_file(&index)?;
-    let entries = value.as_array().cloned().unwrap_or_default();
+    let items = FileRegistry::new(&root_path, None).list(None, None, 200)?;
     let mut out = Vec::new();
-    for entry in entries {
-        let id = entry
-            .get("id")
-            .and_then(|item| item.as_str())
-            .unwrap_or_default();
-        if id.is_empty() {
-            continue;
-        }
-        let meta_path = files_meta_path(&root_path, id);
-        if !meta_path.is_file() {
-            continue;
-        }
-        if let Ok(meta) = read_json_file(&meta_path) {
-            if let Some(resource) = resource_from_meta(&root_path, &meta) {
-                out.push(resource);
-            }
+    for meta in items {
+        if let Some(resource) = resource_from_meta(&root_path, &meta) {
+            out.push(resource);
         }
     }
     Ok(out)
@@ -207,11 +191,9 @@ fn resolve_workspace_file_blocking(
     if id.is_empty() {
         return Err("fileId 无效".into());
     }
-    let meta_path = files_meta_path(&root_path, id);
-    if !meta_path.is_file() {
-        return Err(format!("文件资源不存在：{id}"));
-    }
-    let meta = read_json_file(&meta_path)?;
+    let meta = FileRegistry::new(&root_path, None)
+        .get(id)?
+        .ok_or_else(|| format!("文件资源不存在：{id}"))?;
     resource_from_meta(&root_path, &meta).ok_or_else(|| format!("文件资源元数据无效：{id}"))
 }
 
@@ -272,100 +254,6 @@ fn sanitize_stored_name(ext: &str) -> String {
     } else {
         format!("original.{clean}")
     }
-}
-
-const MAX_COPY_FILE_BYTES: u64 = 50 * 1024 * 1024;
-const MAX_COPY_DIR_BYTES: u64 = 50 * 1024 * 1024;
-const MAX_COPY_DIR_FILES: u64 = 200;
-const MAX_COPY_DIR_DEPTH: u32 = 8;
-
-fn assert_copy_file_size(size: u64) -> Result<(), String> {
-    if size > MAX_COPY_FILE_BYTES {
-        return Err("导入文件不能超过 50 MB，请改用登记（绝对链接）".into());
-    }
-    Ok(())
-}
-
-fn directory_stats_for_copy(dir: &Path) -> Result<(u64, u64, u64), String> {
-    fn walk(
-        current: &Path,
-        depth: u32,
-        size: &mut u64,
-        files: &mut u64,
-        dirs: &mut u64,
-    ) -> Result<(), String> {
-        if depth > MAX_COPY_DIR_DEPTH {
-            return Err(format!(
-                "导入目录不能超过 {MAX_COPY_DIR_DEPTH} 层，请改用登记或缩小范围"
-            ));
-        }
-        let entries = fs::read_dir(current).map_err(|error| error.to_string())?;
-        for entry in entries {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let file_type = entry.file_type().map_err(|error| error.to_string())?;
-            if file_type.is_dir() {
-                *dirs += 1;
-                walk(&entry.path(), depth + 1, size, files, dirs)?;
-            } else if file_type.is_file() {
-                *files += 1;
-                if *files > MAX_COPY_DIR_FILES {
-                    return Err(format!(
-                        "导入目录不能超过 {MAX_COPY_DIR_FILES} 个文件，请改用登记或缩小范围"
-                    ));
-                }
-                if let Ok(meta) = entry.metadata() {
-                    *size += meta.len();
-                }
-                if *size > MAX_COPY_DIR_BYTES {
-                    return Err("导入目录不能超过 50 MB，请改用登记或缩小范围".into());
-                }
-            }
-        }
-        Ok(())
-    }
-    let mut size = 0u64;
-    let mut files = 0u64;
-    let mut dirs = 0u64;
-    walk(dir, 1, &mut size, &mut files, &mut dirs)?;
-    Ok((size, files, dirs))
-}
-
-fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
-    fs::create_dir_all(to).map_err(|error| error.to_string())?;
-    for entry in fs::read_dir(from).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
-        let target = to.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&entry.path(), &target)?;
-        } else if file_type.is_file() {
-            fs::copy(entry.path(), &target).map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(())
-}
-
-fn directory_preview(dir: &Path, max_entries: usize) -> Option<String> {
-    let mut names = Vec::new();
-    let entries = fs::read_dir(dir).ok()?;
-    for entry in entries.flatten().take(max_entries) {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let label = if entry.path().is_dir() {
-            format!("{name}/")
-        } else {
-            name
-        };
-        names.push(label);
-    }
-    if names.is_empty() {
-        return Some("(空目录)".into());
-    }
-    let total = fs::read_dir(dir).ok()?.count();
-    let mut preview = names.join("\n");
-    if total > max_entries {
-        preview.push_str("\n…");
-    }
-    Some(preview)
 }
 
 fn ensure_files_root(root: &Path) -> Result<PathBuf, String> {
@@ -717,11 +605,6 @@ pub(crate) fn ingest_workspace_file(
         );
     }
     let abs_path = resolve_abs_path(&path)?;
-    let meta_fs = fs::metadata(&abs_path).map_err(|error| error.to_string())?;
-    let is_directory = meta_fs.is_dir();
-    if !is_directory && !meta_fs.is_file() {
-        return Err(format!("不是普通文件或目录：{}", abs_path.display()));
-    }
     if let Some(id) = file_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
         if normalized_mode != "link" {
             return Err("只能重新绑定绝对登记".into());
@@ -734,108 +617,12 @@ pub(crate) fn ingest_workspace_file(
             source_id.as_deref(),
         );
     }
-    if let Some(existing) = find_existing_resource(&root_path, &abs_path, &normalized_mode)? {
-        return resource_from_meta(&root_path, &existing)
-            .ok_or_else(|| "已有文件资源元数据无效".to_string());
-    }
-
-    let kind = if is_directory { "directory" } else { "file" };
-    let ext = if is_directory {
-        "dir".to_owned()
-    } else {
-        extension_of(&abs_path)
-    };
-    let mime = guess_mime(&ext, is_directory);
-    let (size, entry_count) = if is_directory {
-        let (size, files, dirs) = if normalized_mode == "copy" {
-            directory_stats_for_copy(&abs_path)?
-        } else {
-            // link 只登记路径，禁止递归扫树（模型库等 TB 级目录会卡死 UI / 启动迁移）
-            (0u64, 0u64, 0u64)
-        };
-        (
-            size,
-            if normalized_mode == "copy" {
-                Some(json!({ "files": files, "dirs": dirs }))
-            } else {
-                None
-            },
-        )
-    } else {
-        if normalized_mode == "copy" {
-            assert_copy_file_size(meta_fs.len())?;
-        }
-        (meta_fs.len(), None)
-    };
-    let id = new_file_id();
-    let now = now_iso();
-    let base_title = title
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_owned())
-        .unwrap_or_else(|| {
-            abs_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(&id)
-                .to_owned()
-        });
-    let abs_display = abs_path.to_string_lossy().into_owned();
-    let stored_path = if normalized_mode == "copy" {
-        let dir = root_path.join(".tie").join("files").join(&id);
-        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-        if is_directory {
-            let target = dir.join("original");
-            copy_dir_recursive(&abs_path, &target)?;
-            PathBuf::from(".tie")
-                .join("files")
-                .join(&id)
-                .join("original")
-                .to_string_lossy()
-                .replace('\\', "/")
-        } else {
-            let stored_name = sanitize_stored_name(&ext);
-            let target = dir.join(&stored_name);
-            fs::copy(&abs_path, &target).map_err(|error| error.to_string())?;
-            PathBuf::from(".tie")
-                .join("files")
-                .join(&id)
-                .join(stored_name)
-                .to_string_lossy()
-                .replace('\\', "/")
-        }
-    } else {
-        abs_display.clone()
-    };
-
-    let preview = if is_directory {
-        directory_preview(&abs_path, 24)
-    } else {
-        None
-    };
-
-    let mut meta = json!({
-        "id": id,
-        "title": base_title,
-        "kind": kind,
-        "mode": normalized_mode,
-        "mime": mime,
-        "ext": ext,
-        "size": size,
-        "sourcePath": abs_display,
-        "storedPath": stored_path,
-        "sha256": Value::Null,
-        "preview": preview,
-        "createdAt": now,
-        "updatedAt": now,
-    });
-    if let Some(count) = entry_count {
-        meta["entryCount"] = count;
-    }
-    let meta = file_meta::normalize_file_meta(&meta, source_id.as_deref());
-    write_meta_file(&root_path, &meta)?;
-    upsert_index_entry(&root_path, &meta)?;
+    // Desktop link/copy shares tie-local FileRegistry with the CLI / MCP.
+    let meta = FileRegistry::new(&root_path, source_id.as_deref()).ingest(
+        &normalized_mode,
+        &abs_path,
+        title.as_deref(),
+    )?;
     resource_from_meta(&root_path, &meta).ok_or_else(|| "写入文件资源后读取失败".to_string())
 }
 

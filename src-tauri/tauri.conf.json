@@ -34,6 +34,9 @@
       "msi",
       "nsis"
     ],
+    "externalBin": [
+      "binaries/tie"
+    ],
     "resources": {
       "../packages/tie-mcp/src": "tie-mcp/src",
       "../packages/tie-mcp/package.json": "tie-mcp/package.json",

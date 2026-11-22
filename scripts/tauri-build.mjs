@@ -31,6 +31,14 @@ const tauriArgs = ['tauri', 'build']
 if (!hasBundles) tauriArgs.push('--bundles', defaultBundles())
 tauriArgs.push(...args)
 
+// Stage Rust `tie` CLI as Tauri externalBin sidecar for MCP (TIE_CLI).
+const prepare = spawnSync('node', [path.join(root, 'scripts', 'prepare-tie-cli.mjs')], {
+  cwd: root,
+  stdio: 'inherit',
+  shell: process.platform === 'win32',
+})
+if ((prepare.status ?? 1) !== 0) process.exit(prepare.status ?? 1)
+
 const result = spawnSync('npx', tauriArgs, {
   cwd: root,
   env: applyLocalUpdaterKey(process.env),

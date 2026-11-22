@@ -14,6 +14,31 @@ pub fn source_root(sources: &[StorageSource], storage_source_id: &str) -> Result
     Ok(PathBuf::from(&source.path))
 }
 
+/// Write a page into a single workspace root (shared by Tauri multi-source and CLI).
+pub fn save_page_to_root(
+    root: &std::path::Path,
+    page: Page,
+    expected_updated_at: Option<&str>,
+) -> Result<Page, String> {
+    let page = normalize_page_sources(page);
+    fs::create_dir_all(root.join("pages")).map_err(|error| error.to_string())?;
+    let path = markdown_path(root, &page.id);
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(previous) = parse_page(&content) {
+            if let Some(expected) = expected_updated_at {
+                if previous.updated_at != expected {
+                    return Err("页面文件已在磁盘上被修改，请重新载入后再保存".to_owned());
+                }
+            }
+            if page_has_changed(&previous, &page) {
+                archive_page_revision(root, &previous)?;
+            }
+        }
+    }
+    fs::write(path, frontmatter(&page)).map_err(|error| error.to_string())?;
+    Ok(page)
+}
+
 pub fn save_page(
     sources: &[StorageSource],
     page: Page,
@@ -27,22 +52,7 @@ pub fn save_page(
         .find(|source| source.id == write_id)
         .ok_or("页面所属存储源不存在")?;
     let root = PathBuf::from(&source.path);
-    fs::create_dir_all(root.join("pages")).map_err(|error| error.to_string())?;
-    let path = markdown_path(&root, &page.id);
-    if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(previous) = parse_page(&content) {
-            if let Some(expected) = expected_updated_at {
-                if previous.updated_at != expected {
-                    return Err("页面文件已在磁盘上被修改，请重新载入后再保存".to_owned());
-                }
-            }
-            if page_has_changed(&previous, &page) {
-                archive_page_revision(&root, &previous)?;
-            }
-        }
-    }
-    fs::write(path, frontmatter(&page)).map_err(|error| error.to_string())?;
-    Ok(page)
+    save_page_to_root(&root, page, expected_updated_at)
 }
 
 pub fn list_file_page_assets(page: &Page, sources: &[StorageSource]) -> Result<Vec<String>, String> {

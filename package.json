@@ -28,6 +28,9 @@
     "mcp:setup": "node scripts/setup-codex-mcp.mjs",
     "migrate:file-hrefs": "node scripts/migrate-file-hrefs.mjs",
     "test:mcp": "npm --prefix packages/tie-mcp test",
+    "test:tie-local": "cargo test -p tie-local --manifest-path src-tauri/Cargo.toml",
+    "tie": "cargo run -q -p tie-cli --manifest-path src-tauri/Cargo.toml --",
+    "tie:prepare": "node scripts/prepare-tie-cli.mjs",
     "release": "node scripts/release-version.mjs",
     "packhub:publish": "python3 scripts/publish-packhub-release.py"
   },

@@ -1,8 +1,10 @@
 # @tie/mcp
 
-本地优先的 Tie MCP Server：让 Codex（或其他 MCP 客户端）读写 **同一份** 工作区 `pages/*.md` 与 `.tie/files/`，**不依赖** Tie Backend。
+本地优先的 Tie MCP Server：让 Codex（或其他 MCP 客户端）读写 **同一份** 工作区 `pages/*.md` 与 `.tie/files/`，**不依赖** Tie Backend / Tie 图形界面。
 
-桌面端负责按协议渲染并打开本地链接（登记资源 / 相对路径 / 绝对路径样式不同）；登记与整理以 MCP/Skill 为主入口。
+**页面与文件登记只走 Rust `tie` CLI**（无 JS 回退）。启动时必须能解析到 `TIE_CLI`、PATH 上的 `tie`，或仓库内 `src-tauri/target/{release,debug}/tie`。缺失时 MCP 直接退出；请启用 Skill `tie-upgrade-cli` 或跑 `npm run mcp:setup` / 桌面「接入」。诊断用 `tie_doctor`。页面格式见 [`docs/page-format.md`](../../docs/page-format.md)。
+
+桌面端负责按协议渲染并打开本地链接（登记资源 / 相对路径 / 绝对路径样式不同）；登记与整理以 MCP/Skill / CLI 为主入口。
 
 发布版更新后，桌面端启动时会按内容指纹自动把安装包内的 `tie-mcp` 同步到应用数据目录（Agent 已指向该目录时一般无需再点「接入」；仍需新开 Agent 会话加载）。Skill 正文若要同步到工作区 / `~/.agents/skills`，仍需在设置里执行一次接入同步。
 
@@ -10,6 +12,7 @@
 
 | Tool | 作用 |
 |------|------|
+| `tie_doctor` | 诊断 CLI / 工作区 / `format check`；升级时先调 |
 | `tie_search` | 关键词 / 标签搜索 |
 | `tie_get` | 按 id 或精确标题读取全文 |
 | `tie_write` | 安全写入（自动 frontmatter；更新前写入 `.tie/history`） |
