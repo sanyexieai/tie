@@ -5,6 +5,7 @@ import path from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
+import { appendAuditEvent, resolveAuditActor } from './audit.js'
 import { createCliPageBackend, resolveTieCli } from './tie-cli.js'
 import { createWorkspace } from './workspace.js'
 
@@ -36,7 +37,7 @@ function requireCli() {
         '请启用 Skill `tie-upgrade-cli`，或本机执行：',
         '  cargo build -p tie-cli --manifest-path src-tauri/Cargo.toml',
         '  export TIE_CLI=$PWD/src-tauri/target/debug/tie',
-        '桌面端：设置 → Agent 知识库 → 重新接入（会写入 TIE_CLI）。',
+        '设置 TIE_CLI 为 tie 可执行文件的绝对路径。',
       ].join('\n'),
     )
   }
@@ -183,8 +184,41 @@ function main() {
         .describe('记忆类型，自动追加 memory 等相关标签'),
       matchTitle: z.boolean().optional().describe('若为 true 且未传 pageId，则按 title 匹配已有页并更新'),
       icon: z.string().optional().describe('可选 emoji 图标'),
+      actor: z.string().optional().describe('写入者标识：Agent 名（Cursor / Codex / Claude Code）。不要写「我」，省略时用 TIE_ACTOR'),
     },
-    async (args) => text(workspace.writePage(args)),
+    async (args) => {
+      const saved = workspace.writePage(args)
+      appendAuditEvent(workspace.root, {
+        type: 'write',
+        actor: resolveAuditActor(args.actor),
+        pageId: saved?.id,
+        title: saved?.title,
+        status: 'applied',
+      })
+      return text(saved)
+    },
+  )
+
+  server.tool(
+    'tie_export',
+    '导出页面闭包到目录：根页面 + 出链（[[标题]]/tie://page/id，默认 2 跳）+ 完整子树（parent_id）+ 这些页面的 .tie/assets。不含入链、历史、tie://file 登记。输出标准布局 pages/*.md + .tie/assets/。',
+    {
+      page: z.string().describe('根页面 id 或精确标题'),
+      depth: z.number().int().min(0).max(10).optional().describe('出链跳数，默认 2'),
+      withChildren: z.boolean().optional().describe('是否包含整棵子树，默认 true'),
+      out: z.string().optional().describe('输出目录（须不存在或为空）；默认当前目录下 tie-export-<rootId>'),
+    },
+    async (args) => text(workspace.exportClosure(args)),
+  )
+
+  server.tool(
+    'tie_import',
+    '把 tie_export 产出的目录导入当前工作区。strategy：skip（默认，id 已存在则跳过）| overwrite（覆盖，旧版本进 .tie/history）| new-id（id 冲突的页面换新 id 并重写 tie://page 链接）。',
+    {
+      path: z.string().describe('导出目录（含 pages/）'),
+      strategy: z.enum(['skip', 'overwrite', 'new-id']).optional().describe('冲突策略，默认 skip'),
+    },
+    async (args) => text(workspace.importClosure(args)),
   )
 
   server.tool(

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import LocalGraphPanel from '@/components/LocalGraphPanel.vue'
 import {
@@ -19,10 +19,31 @@ import {
 import { buildPathUrl, classifyLocalLink, fileRootForSource, sourceById, type LinkContext } from '@/services/link-runtime'
 import { isCrossSourceLink, rebindLinkedResource, sourceChipLabel } from '@/services/link-actions'
 import { openLocalLink } from '@/services/local-links'
+import { auditActorLabel, CHANGE_AGENTS } from '@/services/change-origin'
+import { listPageAuditEvents, type AuditEvent } from '@/services/audit'
+import { cancelPheromoneDraft, commitPheromoneDraft, focusPheromone, PHEROMONE_KIND_LABEL, pheromoneActorLabel, pheromoneState, pheromonesFor, removePheromone, setPheromonePanelOpen } from '@/services/pheromone'
 
 const store = useWorkspaceStore()
-const tab = ref<'outline' | 'properties' | 'links' | 'graph'>('outline')
+const CONTEXT_TAB_KEY = 'tie.context-tab'
+const contextTabs = ['outline', 'properties', 'links', 'graph', 'audit'] as const
+type ContextTab = (typeof contextTabs)[number]
+
+function loadContextTab(): ContextTab {
+  try {
+    const saved = localStorage.getItem(CONTEXT_TAB_KEY)
+    if (saved && (contextTabs as readonly string[]).includes(saved)) return saved as ContextTab
+  } catch { /* 读不到时用大纲 */ }
+  return 'outline'
+}
+
+const tab = ref<ContextTab>(loadContextTab())
 const emit = defineEmits<{ close: [] }>()
+const pheromones = computed(() => store.activePage ? pheromonesFor(store.activePage.id) : [])
+const auditEvents = ref<AuditEvent[]>([])
+const pheromoneDraft = computed(() => {
+  const draft = pheromoneState.draft
+  return draft && draft.pageId === store.activePage?.id ? draft : null
+})
 const headings = computed(() => (store.activePage?.markdown.match(/^#{2,6} .+$/gm) ?? []).map((line, index) => ({ index, level: line.indexOf(' '), text: line.replace(/^#+ /, '') })))
 const outgoing = computed(() => store.activePage ? store.outgoingLinks(store.activePage.id) : [])
 const incoming = computed(() => store.activePage ? store.backlinks(store.activePage.id) : [])
@@ -39,7 +60,7 @@ const fileResources = ref<WorkspaceFileResource[]>([])
 const openingFileId = ref<string | null>(null)
 const storageLabel = computed(() => {
   const source = store.allSources.find((item) => item.id === store.activePage?.storageSourceId)
-  if (!source) return '未知存储源'
+  if (!source) return '未知工作区'
   if (source.kind === 'backend') return `后台 · ${source.name}`
   if (source.kind === 's3') return `S3 · ${source.name}`
   return source.kind === 'smb' ? `SMB · ${source.name}` : `本地 · ${source.name}`
@@ -200,6 +221,33 @@ async function unlinkPage(pageId: string) {
   if (!source) return
   await store.unlinkPageReference(source.id, pageId)
 }
+
+function quoteStillPresent(quote: string) {
+  const markdown = store.activePage?.markdown ?? ''
+  if (markdown.includes(quote)) return true
+  return markdown.replace(/\s+/g, ' ').includes(quote)
+}
+
+async function loadAuditEvents() {
+  const page = store.activePage
+  if (!page || tab.value !== 'audit') {
+    auditEvents.value = []
+    return
+  }
+  auditEvents.value = await listPageAuditEvents(page.storageSourceId, page.id)
+}
+
+watch(tab, (value) => {
+  try { localStorage.setItem(CONTEXT_TAB_KEY, value) } catch { /* 写不进去时只保留本次 */ }
+  setPheromonePanelOpen(value === 'audit')
+  void loadAuditEvents()
+}, { immediate: true })
+watch(() => store.activePage?.id, () => { void loadAuditEvents() })
+watch(() => pheromoneState.openRequest, () => { tab.value = 'audit' })
+onMounted(() => {
+  if (pheromoneState.draft || pheromoneState.openRequest > 0) tab.value = 'audit'
+})
+onBeforeUnmount(() => setPheromonePanelOpen(false))
 </script>
 
 <template>
@@ -209,6 +257,7 @@ async function unlinkPage(pageId: string) {
       <button :class="{ active: tab === 'properties' }" @click="tab = 'properties'">属性</button>
       <button :class="{ active: tab === 'links' }" @click="tab = 'links'">链接</button>
       <button :class="{ active: tab === 'graph' }" @click="tab = 'graph'">图谱</button>
+      <button :class="{ active: tab === 'audit' }" @click="tab = 'audit'">变更</button>
       <button class="context-collapse-button" type="button" title="收起右侧栏" aria-label="收起右侧栏" @click="emit('close')">‹</button>
     </div>
     <div v-if="tab === 'outline'" class="context-content outline-list">
@@ -279,9 +328,54 @@ async function unlinkPage(pageId: string) {
         <p class="mention-hint">正文中出现标题但未建立链接；可在编辑器中输入 [[ 进行关联。</p>
       </section>
     </div>
-    <div v-else class="context-content graph-panel graph-panel-obsidian">
+    <div v-else-if="tab === 'graph'" class="context-content graph-panel graph-panel-obsidian">
       <LocalGraphPanel v-if="store.activePage" />
       <p v-else class="muted">打开页面后显示局部图谱。</p>
+    </div>
+    <div v-else class="context-content audit-panel">
+      <form v-if="pheromoneDraft" class="pheromone-draft" @submit.prevent="commitPheromoneDraft">
+        <header><em :class="pheromoneDraft.kind">{{ PHEROMONE_KIND_LABEL[pheromoneDraft.kind] }}</em><span>针对这段原文</span></header>
+        <blockquote>{{ pheromoneDraft.quote }}</blockquote>
+        <div class="pheromone-origin">
+          <span :title="pheromoneState.clientLabel">{{ pheromoneState.clientLabel }}</span>
+          <select v-model="pheromoneDraft.agent" aria-label="来源 Agent">
+            <option value="">本客户端</option>
+            <option v-for="name in CHANGE_AGENTS" :key="name" :value="name">{{ name }}</option>
+          </select>
+        </div>
+        <textarea v-model="pheromoneDraft.body" rows="3" autofocus :placeholder="pheromoneDraft.kind === 'correction' ? '写下修正' : (pheromoneDraft.kind === 'objection' ? '写下异议' : '写下支持的理由')"></textarea>
+        <div>
+          <button type="submit" :disabled="!pheromoneDraft.body.trim()">留下</button>
+          <button type="button" @click="cancelPheromoneDraft">取消</button>
+        </div>
+      </form>
+      <p v-if="!pheromones.length && !pheromoneDraft" class="muted">这一页还没有信息素。</p>
+      <article
+        v-for="item in pheromones"
+        :key="item.id"
+        class="pheromone-card"
+        :class="[item.kind, { active: pheromoneState.activeId === item.id, orphan: !quoteStillPresent(item.quote) }]"
+        :data-pheromone-card="item.id"
+        :data-pheromone-kind="item.kind"
+        @click="focusPheromone(item.id)"
+      >
+        <header>
+          <em>{{ PHEROMONE_KIND_LABEL[item.kind] }}</em>
+          <strong :title="pheromoneActorLabel(item)">{{ pheromoneActorLabel(item) }}</strong>
+          <time>{{ item.createdAt.slice(0, 16).replace('T', ' ') }}</time>
+        </header>
+        <p class="pheromone-quote">{{ item.quote }}</p>
+        <p class="pheromone-body">{{ item.body }}</p>
+        <small v-if="!quoteStillPresent(item.quote)">原文已不在页面中</small>
+        <button type="button" @click.stop="store.activePage && removePheromone(store.activePage.id, item.id)">撤回</button>
+      </article>
+      <article v-for="(event, index) in auditEvents" :key="`${event.at}-${index}`" class="audit-event">
+        <header>
+          <strong :title="auditActorLabel(event.actor)">{{ auditActorLabel(event.actor) }}</strong>
+          <time>{{ event.at.slice(0, 16).replace('T', ' ') }}</time>
+        </header>
+        <p>{{ event.title || event.note || event.type }}</p>
+      </article>
     </div>
   </aside>
 </template>

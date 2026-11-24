@@ -40,9 +40,11 @@ function normalizePageSources(page) {
 }
 
 export function parsePage(content) {
-  const start = content.indexOf('---\n')
+  // Accept CRLF checkouts / editors on Windows; writers still emit LF.
+  const normalized = String(content ?? '').replace(/\r\n/g, '\n')
+  const start = normalized.indexOf('---\n')
   if (start === -1) throw new Error('缺少 Frontmatter 起始标记')
-  const rest = content.slice(start + 4)
+  const rest = normalized.slice(start + 4)
   const end = rest.indexOf('---\n')
   if (end === -1) throw new Error('缺少 Frontmatter 结束标记')
   const meta = rest.slice(0, end)

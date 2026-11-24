@@ -2,14 +2,18 @@
 
 use crate::io::save_page_to_root;
 use crate::links::rewrite_legacy_workspace_hrefs;
-use crate::page::{frontmatter, new_page_id, normalize_page_sources, parse_page};
-use crate::paths::markdown_path;
+use crate::page::{
+    frontmatter, is_tie_document, new_page_id, normalize_page_sources, open_or_adopt, parse_page,
+    read_stored_page, remove_page_assets, remove_page_meta,
+};
+use crate::paths::{find_page_file, revision_dir};
+use crate::solution::{ensure_solution_file, find_solution_file, resolve_workspace_entry};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, io};
-use tie_common::Page;
+use tie_common::{Page, PageRevision};
 
 #[derive(Debug, Clone)]
 pub struct LocalWorkspace {
@@ -135,18 +139,23 @@ impl LocalWorkspace {
         Ok(files)
     }
 
+    fn hydrate_page_source(&self, mut page: Page) -> Page {
+        // 正文不再持久化 storage_source_*；加载时用工作区默认源补全。
+        if page.storage_source_id.trim().is_empty() && !self.default_source_id.trim().is_empty() {
+            page.storage_source_id = self.default_source_id.clone();
+        }
+        normalize_page_sources(page)
+    }
+
     pub fn load_all(&self, include_deleted: bool) -> Result<Vec<Page>, String> {
         let mut pages = Vec::new();
         for file in self.list_page_files()? {
-            match fs::read_to_string(&file) {
-                Ok(content) => match parse_page(&content) {
-                    Ok(page) => {
-                        if include_deleted || page.deleted_at.is_none() {
-                            pages.push(normalize_page_sources(page));
-                        }
+            match open_or_adopt(&self.root, &file, &self.default_source_id) {
+                Ok(page) => {
+                    if include_deleted || page.deleted_at.is_none() {
+                        pages.push(self.hydrate_page_source(page));
                     }
-                    Err(_) => continue,
-                },
+                }
                 Err(_) => continue,
             }
         }
@@ -173,12 +182,11 @@ impl LocalWorkspace {
     }
 
     pub fn get_by_id(&self, page_id: &str) -> Result<Option<Page>, String> {
-        let path = markdown_path(&self.root, page_id);
-        if !path.exists() {
+        let Some(path) = find_page_file(&self.root, page_id) else {
             return Ok(None);
-        }
-        let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        Ok(Some(normalize_page_sources(parse_page(&content)?)))
+        };
+        let page = read_stored_page(&self.root, &path)?;
+        Ok(Some(self.hydrate_page_source(page)))
     }
 
     pub fn find_by_title(&self, title: &str) -> Result<Option<Page>, String> {
@@ -367,7 +375,7 @@ impl LocalWorkspace {
         Ok(build(None, &by_parent))
     }
 
-    fn extract_outgoing(
+    pub(crate) fn extract_outgoing(
         page: &Page,
         by_id: &HashMap<String, Page>,
         by_title: &HashMap<String, String>,
@@ -607,9 +615,12 @@ impl LocalWorkspace {
 
         let created = existing.is_none();
         let page = save_page_to_root(&self.root, page, None)?;
+        let path = find_page_file(&self.root, &page.id)
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
         Ok(WritePageResult {
             created,
-            path: markdown_path(&self.root, &page.id).display().to_string(),
+            path,
             page: Self::summarize(&page),
         })
     }
@@ -643,23 +654,29 @@ impl LocalWorkspace {
                 .unwrap_or("?")
                 .to_owned();
             match fs::read_to_string(&file) {
-                Ok(content) => match parse_page(&content) {
-                    Ok(page) => {
-                        // Round-trip sanity: re-serialize should parse.
-                        if let Err(error) = parse_page(&frontmatter(&page)) {
-                            report.errors.push(FormatIssue {
-                                file: name,
-                                error: format!("round-trip 失败：{error}"),
-                            });
-                        } else {
-                            report.ok += 1;
-                        }
+                Ok(content) => {
+                    if !is_tie_document(&content) {
+                        report.ok += 1;
+                        continue;
                     }
-                    Err(error) => report.errors.push(FormatIssue {
-                        file: name,
-                        error,
-                    }),
-                },
+                    match parse_page(&content) {
+                        Ok(page) => {
+                            // 旧版 Tie 头仍要能往返；普通 Markdown 上面已记为通过。
+                            if let Err(error) = parse_page(&frontmatter(&page)) {
+                                report.errors.push(FormatIssue {
+                                    file: name,
+                                    error: format!("round-trip 失败：{error}"),
+                                });
+                            } else {
+                                report.ok += 1;
+                            }
+                        }
+                        Err(error) => report.errors.push(FormatIssue {
+                            file: name,
+                            error,
+                        }),
+                    }
+                }
                 Err(error) => report.errors.push(FormatIssue {
                     file: name,
                     error: error.to_string(),
@@ -669,7 +686,7 @@ impl LocalWorkspace {
         Ok(report)
     }
 
-    /// Create an empty workspace root with `pages/` (for CLI init).
+    /// Create an empty workspace root with `pages/` and a `.tie` solution file.
     pub fn init(root: impl AsRef<Path>, source_id: &str) -> Result<Self, String> {
         let root = root.as_ref();
         fs::create_dir_all(root.join("pages")).map_err(|e| e.to_string())?;
@@ -678,7 +695,190 @@ impl LocalWorkspace {
         } else {
             source_id.to_owned()
         };
+        let name = root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("workspace")
+            .to_owned();
+        ensure_solution_file(root, &name, &source)?;
         Self::open(root, Some(&source))
+    }
+
+    /// Open from a directory, `.tie` solution, or reject `.tiez` (unpack first).
+    pub fn open_entry(
+        entry: impl AsRef<Path>,
+        default_source_id: Option<&str>,
+    ) -> Result<Self, String> {
+        let (root, solution) = resolve_workspace_entry(entry.as_ref())?;
+        let source = default_source_id
+            .map(|s| s.to_owned())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                solution
+                    .as_ref()
+                    .map(|s| s.source_id.clone())
+                    .filter(|s| !s.trim().is_empty())
+            });
+        Self::open(root, source.as_deref())
+    }
+
+    pub fn solution_path(&self) -> PathBuf {
+        find_solution_file(&self.root)
+            .map(|(path, _)| path)
+            .unwrap_or_else(|| {
+                self.root.join(format!(
+                    "{}.tie",
+                    self.root
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("workspace")
+                ))
+            })
+    }
+
+    pub fn write_solution_file(&self, name: Option<&str>) -> Result<PathBuf, String> {
+        let display_name = name
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                self.root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("workspace")
+                    .to_owned()
+            });
+        ensure_solution_file(&self.root, &display_name, &self.default_source_id)
+    }
+
+    pub fn list_pages(&self, include_deleted: bool) -> Result<Vec<PageSummary>, String> {
+        let mut pages = self.load_all(include_deleted)?;
+        pages.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(pages.iter().map(Self::summarize).collect())
+    }
+
+    pub fn soft_delete(&self, id_or_title: &str) -> Result<PageSummary, String> {
+        let mut page = self
+            .resolve(id_or_title)?
+            .ok_or_else(|| format!("页面不存在：{id_or_title}"))?;
+        if page.deleted_at.is_some() {
+            return Ok(Self::summarize(&page));
+        }
+        page.deleted_at = Some(Self::now_iso());
+        page.updated_at = Self::now_iso();
+        let saved = save_page_to_root(&self.root, page, None)?;
+        Ok(Self::summarize(&saved))
+    }
+
+    pub fn restore_deleted(&self, id_or_title: &str) -> Result<PageSummary, String> {
+        let mut page = self
+            .load_all(true)?
+            .into_iter()
+            .find(|page| {
+                page.id == id_or_title
+                    || page.title.eq_ignore_ascii_case(id_or_title.trim())
+            })
+            .ok_or_else(|| format!("页面不存在：{id_or_title}"))?;
+        if page.deleted_at.is_none() {
+            return Ok(Self::summarize(&page));
+        }
+        page.deleted_at = None;
+        page.updated_at = Self::now_iso();
+        let saved = save_page_to_root(&self.root, page, None)?;
+        Ok(Self::summarize(&saved))
+    }
+
+    /// Permanently remove a page file, history, and assets (must already be soft-deleted unless `force`).
+    pub fn purge_page(&self, id_or_title: &str, force: bool) -> Result<PageSummary, String> {
+        let page = self
+            .load_all(true)?
+            .into_iter()
+            .find(|page| {
+                page.id == id_or_title
+                    || page.title.eq_ignore_ascii_case(id_or_title.trim())
+            })
+            .ok_or_else(|| format!("页面不存在：{id_or_title}"))?;
+        if page.deleted_at.is_none() && !force {
+            return Err("页面未在回收站；先 `tie delete` 或使用 --force".to_owned());
+        }
+        let summary = Self::summarize(&page);
+        if let Some(markdown) = find_page_file(&self.root, &page.id) {
+            fs::remove_file(&markdown).map_err(|e| format!("无法删除页面文件：{e}"))?;
+        }
+        remove_page_meta(&self.root, &page.id);
+        let history = revision_dir(&self.root, &page.id);
+        if history.exists() {
+            fs::remove_dir_all(&history).map_err(|e| format!("无法移除页面历史：{e}"))?;
+        }
+        remove_page_assets(&self.root, &page.id)?;
+        Ok(summary)
+    }
+
+    pub fn list_revisions(&self, id_or_title: &str) -> Result<Vec<PageRevision>, String> {
+        let page = self
+            .resolve(id_or_title)?
+            .ok_or_else(|| format!("页面不存在：{id_or_title}"))?;
+        let directory = revision_dir(&self.root, &page.id);
+        let mut revisions = Vec::new();
+        if !directory.exists() {
+            return Ok(revisions);
+        }
+        for entry in fs::read_dir(directory).map_err(|e| e.to_string())? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let parsed =
+                parse_page(&content).map_err(|e| format!("{}: {e}", path.display()))?;
+            let id = path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .ok_or("版本文件名无效")?
+                .to_owned();
+            revisions.push(PageRevision {
+                id,
+                saved_at: parsed.updated_at,
+                title: parsed.title,
+            });
+        }
+        revisions.sort_by(|a, b| b.id.cmp(&a.id));
+        Ok(revisions)
+    }
+
+    pub fn get_revision(&self, id_or_title: &str, revision_id: &str) -> Result<Page, String> {
+        let page = self
+            .resolve(id_or_title)?
+            .ok_or_else(|| format!("页面不存在：{id_or_title}"))?;
+        let path = revision_dir(&self.root, &page.id).join(format!("{revision_id}.md"));
+        let content =
+            fs::read_to_string(&path).map_err(|e| format!("无法读取历史版本：{e}"))?;
+        Ok(self.hydrate_page_source(parse_page(&content)?))
+    }
+
+    pub fn restore_revision(
+        &self,
+        id_or_title: &str,
+        revision_id: &str,
+    ) -> Result<PageSummary, String> {
+        let page = self
+            .resolve(id_or_title)?
+            .ok_or_else(|| format!("页面不存在：{id_or_title}"))?;
+        let revision = self.get_revision(id_or_title, revision_id)?;
+        let restored = Page {
+            id: page.id,
+            storage_source_id: page.storage_source_id.clone(),
+            storage_source_ids: if page.storage_source_ids.is_empty() {
+                revision.storage_source_ids.clone()
+            } else {
+                page.storage_source_ids.clone()
+            },
+            created_at: page.created_at.clone(),
+            updated_at: Self::now_iso(),
+            deleted_at: page.deleted_at.clone(),
+            ..revision
+        };
+        let saved = save_page_to_root(&self.root, restored, None)?;
+        Ok(Self::summarize(&saved))
     }
 }
 
@@ -752,9 +952,10 @@ mod tests {
         let dir = env::temp_dir().join(format!("tie-api-{}", new_page_id()));
         let _ = fs::remove_dir_all(&dir);
         let ws = LocalWorkspace::init(&dir, "src_local_0123456789abcdef").expect("init");
+        // Use ASCII title to avoid Windows source-encoding edge cases in CI shells.
         let created = ws
             .write_page(WritePageInput {
-                title: Some("CLI 测试".into()),
+                title: Some("CLI test".into()),
                 markdown: Some("hello tie".into()),
                 tags: Some(vec!["memory".into()]),
                 kind: Some("note".into()),
@@ -763,10 +964,30 @@ mod tests {
             .expect("write");
         assert!(created.created);
         let page = ws.get_by_id(&created.page.id).unwrap().expect("get");
-        assert_eq!(page.title, "CLI 测试");
+        assert_eq!(page.title, "CLI test");
         assert!(page.tags.iter().any(|t| t == "memory"));
+        assert_eq!(page.storage_source_id, "src_local_0123456789abcdef");
         let hits = ws.search("hello", None, 10, false).unwrap();
         assert!(!hits.is_empty());
+        assert!(ws.solution_path().is_file());
+
+        let deleted = ws.soft_delete(&created.page.id).unwrap();
+        assert!(deleted.deleted_at.is_some());
+        assert!(ws.resolve(&created.page.id).unwrap().unwrap().deleted_at.is_some());
+        let restored = ws.restore_deleted(&created.page.id).unwrap();
+        assert!(restored.deleted_at.is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_entry_from_solution() {
+        let dir = env::temp_dir().join(format!("tie-open-{}", new_page_id()));
+        let _ = fs::remove_dir_all(&dir);
+        let ws = LocalWorkspace::init(&dir, "src_local_openentrytest01").unwrap();
+        let sol = ws.solution_path();
+        let opened = LocalWorkspace::open_entry(&sol, None).unwrap();
+        assert_eq!(opened.default_source_id(), "src_local_openentrytest01");
         let _ = fs::remove_dir_all(&dir);
     }
 }

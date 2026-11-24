@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createFileRegistry } from './files.js'
@@ -77,8 +78,30 @@ export function createWorkspace(workspacePath) {
     return pages
   }
 
+  function readSourceIdMarker() {
+    const marker = path.join(root, '.tie', 'source-id')
+    if (!fs.existsSync(marker)) return ''
+    try {
+      return String(fs.readFileSync(marker, 'utf8') || '').trim()
+    } catch {
+      return ''
+    }
+  }
+
+  function writeSourceIdMarker(id) {
+    const marker = path.join(root, '.tie', 'source-id')
+    try {
+      fs.mkdirSync(path.dirname(marker), { recursive: true })
+      fs.writeFileSync(marker, `${id}\n`, 'utf8')
+    } catch {
+      /* ignore */
+    }
+  }
+
   function inferStorageSourceId() {
     if (envSourceId) return envSourceId
+    const marked = readSourceIdMarker()
+    if (marked) return marked
     const counts = new Map()
     for (const page of loadAll({ includeDeleted: true })) {
       const id = String(page.storageSourceId || '').trim()
@@ -93,7 +116,15 @@ export function createWorkspace(workspacePath) {
         n = count
       }
     }
-    return best
+    if (best) {
+      writeSourceIdMarker(best)
+      return best
+    }
+    // 正文不再持久化 storage_source_id 时，用工作区路径生成稳定本机源 id。
+    const hash = crypto.createHash('sha256').update(root).digest('hex').slice(0, 16)
+    const generated = `src_local_${hash}`
+    writeSourceIdMarker(generated)
+    return generated
   }
 
   const files = createFileRegistry(root, { getSourceId: inferStorageSourceId })
@@ -255,12 +286,13 @@ export function createWorkspace(workspacePath) {
       }
     }
 
+    const resolvedSourceId = existing?.storageSourceId || storageSourceId || inferStorageSourceId()
     const markdown = rewriteLegacyWorkspaceHrefs(
       ensureTitleMarkdown(
         title || existing?.title || '无标题',
         normalizeMarkdownInput(input.markdown ?? input.body ?? existing?.markdown ?? ''),
       ),
-      existing?.storageSourceId || storageSourceId,
+      resolvedSourceId,
     )
 
     const page = {
@@ -274,7 +306,7 @@ export function createWorkspace(workspacePath) {
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       deletedAt: existing?.deletedAt ?? null,
-      storageSourceId: existing?.storageSourceId || storageSourceId,
+      storageSourceId: resolvedSourceId,
     }
 
     // refresh title from markdown heading

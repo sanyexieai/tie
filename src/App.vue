@@ -15,21 +15,24 @@ import CommandPalette from '@/components/CommandPalette.vue'
 import BackendConnectionDialog from '@/components/BackendConnectionDialog.vue'
 import StorageSettingsDialog from '@/components/StorageSettingsDialog.vue'
 import AppUpdateDialog from '@/components/AppUpdateDialog.vue'
+import PheromoneLinks from '@/components/PheromoneLinks.vue'
 import AppIcon from '@/components/AppIcon.vue'
+import WebReadView from '@/components/WebReadView.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 import { startAutoSync } from '@/services/auto-sync'
 import { backendService } from '@/services/backend'
 import { checkForAppUpdateOnStartup } from '@/services/app-updater'
 import { installMobileBackHandler, resetMobileBackLeaveArm, uninstallMobileBackHandler } from '@/services/mobile-back'
+import { refreshChangeOrigin } from '@/services/pheromone'
 import { initPlatform, isMobileClient, usesMobileUi } from '@/services/platform'
 
 const PANEL_WIDTHS_KEY = 'tie:panel-widths'
 const SIDEBAR_DEFAULT = 256
-const CONTEXT_DEFAULT = 244
+const CONTEXT_DEFAULT = 280
 const SIDEBAR_MIN = 180
 const SIDEBAR_MAX = 480
-const CONTEXT_MIN = 180
+const CONTEXT_MIN = 260
 const CONTEXT_MAX = 420
 
 const store = useWorkspaceStore()
@@ -43,9 +46,14 @@ const mobileContextOpen = ref(false)
 const backendDialogOpen = ref(false)
 const storageSettingsOpen = ref(false)
 const updateDialogOpen = ref(false)
+const webReadMode = ref(false)
 const sidebarWidth = ref(SIDEBAR_DEFAULT)
 const contextWidth = ref(CONTEXT_DEFAULT)
 const resizingPanel = ref<'sidebar' | 'context' | null>(null)
+
+function syncWebReadMode() {
+  webReadMode.value = /#\/read\//.test(window.location.hash) || new URLSearchParams(window.location.search).has('read')
+}
 let mobileLayoutQuery: MediaQueryList | null = null
 let contextDrawerQuery: MediaQueryList | null = null
 let resizeStartX = 0
@@ -164,6 +172,12 @@ function toggleContextPanel() {
     return
   }
   contextCollapsed.value = !contextCollapsed.value
+}
+
+function showChangesPanel() {
+  focusMode.value = false
+  if (usesContextDrawer.value) mobileContextOpen.value = true
+  else contextCollapsed.value = false
 }
 
 const mobileBackHint = ref('')
@@ -298,6 +312,8 @@ function onWindowResize() {
 }
 
 onMounted(async () => {
+  syncWebReadMode()
+  window.addEventListener('hashchange', syncWebReadMode)
   loadPanelWidths()
   syncViewportHeight()
   requestAnimationFrame(syncViewportHeight)
@@ -316,7 +332,9 @@ onMounted(async () => {
   window.visualViewport?.addEventListener('resize', syncViewportHeight)
   window.addEventListener('keydown', onShortcut)
   window.addEventListener('tie:toggle-focus-mode', toggleFocusMode)
+  window.addEventListener('tie:show-changes', showChangesPanel)
   await initPlatform()
+  void refreshChangeOrigin()
   syncViewportHeight()
   syncMobileLayout()
   syncContextDrawer()
@@ -365,12 +383,14 @@ watch(
 
 onBeforeUnmount(() => {
   document.body.classList.remove('panel-resizing')
+  window.removeEventListener('hashchange', syncWebReadMode)
   mobileLayoutQuery?.removeEventListener('change', syncMobileLayout)
   contextDrawerQuery?.removeEventListener('change', syncContextDrawer)
   window.removeEventListener('resize', onWindowResize)
   window.visualViewport?.removeEventListener('resize', syncViewportHeight)
   window.removeEventListener('keydown', onShortcut)
   window.removeEventListener('tie:toggle-focus-mode', toggleFocusMode)
+  window.removeEventListener('tie:show-changes', showChangesPanel)
   uninstallMobileBackHandler()
   if (mobileBackHintTimer) clearTimeout(mobileBackHintTimer)
 })
@@ -390,8 +410,9 @@ onBeforeUnmount(() => {
     }"
     :style="shellStyle"
   >
+  <WebReadView v-if="webReadMode" />
   <!-- 移动端：Notion 式列表 → 点开编辑器 -->
-  <template v-if="usesMobileShell && !focusMode">
+  <template v-else-if="usesMobileShell && !focusMode">
     <MobileHomeView v-if="mobileOnHome" @open-settings="storageSettingsOpen = true" />
     <template v-else>
       <MobileStackShell v-if="store.showingSearch" title="搜索" @back="goMobileHome">
@@ -467,6 +488,7 @@ onBeforeUnmount(() => {
       @pointercancel="endResize"
     ></div>
     <ContextPanel v-if="!focusMode && !contextCollapsed" @close="toggleContextPanel" />
+    <PheromoneLinks />
     <div v-if="mobileContextOpen" class="mobile-context-scrim" @click="mobileContextOpen = false"></div>
     <ContextPanel v-if="mobileContextOpen" class="mobile-context-panel" @close="mobileContextOpen = false" />
   </template>

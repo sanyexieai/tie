@@ -26,7 +26,7 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-process = "2"
 tie-storage = { path = "crates/tie-storage", features = ["local", "s3"] }
 minio = { version = "0.4", default-features = false, features = ["rustls-tls", "default-crypto", "http2"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "blocking"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["fs", "io-util"] }
 

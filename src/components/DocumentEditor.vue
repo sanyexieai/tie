@@ -7,12 +7,13 @@ import TiptapEditor from '@/components/TiptapEditor.vue'
 import DocumentMeta from '@/components/DocumentMeta.vue'
 import { aiTaggingReady, loadAiTaggingConfig, suggestTagsWithAi } from '@/services/ai-tagging'
 import { backendService, isBackendRemoteSourceId } from '@/services/backend'
-import { pageBoundToSource, pageContentEqual, pageSourceIds, pageSourceRoleLabel, sourceShortLabel } from '@/services/page-sources'
+import { pageContentEqual, pageSourceIds, sourceShortLabel } from '@/services/page-sources'
 import { isCloudStorageSourceId } from '@/services/storage-identity'
 import { isLocalWinningConflict } from '@/services/storage/sync-merge'
 import { isS3SourceId } from '@/services/s3'
 import { suggestTags, type TagSuggestion } from '@/services/tagging'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
+import { workspaceService } from '@/services/workspace'
 import { isMobileClient, usesMobileUi } from '@/services/platform'
 
 const store = useWorkspaceStore()
@@ -20,9 +21,9 @@ const backend = useBackendStore()
 const isDesktop = '__TAURI_INTERNALS__' in window
 const title = ref('')
 const bodyMarkdown = ref('')
+const headingInFile = ref(false)
 const tags = ref<string[]>([])
 const tagDraft = ref('')
-const sourceMenuOpen = ref(false)
 const manualSaveNotice = ref(false)
 const copiedLinkNotice = ref(false)
 const exportedNotice = ref(false)
@@ -62,7 +63,6 @@ let resolveAutoSaveFlushDone: (() => void) | null = null
 
 const status = computed(() => {
   const kind = activeSource.value?.kind
-  const isCloud = kind === 'backend' || kind === 's3'
   const savedLabel = kind === 'backend'
     ? '已保存到后台'
     : kind === 's3'
@@ -72,25 +72,24 @@ const status = computed(() => {
     store.activePage
     && (store.pageHasPendingRemoteSave(store.activePage.id) || store.syncConflicts.has(store.activePage.id)),
   )
-  const awaitingLabel = isCloud ? '未写入远程' : '保存未完成'
   return store.saving
-    ? '保存中…'
+    ? '正在保存…'
     : refreshing.value
       ? '刷新中…'
       : saveError.value
         ? '保存失败'
         : awaitingWrite
-          ? awaitingLabel
+          ? '尚未同步到其他设备'
           : hasUnsavedChanges.value
             ? '未保存'
             : refreshedNotice.value
               ? '已从存储刷新'
               : exportedNotice.value
-                ? '已导出 Markdown'
+                ? '已导出'
                 : copiedLinkNotice.value
                   ? '已复制页面链接'
                   : manualSaveNotice.value
-                    ? '已手动保存'
+                    ? '已保存'
                     : savedLabel
 })
 const isFavorite = computed(() => Boolean(store.activePage && store.favoritePageIds.includes(store.activePage.id)))
@@ -100,7 +99,6 @@ const boundSourceIds = computed(() => {
   const known = new Set(store.allSources.map((source) => source.id))
   return pageSourceIds(store.activePage).filter((id) => known.has(id))
 })
-const boundCloudSourceIds = computed(() => boundSourceIds.value.filter((id) => isCloudStorageSourceId(id)))
 function cloudWorkspaceId(source: StorageSource) {
   if (source.id.startsWith('backend:')) return source.id.slice('backend:'.length)
   if (source.id.startsWith('backend-s3:')) {
@@ -136,32 +134,13 @@ const pairedLocalSource = computed(() => {
   if (!isCloudStorageSourceId(active.id)) return null
   return localCloudPairs.value.get(active.id) ?? null
 })
-const activeSource = computed(() => {
-  const source = rawActiveSource.value
-  const local = pairedLocalSource.value
-  if (!source || !local) return source
-  if (isCloudStorageSourceId(source.id)) return { ...source, name: `云 + 本 · ${local.name}`, path: `${source.path}\n${local.path}` }
-  return source
+const activeSource = computed(() => pairedLocalSource.value ?? rawActiveSource.value)
+const workspaceBadgeTitle = computed(() => {
+  const source = activeSource.value
+  if (!source) return ''
+  const mode = backend.connected ? '本地 + 服务器，保存后云同步' : '本地工作区'
+  return `${source.name}\n${source.path}\n${mode}`
 })
-const boundSourceCount = computed(() => pairedLocalSource.value ? boundSourceIds.value.length - 1 : boundSourceIds.value.length)
-const sourceChoices = computed(() => (
-  store.activePage
-    ? store.allSources
-      .filter((source) => !(localCloudPairs.value.has(source.id) ? false : [...localCloudPairs.value.values()].some((item) => item.id === source.id)))
-      .filter((source) => store.canBindPageTo(source.id) || pageBoundToSource(store.activePage!, source.id))
-      .map((source) => localCloudPairs.value.get(source.id)
-        ? { ...source, name: `云 + 本 · ${localCloudPairs.value.get(source.id)!.name}`, path: `${source.path}\n${localCloudPairs.value.get(source.id)!.path}` }
-        : source)
-    : []
-))
-const canSwitchStorageSource = computed(() => sourceChoices.value.length > 0)
-const hasAnyCloudSource = computed(() => store.allSources.some((source) => isCloudStorageSourceId(source.id)))
-const sourceBindHint = computed(() => (
-  hasAnyCloudSource.value
-    ? '协作与同步认「云端主源」（S3/后台）。日常保存只有写入云端成功才算成功；本机目录只是备份，需手动「同步到备份」。未写入远程时会显示失败或待同步，不会当成已保存。'
-    : '当前只有本地/SMB 工作区：保存直接写入本机目录。若磁盘暂时不可写，会进入待重试队列，不会显示成“远端未同步”。'
-))
-const sourceBindingBusy = ref(false)
 const hasRemoteSaveConflict = computed(() => {
   const message = saveError.value ?? ''
   return message.includes('其他设备更新') || message.includes('其他程序修改')
@@ -184,7 +163,7 @@ function maybeAutoOpenConflictPreview() {
   if (isLocalDiskSource.value) return
   void loadConflictPreview()
 }
-const conflictLocalMarkdown = computed(() => `# ${title.value.trim() || '无标题'}\n\n${bodyMarkdown.value}`)
+const conflictLocalMarkdown = computed(() => composeStoredMarkdown(title.value.trim() || '无标题', bodyMarkdown.value))
 type ConflictLine = { text: string; kind: 'same' | 'changed' }
 const conflictDiff = computed(() => {
   const remote = conflictRemotePage.value?.markdown
@@ -215,12 +194,6 @@ const conflictDiff = computed(() => {
   while (remoteIndex < remoteLines.length) remoteResult.push({ text: remoteLines[remoteIndex++], kind: 'changed' })
   return { local, remote: remoteResult }
 })
-function sourceBadgeLabel(kind: string) {
-  if (kind === 'smb') return '共'
-  if (kind === 'backend') return '后'
-  if (kind === 's3') return '云'
-  return '本'
-}
 const breadcrumbs = computed(() => {
   const current = store.activePage
   if (!current) return []
@@ -248,10 +221,16 @@ const wordCount = computed(() => bodyMarkdown.value
   .replace(/\s/g, '')
   .length)
 
+function composeStoredMarkdown(cleanTitle: string, body: string) {
+  return headingInFile.value ? `# ${cleanTitle}\n\n${body}` : body
+}
+
 function loadActivePage() {
   const page = store.activePage
+  const markdown = page?.markdown ?? ''
+  headingInFile.value = markdown.startsWith('# ')
   title.value = page?.title ?? ''
-  bodyMarkdown.value = page?.markdown.replace(/^# .*\n?/, '') ?? ''
+  bodyMarkdown.value = headingInFile.value ? markdown.replace(/^# .*\n?/, '') : markdown
   tags.value = page?.tags ?? []
   tagDraft.value = ''
   tagSuggestions.value = []
@@ -271,7 +250,7 @@ watch(
     const page = store.activePage
     if (!page) return
     const cleanTitle = title.value.trim() || '无标题'
-    const editorMarkdown = `# ${cleanTitle}\n\n${bodyMarkdown.value}`
+    const editorMarkdown = composeStoredMarkdown(cleanTitle, bodyMarkdown.value)
     const contentMatches = page.title === cleanTitle
       && page.markdown === editorMarkdown
       && page.tags.length === tags.value.length
@@ -391,7 +370,7 @@ const emit = defineEmits<{ 'toggle-sidebar': []; 'toggle-focus': []; 'toggle-con
 function draft() {
   if (!store.activePage) return null
   const cleanTitle = title.value.trim() || '无标题'
-  return { ...store.activePage, icon: '', title: cleanTitle, markdown: `# ${cleanTitle}\n\n${bodyMarkdown.value}`, tags: tags.value }
+  return { ...store.activePage, icon: '', title: cleanTitle, markdown: composeStoredMarkdown(cleanTitle, bodyMarkdown.value), tags: tags.value }
 }
 
 function onInput() {
@@ -493,72 +472,6 @@ async function copyConflictDraft() {
   }
 }
 
-async function toggleSourceBinding(targetSourceId: string) {
-  if (!store.activePage || sourceBindingBusy.value) return
-  const page = store.activePage
-  const bound = pageBoundToSource(page, targetSourceId)
-  sourceBindingBusy.value = true
-  try {
-    if (!await saveNow()) return
-    if (bound) {
-      if (pageSourceIds(page).length <= 1) {
-        saveError.value = '至少需要保留一个存储源'
-        return
-      }
-      const target = store.allSources.find((source) => source.id === targetSourceId)
-      if (!window.confirm(`取消绑定「${target?.name ?? '存储源'}」？该源上的页面副本将被删除，其他绑定源不受影响。`)) return
-      await store.unbindPageFromSource(page.id, targetSourceId, true)
-    } else {
-      const target = store.allSources.find((source) => source.id === targetSourceId)
-      if (!target || !store.canBindPageTo(targetSourceId)) return
-      await store.bindPageToSource(page.id, targetSourceId, true)
-    }
-    saveError.value = null
-  } catch (error) {
-    saveError.value = error instanceof Error ? error.message : '无法更新存储源绑定'
-  } finally {
-    sourceBindingBusy.value = false
-  }
-}
-
-async function setPrimarySource(targetSourceId: string) {
-  if (!store.activePage || sourceBindingBusy.value) return
-  if (store.activePage.storageSourceId === targetSourceId) return
-  if (!isCloudStorageSourceId(targetSourceId)) {
-    saveError.value = '协作主源只能是云端存储（S3 / 后台）'
-    return
-  }
-  if (!pageBoundToSource(store.activePage, targetSourceId)) return
-  sourceBindingBusy.value = true
-  try {
-    if (!await saveNow()) return
-    await store.setPagePrimarySource(store.activePage.id, targetSourceId)
-    saveError.value = null
-    sourceMenuOpen.value = false
-  } catch (error) {
-    saveError.value = error instanceof Error ? error.message : '无法设置协作主源'
-  } finally {
-    sourceBindingBusy.value = false
-  }
-}
-
-async function pushMirrors() {
-  if (!store.activePage || sourceBindingBusy.value || boundSourceCount.value <= 1) return
-  sourceBindingBusy.value = true
-  try {
-    if (!await saveNow()) return
-    await store.pushPageToMirrors(store.activePage.id)
-    saveError.value = null
-    manualSaveNotice.value = true
-    if (manualSaveTimer) window.clearTimeout(manualSaveTimer)
-    manualSaveTimer = window.setTimeout(() => { manualSaveNotice.value = false }, 2400)
-  } catch (error) {
-    saveError.value = error instanceof Error ? error.message : '同步到备份源失败'
-  } finally {
-    sourceBindingBusy.value = false
-  }
-}
-
 async function copyPageLink() {
   const page = store.activePage
   if (!page) return
@@ -584,16 +497,99 @@ async function revealPageFile() {
   const page = store.activePage
   const source = activeSource.value
   if (!page || !source || !isDesktop) return
-  const separator = source.path.includes('\\') ? '\\' : '/'
-  await revealItemInDir(`${source.path}${separator}pages${separator}${page.id}.md`)
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const path = await invoke<string>('page_file_path', {
+      pageId: page.id,
+      storageSourceId: source.id,
+    })
+    await revealItemInDir(path)
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : '无法定位页面文件')
+  }
 }
 
-async function exportMarkdown() {
+function tieExportFilename(title: string) {
+  const safe = title.trim().replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').replace(/^[\s.]+|[\s.]+$/g, '').slice(0, 80) || '无标题'
+  return `${safe}.tie`
+}
+
+function tieExportText(title: string, pageId: string, sourceId: string) {
+  const name = (title.trim() || '无标题').replace(/[\r\n]/g, ' ')
+  return `# Tie solution — open with Tie / \`tie open\`
+tie_version: 1
+kind: solution
+name: ${name}
+root: .
+source_id: ${sourceId}
+root_page: ${pageId}
+`
+}
+
+async function exportTie() {
   const page = store.activePage
-  if (!page || !await store.exportPageMarkdown(page.id)) return
+  if (!page) return
+  const filename = tieExportFilename(page.title || '无标题')
+  try {
+    if (isDesktop) {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const { save } = await import('@tauri-apps/plugin-dialog')
+      const out = await save({
+        title: '导出 .tie',
+        defaultPath: filename,
+        filters: [{ name: 'Tie', extensions: ['tie'] }],
+      })
+      if (!out) return
+      await invoke('export_tie_file', {
+        pageId: page.id,
+        storageSourceId: page.storageSourceId,
+        title: page.title || '无标题',
+        outPath: out,
+      })
+    } else {
+      const blob = new Blob([tieExportText(page.title || '无标题', page.id, page.storageSourceId)], { type: 'text/plain' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = filename
+      document.body.append(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+    }
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : '无法导出 .tie')
+    return
+  }
   exportedNotice.value = true
   if (exportedTimer) window.clearTimeout(exportedTimer)
   exportedTimer = window.setTimeout(() => { exportedNotice.value = false }, 2400)
+}
+
+async function exportPageClosure() {
+  const page = store.activePage
+  if (!page || !isDesktop) return
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const { save } = await import('@tauri-apps/plugin-dialog')
+    const out = await save({
+      title: '导出页面及引用',
+      defaultPath: `tie-export-${page.id}`,
+    })
+    if (!out) return
+    await invoke('export_page_closure', {
+      pageIdOrTitle: page.id,
+      sourceId: page.storageSourceId,
+      outDir: out,
+      depth: 2,
+      withChildren: true,
+    })
+    exportedNotice.value = true
+    if (exportedTimer) window.clearTimeout(exportedTimer)
+    exportedTimer = window.setTimeout(() => { exportedNotice.value = false }, 2400)
+  } catch (reason) {
+    saveError.value = reason instanceof Error ? reason.message : String(reason)
+  }
 }
 
 async function refreshCurrentPage() {
@@ -804,11 +800,6 @@ function onShortcut(event: KeyboardEvent) {
   }
 }
 
-function closeSourceMenu(event: MouseEvent) {
-  const target = event.target
-  if (!(target instanceof Element) || !target.closest('.document-source-badge')) sourceMenuOpen.value = false
-}
-
 function onWorkspaceCommand(event: Event) {
   if (event.type === 'tie:find-in-page') openFind()
   else if (event.type === 'tie:toggle-source-mode') toggleSourceMode()
@@ -832,11 +823,6 @@ function onMobileBack(event: Event) {
   if (showingFind.value) {
     showingFind.value = false
     detail.handled = true
-    return
-  }
-  if (sourceMenuOpen.value) {
-    sourceMenuOpen.value = false
-    detail.handled = true
   }
 }
 
@@ -846,7 +832,6 @@ function saveWhenHidden() {
 
 onMounted(() => {
   window.addEventListener('keydown', onShortcut)
-  document.addEventListener('click', closeSourceMenu)
   document.addEventListener('visibilitychange', saveWhenHidden)
   window.addEventListener('tie:find-in-page', onWorkspaceCommand)
   window.addEventListener('tie:toggle-source-mode', onWorkspaceCommand)
@@ -857,7 +842,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (hasUnsavedChanges.value) void saveNow()
   window.removeEventListener('keydown', onShortcut)
-  document.removeEventListener('click', closeSourceMenu)
   document.removeEventListener('visibilitychange', saveWhenHidden)
   window.removeEventListener('tie:find-in-page', onWorkspaceCommand)
   window.removeEventListener('tie:toggle-source-mode', onWorkspaceCommand)
@@ -871,6 +855,25 @@ onBeforeUnmount(() => {
   if (autoSaveTimer) window.clearTimeout(autoSaveTimer)
 })
 
+async function expandToChild(title: string) {
+  const parent = store.activePage
+  if (!parent) throw new Error('没有打开的页面')
+  const cleanTitle = title.trim().replace(/\s+/g, ' ').slice(0, 120)
+  if (!cleanTitle) throw new Error('请先选中要展开的文字')
+  const created = await workspaceService.createPage(parent.id, parent.storageSourceId)
+  const saved = await workspaceService.savePage({
+    ...created,
+    title: cleanTitle,
+    markdown: `# ${cleanTitle}\n\n`,
+    updatedAt: new Date().toISOString(),
+  })
+  const index = store.pages.findIndex((page) => page.id === saved.id)
+  if (index === -1) store.pages.push(saved)
+  else store.pages[index] = saved
+  store.expandPage(parent.id)
+  store.showingTrash = false
+  return saved
+}
 async function createChild() {
   if (store.activePage) await store.createChildPage(store.activePage.id)
 }
@@ -889,7 +892,7 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
       >←</button>
       <nav v-if="!props.mobileLayout" class="breadcrumbs" aria-label="页面层级"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><template v-for="(page, index) in breadcrumbs" :key="page.id"><span>›</span><button :class="{ current: index === breadcrumbs.length - 1 }" :title="page.title" @click="store.openPage(page.id)">{{ page.title }}</button></template></nav>
       <h1 v-else class="mobile-editor-title">{{ store.activePage.title }}</h1>
-      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><button class="source-select-trigger" :aria-expanded="sourceMenuOpen" aria-haspopup="menu" :title="boundSourceCount > 1 ? `${activeSource.name}\n${activeSource.path}\n共绑定 ${boundSourceCount} 个存储源` : `${activeSource.name}\n${activeSource.path}`" :disabled="!canSwitchStorageSource || sourceBindingBusy" @click.stop="canSwitchStorageSource && (sourceMenuOpen = !sourceMenuOpen)">{{ sourceShortLabel(activeSource.name) }}</button><div v-if="sourceMenuOpen && activeSource && canSwitchStorageSource" class="source-select-menu source-bind-menu" role="menu"><p class="source-bind-hint">{{ sourceBindHint }}</p><button v-for="source in sourceChoices" :key="source.id" :class="{ unavailable: source.available === false, bound: boundSourceIds.includes(source.id), primary: pageSourceRoleLabel(store.activePage, source.id) === 'primary' }" role="menuitemcheckbox" :aria-checked="boundSourceIds.includes(source.id)" :disabled="source.available === false || sourceBindingBusy" @click="toggleSourceBinding(source.id)"><span><i :class="source.kind"></i>{{ sourceBadgeLabel(source.kind) }} · {{ source.name }}</span><small>{{ source.available === false ? '当前不可访问' : boundSourceIds.includes(source.id) ? (pageSourceRoleLabel(store.activePage, source.id) === 'primary' ? '协作主源' : '备份镜像') : source.path }}</small><em aria-hidden="true">{{ boundSourceIds.includes(source.id) ? '✓' : '' }}</em></button><div v-if="boundCloudSourceIds.length > 1 || (boundCloudSourceIds.length === 1 && boundSourceCount > 1)" class="source-primary-actions"><span>设为协作主源（仅云端）</span><button v-for="sourceId in boundCloudSourceIds" :key="`primary-${sourceId}`" type="button" :class="{ active: sourceId === activeSource.id }" :disabled="sourceBindingBusy || sourceId === activeSource.id" @click="setPrimarySource(sourceId)">{{ store.allSources.find((item) => item.id === sourceId)?.name ?? sourceId }}</button><button type="button" class="source-mirror-sync" :disabled="sourceBindingBusy" @click="pushMirrors">同步到备份</button></div></div></div><span class="save-dot" :class="{ saving: store.saving, error: Boolean(saveError) }"></span><span :title="saveError ?? undefined">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" title="重新尝试保存当前页面" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从存储源刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button class="copy-link-button" title="导出 Markdown" @click="exportMarkdown">⇩</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
+      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span class="source-select-trigger is-label" :title="workspaceBadgeTitle">{{ sourceShortLabel(activeSource.name) }}</span></div><span class="save-dot" :class="{ saving: store.saving, error: Boolean(saveError) }"></span><span :title="saveError ?? undefined">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" :title="saveError || '重新尝试保存当前页面'" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从工作区刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button v-if="!isDesktop" class="copy-link-button" title="导入 .tiez" @click="store.importTiezBrowser()">导入</button><button v-if="!isDesktop" class="copy-link-button" title="导出当前工作区为 .tiez" @click="store.exportTiezBrowser()">.tiez</button><button class="copy-link-button" title="导出 .tie，以当前页面为根" @click="exportTie">⇩</button><button v-if="isDesktop" class="copy-link-button" title="导出此页及引用（闭包）" @click="exportPageClosure">⇪</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
     </header>
     <aside v-if="showingHistory" class="history-popover">
       <div class="history-popover-heading"><strong>页面历史</strong><button aria-label="关闭页面历史" @click="showingHistory = false">×</button></div>
@@ -921,7 +924,7 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
           <DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" />
           <textarea ref="sourceEditor" v-model="bodyMarkdown" class="source-editor" aria-label="Markdown 源码" :spellcheck="store.spellcheckEnabled" @input="onInput"></textarea>
         </div>
-        <TiptapEditor v-else ref="richEditor" :model-value="bodyMarkdown" :pages="store.pages" :sources="store.allSources" :page-id="store.activePage.id" :spellcheck="store.spellcheckEnabled" :create-linked-page="createLinkedPage" @update:model-value="onBodyChange" @navigate="navigateToPage" @create-child="createChild">
+        <TiptapEditor v-else ref="richEditor" :model-value="bodyMarkdown" :pages="store.pages" :sources="store.allSources" :page-id="store.activePage.id" :spellcheck="store.spellcheckEnabled" :create-linked-page="createLinkedPage" :expand-to-child="expandToChild" enable-pheromone @update:model-value="onBodyChange" @navigate="navigateToPage" @create-child="createChild">
           <template #meta><DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" /></template>
         </TiptapEditor>
         <section v-if="childPages.length" class="document-child-pages" aria-label="子页面">
@@ -952,10 +955,12 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
   <main v-else class="empty-editor">
     <button class="empty-editor-sidebar-toggle" type="button" @click="emit('toggle-sidebar')">▤ 打开侧栏</button>
     <h1>还没有页面</h1>
-    <p>从左侧新建页面，或直接打开本地 Markdown 文件。</p>
+    <p>{{ isDesktop ? '从左侧新建页面，或打开 .tie / .tiez / Markdown。' : '从左侧新建页面，或导入 .tiez 压缩包到浏览器工作区。' }}</p>
     <div class="empty-editor-actions">
       <button type="button" @click="store.createPage(null)">＋ 新建页面</button>
       <button v-if="isDesktop" type="button" @click="store.openFromFiles()">📂 从文件打开</button>
+      <button v-if="!isDesktop" type="button" @click="store.importTiezBrowser()">导入 .tiez</button>
+      <button v-if="!isDesktop && store.pages.length" type="button" @click="store.exportTiezBrowser()">导出 .tiez</button>
     </div>
   </main>
 </template>

@@ -1,7 +1,12 @@
+pub(crate) mod git_sync;
+pub(crate) mod tie_bundle;
+
 use crate::common::{
-    app_data_dir, copy_page_assets, copy_page_history, frontmatter, load_settings, markdown_path,
-    normalize_page_sources, page_asset_dir, parse_page, remove_page_assets, revision_dir,
-    sanitize_asset_name, save_settings, source_from_path, workspace_sources, Page, StorageSource,
+    app_data_dir, copy_page_assets, copy_page_history, find_page_file, load_settings,
+    is_tie_document, normalize_page_sources, open_or_adopt, page_asset_dir, parse_page,
+    remove_page_assets, revision_dir, sanitize_asset_name, save_page_to_root, save_settings,
+    source_from_path, workspace_sources, Page,
+    StorageSource,
     WorkspaceSettings, WorkspaceSnapshot,
 };
 use crate::s3::s3_client_for_app;
@@ -20,7 +25,7 @@ use tie_storage::s3::{
     trim_s3_history, S3Connection,
 };
 
-fn source_root(app: &AppHandle, storage_source_id: &str) -> Result<PathBuf, String> {
+pub(crate) fn source_root(app: &AppHandle, storage_source_id: &str) -> Result<PathBuf, String> {
     let (sources, _) = workspace_sources(app)?;
     let source = sources
         .iter()
@@ -37,26 +42,23 @@ fn imported_page_id(path: &Path, target_source_id: &str) -> String {
 }
 
 fn importable_page(content: String, fallback_title: String) -> (String, String, Vec<String>) {
-    if let Ok(page) = parse_page(&content) {
-        return (page.title, page.markdown, page.tags);
+    if is_tie_document(&content) {
+        if let Ok(page) = parse_page(&content) {
+            return (page.title, page.markdown, page.tags);
+        }
     }
     let title = content
         .lines()
-        .find_map(|line| line.strip_prefix("# "))
-        .filter(|title| !title.trim().is_empty())
+        .find_map(|line| line.trim_end_matches('\r').strip_prefix("# "))
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
         .unwrap_or(&fallback_title)
         .to_owned();
-    let markdown = if content.lines().any(|line| line.starts_with("# ")) {
-        content
-    } else {
-        format!("# {title}\n\n{content}")
-    };
-    (title, markdown, Vec::new())
+    (title, content, Vec::new())
 }
 
 struct ImportCandidate {
     page_id: String,
-    destination: PathBuf,
     content: String,
     fallback_title: String,
     original_page: Option<Page>,
@@ -121,7 +123,10 @@ fn find_source_covering_path<'a>(
     })
 }
 
-fn ensure_local_source_at(app: &AppHandle, root: PathBuf) -> Result<(StorageSource, bool), String> {
+pub(crate) fn ensure_local_source_at(
+    app: &AppHandle,
+    root: PathBuf,
+) -> Result<(StorageSource, bool), String> {
     let root = root
         .canonicalize()
         .map(|path| tie_storage::fs_path::strip_extended_length_prefix(&path))
@@ -153,20 +158,15 @@ fn ensure_local_source_at(app: &AppHandle, root: PathBuf) -> Result<(StorageSour
     Ok((source, true))
 }
 
-fn try_existing_page_id(root: &Path, file: &Path) -> Option<String> {
+fn existing_page_in_workspace(root: &Path, file: &Path, source_id: &str) -> Option<String> {
     let pages_dir = root.join("pages");
     let canon_file = tie_storage::fs_path::canonicalize(file);
     let canon_pages = tie_storage::fs_path::canonicalize(&pages_dir);
     if !tie_storage::fs_path::is_under_root(&canon_file, &canon_pages) {
         return None;
     }
-    let content = fs::read_to_string(file).ok()?;
-    let page = parse_page(&content).ok()?;
-    let expected = markdown_path(root, &page.id);
-    if tie_storage::fs_path::paths_equal(&expected, &canon_file) {
-        return Some(page.id);
-    }
-    Some(page.id)
+    // 已经在工作区里的原文只登记元数据，不另存一份、不改字节。
+    open_or_adopt(root, file, source_id).ok().map(|page| page.id)
 }
 
 fn import_single_markdown_file(
@@ -175,7 +175,7 @@ fn import_single_markdown_file(
     file: &Path,
     created_at: &str,
 ) -> Result<String, String> {
-    if let Some(existing_id) = try_existing_page_id(root, file) {
+    if let Some(existing_id) = existing_page_in_workspace(root, file, source_id) {
         return Ok(existing_id);
     }
 
@@ -193,8 +193,7 @@ fn import_single_markdown_file(
         .count() as i64;
 
     let page_id = imported_page_id(file, source_id);
-    let destination = markdown_path(root, &page_id);
-    if destination.exists() {
+    if find_page_file(root, &page_id).is_some() {
         return Ok(page_id);
     }
 
@@ -204,20 +203,24 @@ fn import_single_markdown_file(
         .and_then(|name| name.to_str())
         .unwrap_or("打开的页面")
         .to_owned();
-    let (title, icon, markdown, tags, parent_id, page_sort_key) =
-        if let Ok(original) = parse_page(&content) {
-            (
-                original.title,
-                original.icon,
-                original.markdown,
-                original.tags,
-                None,
-                sort_key,
-            )
-        } else {
-            let (title, markdown, tags) = importable_page(content, fallback_title);
-            (title, String::new(), markdown, tags, None, sort_key)
-        };
+    let parsed = if is_tie_document(&content) {
+        parse_page(&content).ok()
+    } else {
+        None
+    };
+    let (title, icon, markdown, tags, parent_id, page_sort_key) = if let Some(original) = parsed {
+        (
+            original.title,
+            original.icon,
+            original.markdown,
+            original.tags,
+            None,
+            sort_key,
+        )
+    } else {
+        let (title, markdown, tags) = importable_page(content, fallback_title);
+        (title, String::new(), markdown, tags, None, sort_key)
+    };
 
     let page = Page {
         id: page_id.clone(),
@@ -233,7 +236,7 @@ fn import_single_markdown_file(
         storage_source_id: source_id.to_owned(),
         storage_source_ids: vec![source_id.to_owned()],
     };
-    fs::write(destination, frontmatter(&page)).map_err(|error| error.to_string())?;
+    save_page_to_root(root, page, None)?;
     Ok(page_id)
 }
 
@@ -241,6 +244,28 @@ fn import_single_markdown_file(
 pub(crate) struct ExportAssetPayload {
     name: String,
     data: Vec<u8>,
+}
+
+#[tauri::command]
+pub(crate) fn export_page_closure(
+    app: AppHandle,
+    page_id_or_title: String,
+    source_id: String,
+    out_dir: String,
+    depth: Option<usize>,
+    with_children: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let root = source_root(&app, &source_id)?;
+    let ws = tie_storage::local::LocalWorkspace::open(&root, Some(source_id.as_str()))?;
+    let summary = ws.export_closure(
+        &page_id_or_title,
+        &tie_storage::local::ExportOptions {
+            depth: depth.unwrap_or(2),
+            with_children: with_children.unwrap_or(true),
+            out: Some(PathBuf::from(out_dir)),
+        },
+    )?;
+    serde_json::to_value(summary).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -296,14 +321,11 @@ pub(crate) fn transfer_page_storage(
         .find(|source| source.id == target_source_id)
         .ok_or("目标存储源不存在")?;
     let source_root = PathBuf::from(&source.path);
-    let source_path = markdown_path(&source_root, &page.id);
-    if !source_path.exists() {
-        return Err("原页面文件不存在，无法迁移".to_owned());
-    }
+    let source_path = find_page_file(&source_root, &page.id)
+        .ok_or_else(|| "原页面文件不存在，无法迁移".to_owned())?;
     let target_root = PathBuf::from(&target.path);
     fs::create_dir_all(target_root.join("pages")).map_err(|error| error.to_string())?;
-    let target_path = markdown_path(&target_root, &page.id);
-    if target_path.exists() {
+    if find_page_file(&target_root, &page.id).is_some() {
         return Err("目标存储源中已存在相同页面 ID，无法迁移".to_owned());
     }
     let transferred = normalize_page_sources(Page {
@@ -311,19 +333,28 @@ pub(crate) fn transfer_page_storage(
         storage_source_ids: vec![target_source_id],
         ..page
     });
-    fs::write(&target_path, frontmatter(&transferred)).map_err(|error| error.to_string())?;
+    let target_path = match save_page_to_root(&target_root, transferred.clone(), None) {
+        Ok(_) => find_page_file(&target_root, &transferred.id),
+        Err(error) => return Err(error),
+    };
     if let Err(error) = copy_page_history(&source_root, &target_root, &transferred.id) {
-        let _ = fs::remove_file(&target_path);
+        if let Some(path) = &target_path {
+            let _ = fs::remove_file(path);
+        }
         return Err(error);
     }
     if let Err(error) = copy_page_assets(&source_root, &target_root, &transferred.id) {
-        let _ = fs::remove_file(&target_path);
+        if let Some(path) = &target_path {
+            let _ = fs::remove_file(path);
+        }
         let _ = fs::remove_dir_all(revision_dir(&target_root, &transferred.id));
         let _ = remove_page_assets(&target_root, &transferred.id);
         return Err(error);
     }
     if let Err(error) = fs::remove_file(source_path) {
-        let _ = fs::remove_file(&target_path);
+        if let Some(path) = &target_path {
+            let _ = fs::remove_file(path);
+        }
         let _ = fs::remove_dir_all(revision_dir(&target_root, &transferred.id));
         let _ = remove_page_assets(&target_root, &transferred.id);
         return Err(format!("无法移除原页面文件，迁移已取消：{error}"));
@@ -375,15 +406,22 @@ pub(crate) fn import_markdown_files(
         {
             continue;
         }
+        if existing_page_in_workspace(&target_root, &path, &target_source_id).is_some() {
+            continue;
+        }
         let page_id = imported_page_id(&path, &target_source_id);
-        let destination = markdown_path(&target_root, &page_id);
+        let destination_exists = find_page_file(&target_root, &page_id).is_some();
         let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
         let fallback_title = path
             .file_stem()
             .and_then(|name| name.to_str())
             .unwrap_or("导入的页面")
             .to_owned();
-        let original_page = parse_page(&content).ok();
+        let original_page = if is_tie_document(&content) {
+            parse_page(&content).ok()
+        } else {
+            None
+        };
         if let Some(page) = &original_page {
             if !page.id.is_empty() {
                 imported_ids.insert(page.id.clone(), page_id.clone());
@@ -391,8 +429,7 @@ pub(crate) fn import_markdown_files(
         }
         imports.push(ImportCandidate {
             page_id,
-            destination_exists: destination.exists(),
-            destination,
+            destination_exists,
             content,
             fallback_title,
             original_page,
@@ -445,7 +482,7 @@ pub(crate) fn import_markdown_files(
             storage_source_id: target_source_id.clone(),
             storage_source_ids: vec![target_source_id.clone()],
         };
-        fs::write(candidate.destination, frontmatter(&page)).map_err(|error| error.to_string())?;
+        save_page_to_root(&target_root, page, None)?;
     }
     load_file_workspace(&app_data_dir(&app)?, "tie-workspace")
 }

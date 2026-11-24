@@ -229,12 +229,114 @@ export const workspaceService = {
     if (!await isTauri()) return null
     const selected = await open({
       multiple: true,
-      title: '从文件打开 Markdown',
-      filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
+      title: '从文件打开',
+      filters: [
+        { name: 'Tie / Markdown', extensions: ['tie', 'tiez', 'md', 'markdown'] },
+        { name: 'Tie 解决方案', extensions: ['tie'] },
+        { name: 'Tie 压缩包', extensions: ['tiez'] },
+        { name: 'Markdown', extensions: ['md', 'markdown'] },
+      ],
     })
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : []
     if (!paths.length) return null
-    return invoke('open_markdown_files', { paths, createdAt: now() })
+
+    const mdPaths: string[] = []
+    let snapshot: WorkspaceSnapshot | null = null
+    const openedPageIds: string[] = []
+    const createdSourceIds: string[] = []
+
+    for (const path of paths) {
+      const lower = path.toLowerCase()
+      if (lower.endsWith('.tiez')) {
+        const result = await this.importTiez(path)
+        if (!result) continue
+        snapshot = result.snapshot
+        createdSourceIds.push(result.sourceId)
+      } else if (lower.endsWith('.tie')) {
+        const result = await this.openTieEntry(path)
+        if (!result) continue
+        snapshot = result.snapshot
+        createdSourceIds.push(result.sourceId)
+        if (result.rootPageId) openedPageIds.push(result.rootPageId)
+      } else {
+        mdPaths.push(path)
+      }
+    }
+
+    if (mdPaths.length) {
+      const mdResult = await invoke<{
+        snapshot: WorkspaceSnapshot
+        openedPageIds: string[]
+        createdSourceIds: string[]
+      }>('open_markdown_files', { paths: mdPaths, createdAt: now() })
+      snapshot = mdResult.snapshot
+      openedPageIds.push(...mdResult.openedPageIds)
+      createdSourceIds.push(...mdResult.createdSourceIds)
+    }
+
+    if (!snapshot) return null
+    return { snapshot, openedPageIds, createdSourceIds: [...new Set(createdSourceIds)] }
+  },
+  async openTieEntry(path?: string): Promise<{
+    snapshot: WorkspaceSnapshot
+    sourceId: string
+    created: boolean
+    workspace: string
+    solutionName: string | null
+    rootPageId: string | null
+  } | null> {
+    if (!await isTauri()) return null
+    let target = path
+    if (!target) {
+      const selected = await open({
+        multiple: false,
+        title: '打开 Tie 解决方案',
+        filters: [{ name: 'Tie 解决方案', extensions: ['tie'] }],
+      })
+      if (typeof selected !== 'string') return null
+      target = selected
+    }
+    return invoke('open_tie_entry', { path: target })
+  },
+  async packWorkspaceTiez(sourceId: string): Promise<{ archive: string; files: number; bytes: number } | null> {
+    if (!await isTauri()) return null
+    const out = await save({
+      title: '导出 Tie 压缩包',
+      defaultPath: 'workspace.tiez',
+      filters: [{ name: 'Tie 压缩包', extensions: ['tiez'] }],
+    })
+    if (typeof out !== 'string') return null
+    await invoke('ensure_source_solution', { sourceId, name: null })
+    return invoke('pack_workspace_tiez', { sourceId, outPath: out })
+  },
+  async importTiez(archivePath?: string): Promise<{
+    snapshot: WorkspaceSnapshot
+    sourceId: string
+    created: boolean
+    workspace: string
+    solutionName: string | null
+    rootPageId: string | null
+  } | null> {
+    if (!await isTauri()) return null
+    let archive = archivePath
+    if (!archive) {
+      const selected = await open({
+        multiple: false,
+        title: '导入 Tie 压缩包',
+        filters: [{ name: 'Tie 压缩包', extensions: ['tiez'] }],
+      })
+      if (typeof selected !== 'string') return null
+      archive = selected
+    }
+    const outDir = await open({
+      directory: true,
+      multiple: false,
+      title: '选择解压到的文件夹（须为空或新建位置）',
+    })
+    if (typeof outDir !== 'string') return null
+    const base = archive.replace(/\\/g, '/').split('/').pop()?.replace(/\.tiez$/i, '') || 'tie-workspace'
+    const target = `${outDir.replace(/[/\\]$/, '')}${outDir.includes('\\') ? '\\' : '/'}${base}`
+    return invoke('unpack_tiez_to_dir', { archive, outDir: target })
   },
   async removeStorageSource(sourceId: string): Promise<WorkspaceSnapshot | null> {
     if (isS3SourceId(sourceId)) {

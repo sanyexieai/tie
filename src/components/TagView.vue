@@ -6,16 +6,16 @@ import { useWorkspaceStore } from '@/stores/workspace'
 const store = useWorkspaceStore()
 const sourceForPage = computed(() => new Map(store.allSources.map((source) => [source.id, source])))
 const sourceOptions = computed(() => [
-  { value: null as string | null, label: '全部存储源' },
-  ...store.allSources.map((source) => ({
+  { value: null as string | null, label: '全部工作区' },
+  ...store.allSources.filter((source) => source.kind === 'local' || source.kind === 'smb').map((source) => ({
     value: source.id as string | null,
-    label: `${source.kind === 'backend' ? '后台 · ' : source.kind === 's3' ? 'S3 · ' : source.kind === 'smb' ? 'SMB · ' : '本地 · '}${source.name}`,
+    label: source.name,
   })),
 ])
 async function renameSelectedTag() {
   const tag = store.selectedTag
   if (!tag) return
-  const scope = store.tagStorageSourceId ? '当前存储源' : '全部存储源'
+  const scope = store.tagStorageSourceId ? '当前工作区' : '全部工作区'
   const name = window.prompt(`重命名标签 # ${tag}（作用于${scope}）`, tag)
   if (name === null || name.trim() === tag) return
   await store.renameTag(tag, name)
@@ -23,7 +23,7 @@ async function renameSelectedTag() {
 async function deleteSelectedTag() {
   const tag = store.selectedTag
   if (!tag) return
-  const scope = store.tagStorageSourceId ? '当前存储源' : '全部存储源'
+  const scope = store.tagStorageSourceId ? '当前工作区' : '全部工作区'
   if (!window.confirm(`从${scope}的页面中移除标签 # ${tag}？页面和正文不会被删除。`)) return
   await store.deleteTag(tag)
 }
@@ -35,14 +35,14 @@ async function deleteSelectedTag() {
     <section class="tag-content">
       <p class="eyebrow">标签</p>
       <div class="tag-title-row"><h1>{{ store.selectedTag ? `# ${store.selectedTag}` : '所有标签' }}</h1><div v-if="store.selectedTag" class="tag-title-actions"><button class="rename-tag-button" :disabled="store.saving" @click="renameSelectedTag">重命名</button><button class="delete-tag-button" :disabled="store.saving" @click="deleteSelectedTag">删除标签</button></div></div>
-      <TieSelect v-model="store.tagStorageSourceId" class="tag-source-filter" :options="sourceOptions" aria-label="筛选存储源" />
+      <TieSelect v-model="store.tagStorageSourceId" class="tag-source-filter" :options="sourceOptions" aria-label="筛选工作区" />
       <div class="tag-index">
         <button :class="{ active: !store.selectedTag }" @click="store.selectedTag = null">全部 <span>{{ store.tagIndex.length }}</span></button>
         <button v-for="tag in store.tagIndex" :key="tag.name" :class="{ active: store.selectedTag === tag.name }" @click="store.selectedTag = tag.name"># {{ tag.name }} <span>{{ tag.count }}</span></button>
       </div>
       <div v-if="store.selectedTag" class="tagged-pages">
         <button v-for="page in store.taggedPages" :key="page.id" @click="store.openPage(page.id)">
-          <strong>{{ page.title }}</strong><span>{{ sourceForPage.get(page.storageSourceId)?.kind === 'backend' ? '后台 · ' : sourceForPage.get(page.storageSourceId)?.kind === 's3' ? 'S3 · ' : sourceForPage.get(page.storageSourceId)?.kind === 'smb' ? 'SMB · ' : '本地 · ' }}{{ sourceForPage.get(page.storageSourceId)?.name ?? '未知来源' }} · {{ page.updatedAt.slice(0, 10) }}</span>
+          <strong>{{ page.title }}</strong><span>{{ sourceForPage.get(page.storageSourceId)?.name ?? '未知工作区' }} · {{ page.updatedAt.slice(0, 10) }}</span>
         </button>
         <p v-if="!store.taggedPages.length" class="muted">该标签下暂时没有页面。</p>
       </div>

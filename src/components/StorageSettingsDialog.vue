@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { openPath } from '@tauri-apps/plugin-opener'
 import { getVersion } from '@tauri-apps/api/app'
 import TieSelect from '@/components/TieSelect.vue'
-import type { StorageKind, StorageSource } from '@/types'
+import type { StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
@@ -22,15 +22,17 @@ import {
   AGENT_CLIENT_OPTIONS,
   configureAgentMcp,
   fetchAgentMcpStatus,
+  locateTieCli,
   loadCodexMcpPreference,
   saveCodexMcpPreference,
-  setMcpSourcePath,
   type AgentClientId,
   type AgentMcpStatus,
 } from '@/services/codex-mcp'
+import { buildMcpHandoffPrompt } from '@/services/mcp-handoff'
 import { pageBoundToSource } from '@/services/page-sources'
-import { isBackendSourceId, isBackendManagedS3SourceId, isBackendRemoteSourceId, defaultBackendEndpoint } from '@/services/backend'
+import { isBackendSourceId, isBackendManagedS3SourceId, defaultBackendEndpoint } from '@/services/backend'
 import { isS3SourceId, providerForS3Source } from '@/services/s3'
+import { enableGitSync, ensureGitRuntime, gitErrorMessage, gitNeedsInstall, gitRuntimeStatus } from '@/services/storage/git-sync'
 import { storageRegistry } from '@/services/storage/registry'
 import type { S3ConnectionInput } from '@/services/storage/types'
 import { loadThemeMode, resolveTheme, setThemeMode, type ThemeMode } from '@/services/theme'
@@ -76,7 +78,15 @@ const storageMenuOpen = ref(false)
 const choosingWorkspace = ref(false)
 const importingMarkdown = ref(false)
 const openingFromFiles = ref(false)
+const openingTie = ref(false)
+const importingTiez = ref(false)
+const packingTiez = ref(false)
+const bundleNotice = ref('')
 const syncingRemote = ref(false)
+const gitSourceId = ref('')
+const gitRemoteUrl = ref('')
+const gitNotice = ref('')
+const gitBusy = ref(false)
 const syncingDefaultBackend = ref(false)
 const defaultBackendSyncNotice = ref('')
 const isDesktop = isTauriDesktop()
@@ -111,6 +121,21 @@ const selectedClients = ref<AgentClientId[]>(initialPref.clients ?? ['codex', 'c
 const codexBusy = ref(false)
 const codexError = ref('')
 const codexNotice = ref('')
+const mcpHandoffCopied = ref(false)
+const tieCliPath = ref<string | null>(null)
+let mcpHandoffTimer = 0
+
+const remoteMcpUrl = computed(() => (
+  backend.connected && backend.mcp?.running && backend.mcp.url ? backend.mcp.url : ''
+))
+const mcpStatusText = computed(() => {
+  if (backend.connected) {
+    if (remoteMcpUrl.value) return `后台 MCP HTTP · 运行中 · ${remoteMcpUrl.value}`
+    if (backend.mcp?.enabled) return `后台 MCP HTTP · 未启动${backend.mcp.error ? ` · ${backend.mcp.error}` : ''}`
+    return '后台 MCP HTTP · 未开启。启动后台时设置 TIE_MCP_HTTP=1'
+  }
+  return tieCliPath.value ? `本地 MCP · tie mcp · ${tieCliPath.value}` : '本地 MCP · 未找到 tie CLI'
+})
 const agentClientOptions = AGENT_CLIENT_OPTIONS
 const appVersion = ref('—')
 const checkingAppUpdate = ref(false)
@@ -245,14 +270,7 @@ const settingsOrderedSources = computed(() => {
   const visible = usesMobileUi.value
     ? orderedSources.value.filter((source) => isMobileSupportedStorageSource(source))
     : orderedSources.value
-  const cloudSources = visible.filter((source) => isBackendRemoteSourceId(source.id))
-  if (!backend.connected || !cloudSources.length) return visible
-  const cloudLabel = cloudSources[0]?.name || '云端'
-  return visible
-    .filter((source) => !isBackendRemoteSourceId(source.id))
-    .map((source) => source.kind === 'local' || source.kind === 'smb'
-      ? { ...source, name: `云 + 本 · ${source.name}`, path: `${source.path} · ${cloudLabel}` }
-      : source)
+  return visible.filter((source) => source.kind === 'local' || source.kind === 'smb' || (source.kind === 's3' && !isBackendManagedS3SourceId(source.id)))
 })
 const defaultSourceId = computed(() => store.defaultStorageSourceId)
 const fileMcpSources = computed(() => orderedSources.value.filter((source) => (
@@ -269,7 +287,7 @@ const defaultMcpSourceId = computed(() => {
 const selectedMcpSource = computed(() => fileMcpSources.value.find((source) => source.id === codexSourceId.value) ?? null)
 const codexSourceOptions = computed(() => {
   if (!fileMcpSources.value.length) {
-    return [{ value: null as string | null, label: '暂无可用本地/SMB 源', disabled: true }]
+    return [{ value: null as string | null, label: '暂无工作区', disabled: true }]
   }
   return fileMcpSources.value.map((source) => ({
     value: source.id as string | null,
@@ -278,19 +296,11 @@ const codexSourceOptions = computed(() => {
 })
 const codexStatusSummary = computed(() => {
   if (!isDesktop) return '仅桌面端可用'
-  const st = agentMcpStatus.value
-  if (st && !st.nodeAvailable) return '需要本机 Node.js'
-  if (st && !st.mcpReady) return st.mcpError ? `MCP 未就绪：${st.mcpError}` : 'MCP 未就绪'
-  const configured = st?.clients.filter((item) => item.configured) ?? []
-  if (configured.length) {
-    const labels = configured.map((item) => item.label).join(' · ')
-    const path = configured.find((item) => item.workspacePath)?.workspacePath
-    const matched = path ? fileMcpSources.value.find((source) => source.path === path) : null
-    return matched ? `已接入 ${labels} · ${matched.name}` : `已接入 ${labels}`
-  }
-  const configuredButInvalid = st?.clients.find((item) => item.workspacePath && item.error)
-  if (configuredButInvalid) return `${configuredButInvalid.label} 未连接：${configuredButInvalid.error}`
-  return '未接入 · 点击配置'
+  if (remoteMcpUrl.value) return `后台 MCP HTTP · ${remoteMcpUrl.value}`
+  const stale = agentMcpStatus.value?.clients.find((item) => item.error)
+  if (stale?.error) return stale.error
+  if (tieCliPath.value) return '本地 MCP · tie mcp'
+  return '未找到 tie CLI'
 })
 
 const anySelectedConfigured = computed(() => {
@@ -317,16 +327,9 @@ async function refreshCodexStatus() {
   }
 }
 
-async function pickMcpSourcePath() {
-  const { open } = await import('@tauri-apps/plugin-dialog')
-  const selected = await open({ directory: true, multiple: false, title: '选择 tie-mcp 包目录（应含 src/server.js）' })
-  if (typeof selected !== 'string') return
-  try {
-    agentMcpStatus.value = await setMcpSourcePath(selected)
-    codexError.value = ''
-  } catch (err: any) {
-    codexError.value = err?.message ?? String(err)
-  }
+async function refreshLocalMcp() {
+  tieCliPath.value = await locateTieCli()
+  if (backend.connected) await backend.refreshMcp()
 }
 
 function toggleCodexForm() {
@@ -334,6 +337,7 @@ function toggleCodexForm() {
   if (codexFormOpen.value) {
     ensureCodexSourceSelection()
     void refreshCodexStatus()
+    void refreshLocalMcp()
   }
 }
 
@@ -341,6 +345,47 @@ function onCodexSourceChange() {
   persistAgentPreference()
   codexError.value = ''
   codexNotice.value = ''
+}
+
+function mcpHandoffText() {
+  const source = selectedMcpSource.value
+  if (!source?.path) return ''
+  const selected = new Set(selectedClients.value)
+  const known = agentMcpStatus.value?.clients ?? []
+  const clients = AGENT_CLIENT_OPTIONS.filter((item) => selected.has(item.id)).map((item) => ({
+    id: item.id,
+    label: item.label,
+    configPath: known.find((status) => status.id === item.id)?.configPath,
+  }))
+  return buildMcpHandoffPrompt({
+    mode: remoteMcpUrl.value ? 'http' : 'local',
+    workspaceName: source.name,
+    workspacePath: source.path,
+    mcpUrl: remoteMcpUrl.value,
+    cliPath: tieCliPath.value,
+    clients,
+  })
+}
+
+async function copyMcpHandoff() {
+  const text = mcpHandoffText()
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.left = '-9999px'
+    document.body.appendChild(area)
+    area.select()
+    document.execCommand('copy')
+    area.remove()
+  }
+  mcpHandoffCopied.value = true
+  window.clearTimeout(mcpHandoffTimer)
+  mcpHandoffTimer = window.setTimeout(() => { mcpHandoffCopied.value = false }, 2000)
 }
 
 function toggleAgentClient(id: AgentClientId) {
@@ -370,7 +415,7 @@ async function applyCodexMcp() {
   ensureCodexSourceSelection()
   const source = selectedMcpSource.value
   if (!source?.path) {
-    codexError.value = '请选择可用的本地或 SMB 存储源'
+    codexError.value = '请选择一个可用的工作区'
     return
   }
   if (!selectedClients.value.length) {
@@ -382,12 +427,14 @@ async function applyCodexMcp() {
   codexNotice.value = ''
   try {
     persistAgentPreference()
-    agentMcpStatus.value = await configureAgentMcp(source.path, selectedClients.value)
+    agentMcpStatus.value = await configureAgentMcp(source.path, selectedClients.value, remoteMcpUrl.value || null)
     await store.refreshSkills()
     const labels = selectedClients.value
       .map((id) => AGENT_CLIENT_OPTIONS.find((item) => item.id === id)?.label ?? id)
       .join('、')
-    codexNotice.value = `已接入 ${labels}（工作区：${source.name}）。请完全退出并重新打开 Codex，或新开会话后执行 /mcp 查看 tie。`
+    codexNotice.value = remoteMcpUrl.value
+      ? `已为 ${labels} 写入后台地址 ${remoteMcpUrl.value}。请新开一个对话。`
+      : `已为 ${labels} 写入本机 tie MCP（tie mcp）。请新开一个对话。`
     window.setTimeout(() => { codexNotice.value = '' }, 8000)
   } catch (error) {
     codexError.value = error instanceof Error ? error.message : String(error)
@@ -400,13 +447,6 @@ const sourcePageStats = computed(() => new Map(orderedSources.value.map((source)
   const pages = store.pages.filter((page) => pageBoundToSource(page, source.id))
   return [source.id, { total: pages.length, active: pages.filter((page) => !page.deletedAt).length, trashed: pages.filter((page) => page.deletedAt).length }]
 })))
-
-function sourceLabel(kind: StorageKind) {
-  if (kind === 'smb') return 'SMB 挂载目录'
-  if (kind === 's3') return 'S3 兼容对象存储'
-  if (kind === 'backend') return '云服务'
-  return '本地目录'
-}
 
 function sourceStatusClass(source: StorageSource) {
   const runtime = store.sourceRuntimeStatus(source.id)
@@ -452,7 +492,7 @@ function sourceDetail(source: StorageSource) {
   }
   if (source.available === false) return '当前不可访问'
   const synced = formatSyncedAt(runtime.lastSyncedAt)
-  const pageInfo = `${sourceLabel(source.kind)} · ${sourcePageLabel(source.id)}`
+  const pageInfo = `${source.kind === 'smb' ? 'SMB 工作区' : source.kind === 's3' ? '旧版 S3' : '工作区'} · ${sourcePageLabel(source.id)}`
   return synced && source.kind === 's3' ? `已同步 · ${synced} · ${sourcePageLabel(source.id)}` : pageInfo
 }
 
@@ -492,22 +532,24 @@ function resetS3Form() {
   s3Error.value = ''
 }
 
+/** 仅用于存量直连 S3 的编辑；不再提供新建入口。 */
 function openS3Form(sourceId?: string) {
   s3Error.value = ''
   s3Notice.value = ''
-  s3FormOpen.value = true
   storageMenuOpen.value = false
-  if (sourceId && isS3SourceId(sourceId)) {
-    const provider = providerForS3Source(sourceId)
-    if (!provider) return
-    s3EditingSourceId.value = sourceId
-    s3Name.value = provider.name
-    s3Endpoint.value = provider.endpoint
-    s3Bucket.value = provider.bucket
-    s3Region.value = provider.region ?? ''
+  if (!sourceId || !isS3SourceId(sourceId) || isBackendManagedS3SourceId(sourceId)) {
+    s3Notice.value = '直连 S3 已废弃。请使用「云服务」后台，并在服务端选择磁盘或 S3 存储。'
     return
   }
-  resetS3Form()
+  const provider = providerForS3Source(sourceId)
+  if (!provider) return
+  s3FormOpen.value = true
+  s3EditingSourceId.value = sourceId
+  s3Name.value = provider.name
+  s3Endpoint.value = provider.endpoint
+  s3Bucket.value = provider.bucket
+  s3Region.value = provider.region ?? ''
+  s3Notice.value = '此为旧版直连 S3。新部署请改为后台托管存储。'
 }
 
 async function chooseWorkspace(kind: 'local' | 'smb') {
@@ -523,6 +565,78 @@ async function importMarkdown() {
 async function openFromFiles() {
   openingFromFiles.value = true
   try { await store.openFromFiles(); storageMenuOpen.value = false } finally { openingFromFiles.value = false }
+}
+
+async function openTieSolution() {
+  openingTie.value = true
+  bundleNotice.value = ''
+  try {
+    if (await store.openTieEntry()) {
+      storageMenuOpen.value = false
+      bundleNotice.value = '已打开 .tie 解决方案'
+    }
+  } catch (error) {
+    bundleNotice.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    openingTie.value = false
+  }
+}
+
+async function importTiezBundle() {
+  importingTiez.value = true
+  bundleNotice.value = ''
+  try {
+    if (await store.importTiez()) {
+      storageMenuOpen.value = false
+      bundleNotice.value = '已导入 .tiez 压缩包'
+    }
+  } catch (error) {
+    bundleNotice.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    importingTiez.value = false
+  }
+}
+
+async function exportTiezBundle() {
+  packingTiez.value = true
+  bundleNotice.value = ''
+  try {
+    if (await store.packCurrentSourceTiez()) {
+      bundleNotice.value = '已导出 .tiez 压缩包'
+    }
+  } catch (error) {
+    bundleNotice.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    packingTiez.value = false
+  }
+}
+
+async function importBrowserTiez() {
+  importingTiez.value = true
+  bundleNotice.value = ''
+  try {
+    if (await store.importTiezBrowser()) {
+      storageMenuOpen.value = false
+      bundleNotice.value = '已导入 .tiez'
+    }
+  } catch (error) {
+    bundleNotice.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    importingTiez.value = false
+  }
+}
+
+async function exportBrowserTiez() {
+  packingTiez.value = true
+  bundleNotice.value = ''
+  try {
+    await store.exportTiezBrowser()
+    bundleNotice.value = '已开始下载 .tiez'
+  } catch (error) {
+    bundleNotice.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    packingTiez.value = false
+  }
 }
 
 async function syncAndReload() {
@@ -592,13 +706,74 @@ onMounted(() => {
   document.addEventListener('click', closeAiModeMenu)
   ensureCodexSourceSelection()
   void refreshCodexStatus()
+  void refreshLocalMcp()
   void refreshAppVersion()
 })
 onBeforeUnmount(() => {
   document.removeEventListener('click', closeAiModeMenu)
   finishSourceDrag()
   if (updateTitleTapTimer) clearTimeout(updateTitleTapTimer)
+  window.clearTimeout(mcpHandoffTimer)
 })
+
+async function openGitSync(sourceId: string) {
+  gitSourceId.value = gitSourceId.value === sourceId ? '' : sourceId
+  gitRemoteUrl.value = ''
+  gitNotice.value = ''
+  if (!gitSourceId.value) return
+  try {
+    const status = await gitRuntimeStatus()
+    if (!status.available) {
+      gitNotice.value = status.message || '未找到同步组件'
+    }
+  } catch (error) {
+    gitNotice.value = gitErrorMessage(error)
+  }
+}
+
+async function downloadGitRuntime() {
+  gitBusy.value = true
+  gitNotice.value = '正在下载同步组件…'
+  try {
+    const status = await ensureGitRuntime()
+    gitNotice.value = status.available
+      ? `同步组件已就绪${status.version ? `（${status.version}）` : ''}`
+      : (status.message || '下载失败')
+  } catch (error) {
+    gitNotice.value = gitErrorMessage(error)
+  } finally {
+    gitBusy.value = false
+  }
+}
+
+async function saveGitSync() {
+  if (!gitSourceId.value) return
+  gitBusy.value = true
+  gitNotice.value = ''
+  try {
+    let status = await gitRuntimeStatus()
+    if (!status.available && status.canDownload) {
+      status = await ensureGitRuntime()
+    }
+    if (!status.available) {
+      gitNotice.value = status.message || '未找到同步组件'
+      return
+    }
+    const result = await enableGitSync(gitSourceId.value, gitRemoteUrl.value.trim())
+    await store.syncSource(gitSourceId.value)
+    await store.reloadWorkspace()
+    gitNotice.value = result.message || '已启用多设备同步；之后保存会自动对齐'
+    gitSourceId.value = ''
+  } catch (error) {
+    const message = gitErrorMessage(error)
+    gitNotice.value = message
+    if (gitNeedsInstall(message)) {
+      /* keep form open so user can download */
+    }
+  } finally {
+    gitBusy.value = false
+  }
+}
 
 async function syncSource(sourceId: string) {
   if (isBackendSourceId(sourceId)) {
@@ -638,9 +813,7 @@ async function saveS3Connection() {
       }
       s3Notice.value = 'S3 连接已更新。'
     } else {
-      if (!input.accessKey || !input.secretKey) throw new Error('新建 S3 连接需要 Access Key 和 Secret Key')
-      await storageRegistry.saveS3Connection(input)
-      s3Notice.value = 'S3 连接验证成功，配置已保存到当前设备。'
+      throw new Error('已不再支持新建直连 S3。请使用云服务后台，并在服务端配置磁盘或 S3。')
     }
     s3FormOpen.value = false
     resetS3Form()
@@ -657,7 +830,7 @@ async function disconnectSource(sourceId: string) {
   if ((sourcePageStats.value.get(sourceId)?.total ?? 0) > 0) return
   const label = isS3SourceId(sourceId) && !isBackendManagedS3SourceId(sourceId)
     ? '移除此 S3 连接？Bucket 中的文件不会被删除。'
-    : '断开此存储源？该目录和其中的文件不会被删除。'
+    : '移除此工作区？该目录和其中的文件不会被删除。'
   if (!window.confirm(label)) return
   await store.removeStorageSource(sourceId)
 }
@@ -666,7 +839,7 @@ async function renameSource(sourceId: string) {
   if (isBackendSourceId(sourceId)) return
   const source = orderedSources.value.find((item) => item.id === sourceId)
   if (!source) return
-  const name = window.prompt('存储源显示名称', source.name)
+  const name = window.prompt('工作区名称', source.name)
   if (name === null || name.trim() === source.name) return
   await store.renameStorageSource(sourceId, name.trim())
 }
@@ -837,7 +1010,7 @@ function restoreDefaultUpdateEndpoints() {
       <header>
         <div>
           <strong>设置</strong>
-          <small>外观主题、存储源优先级与连接管理</small>
+          <small>本地可添加多个工作区；服务器只绑定一台，绑定后开启云同步</small>
         </div>
         <button aria-label="关闭" @click="emit('close')">×</button>
       </header>
@@ -910,18 +1083,28 @@ function restoreDefaultUpdateEndpoints() {
         </div>
       </div>
 
+      <div class="theme-mode-row">
+        <span>
+          <strong>{{ backend.connected ? '本地 + 服务器' : '本地' }}</strong>
+          <small>{{ backend.connected ? `${backend.profile.endpoint} · 保存后自动云同步` : '尚未绑定服务器，页面只保存在本机工作区' }}</small>
+        </span>
+        <button type="button" :class="{ primary: !backend.connected }" @click="emit('connect-backend')">
+          {{ backend.connected ? '服务器' : '绑定服务器' }}
+        </button>
+      </div>
+
       <div class="storage-settings-toolbar">
         <button
           v-if="backend.connected"
           type="button"
-          title="修改后台服务地址和连接设置"
+          title="修改已绑定的服务器"
           @click="emit('connect-backend')"
-        >后台服务设置</button>
+        >服务器设置</button>
         <button
           v-if="backend.connected"
           type="button"
           :disabled="syncingDefaultBackend || syncingRemote || store.reloading"
-          title="把本地存储区的页面和文件资源同步到默认服务端"
+          title="把各个工作区同步到已绑定的服务器"
           @click="syncToDefaultBackend"
         >
           {{ syncingDefaultBackend ? '同步到默认服务端…' : '↑ 同步到默认服务端' }}
@@ -930,7 +1113,7 @@ function restoreDefaultUpdateEndpoints() {
           :disabled="syncingRemote || store.reloading"
           :title="store.pendingSyncCount > 0
             ? `含 ${store.pendingSyncCount} 条待推送的离线变更`
-            : (usesMobileUi ? '同步远程存储源并重新载入页面' : '冲掉离线队列、同步远程并重新载入本地/SMB')"
+            : (backend.connected ? '同步到服务器并重新载入工作区' : '重新载入各个工作区')"
           @click="syncAndReload"
         >
           {{ syncingRemote || store.reloading
@@ -956,13 +1139,13 @@ function restoreDefaultUpdateEndpoints() {
           @click="toggleCodexForm"
         >Agent 知识库</button>
         <button v-if="store.syncConflictsCount > 0" class="storage-conflict-notice" type="button" disabled>{{ store.syncConflictsCount }} 个同步冲突 · 见下方列表</button>
-        <button :class="{ active: storageMenuOpen }" @click="storageMenuOpen = !storageMenuOpen">+ 添加存储源</button>
+        <button :class="{ active: storageMenuOpen }" @click="storageMenuOpen = !storageMenuOpen">+ 添加工作区</button>
       </div>
       <p v-if="defaultBackendSyncNotice" class="backend-notice">{{ defaultBackendSyncNotice }}</p>
 
       <div v-if="store.syncConflictPages.length" class="storage-conflict-list">
         <strong>同步冲突</strong>
-        <small>本地较新的版本会在同步时自动推送；其余冲突需打开页面手动处理。</small>
+        <small>内容不一致时请打开页面对照处理。日常保存成功即已写入本机；对端对齐失败不会撤销保存。</small>
         <button
           v-for="item in store.syncConflictPages"
           :key="item.pageId"
@@ -976,17 +1159,21 @@ function restoreDefaultUpdateEndpoints() {
       </div>
 
       <div v-if="storageMenuOpen" class="storage-menu storage-settings-menu">
-        <button v-if="supportsLocalFileStorage" :disabled="choosingWorkspace" @click="chooseWorkspace('local')"><strong>本地目录</strong><small>{{ usesMobileUi ? '选择手机上的文件夹或应用内知识库' : '选择磁盘中的知识库' }}</small></button>
-        <button v-if="supportsSmbStorage" :disabled="choosingWorkspace" @click="chooseWorkspace('smb')"><strong>SMB 挂载目录</strong><small>选择系统已挂载的共享目录</small></button>
-        <button @click="emit('connect-backend'); storageMenuOpen = false"><strong>云服务{{ backend.connected ? ' · 已连接' : '' }}</strong><small>{{ backend.connected ? '已使用后台默认云工作区' : '登录即可使用后台默认云工作区' }}</small></button>
-        <button @click="openS3Form()"><strong>S3 兼容对象存储</strong><small>AWS S3、MinIO、R2、Ceph 等 · {{ usesMobileUi ? '密钥保存在应用私有目录' : '本地保存' }}</small></button>
-        <button v-if="supportsLocalFileStorage && !usesMobileUi" :disabled="openingFromFiles" @click="openFromFiles"><strong>{{ openingFromFiles ? '正在打开…' : '从文件打开' }}</strong><small>打开 Markdown；不在已有源内时自动创建本地工作区</small></button>
-        <button v-if="supportsLocalFileStorage && !usesMobileUi" :disabled="importingMarkdown || !defaultSourceId || isBackendSourceId(defaultSourceId)" @click="importMarkdown"><strong>{{ importingMarkdown ? '正在导入…' : '导入 Markdown 文件' }}</strong><small>导入到优先级最高的可用存储源</small></button>
+        <button v-if="supportsLocalFileStorage" :disabled="choosingWorkspace" @click="chooseWorkspace('local')"><strong>本地文件夹</strong><small>{{ usesMobileUi ? '选择手机上的文件夹或应用内知识库' : '再添加一个工作区' }}</small></button>
+        <button v-if="supportsSmbStorage" :disabled="choosingWorkspace" @click="chooseWorkspace('smb')"><strong>SMB 挂载目录</strong><small>把已挂载的共享目录当作一个工作区</small></button>
+        <button v-if="!supportsLocalFileStorage" :disabled="importingTiez" @click="importBrowserTiez"><strong>{{ importingTiez ? '正在导入…' : '导入压缩包 (.tiez)' }}</strong><small>浏览器演示工作区</small></button>
+        <button v-if="!supportsLocalFileStorage" :disabled="packingTiez" @click="exportBrowserTiez"><strong>{{ packingTiez ? '正在导出…' : '导出压缩包 (.tiez)' }}</strong><small>下载当前演示工作区</small></button>
+        <button v-if="supportsLocalFileStorage && !usesMobileUi" :disabled="openingFromFiles" @click="openFromFiles"><strong>{{ openingFromFiles ? '正在打开…' : '从文件打开' }}</strong><small>打开 .tie / .tiez / Markdown</small></button>
+        <button v-if="supportsLocalFileStorage && !usesMobileUi" :disabled="openingTie" @click="openTieSolution"><strong>{{ openingTie ? '正在打开…' : '打开解决方案 (.tie)' }}</strong><small>文本入口，指向工作区目录树</small></button>
+        <button v-if="supportsLocalFileStorage && !usesMobileUi" :disabled="importingTiez" @click="importTiezBundle"><strong>{{ importingTiez ? '正在导入…' : '导入压缩包 (.tiez)' }}</strong><small>解压为一个新的本地工作区</small></button>
+        <button v-if="supportsLocalFileStorage && !usesMobileUi" :disabled="packingTiez || !defaultSourceId || isBackendSourceId(defaultSourceId)" @click="exportTiezBundle"><strong>{{ packingTiez ? '正在导出…' : '导出压缩包 (.tiez)' }}</strong><small>打包当前优先本地/SMB 工作区</small></button>
+        <button v-if="supportsLocalFileStorage && !usesMobileUi" :disabled="importingMarkdown || !defaultSourceId || isBackendSourceId(defaultSourceId)" @click="importMarkdown"><strong>{{ importingMarkdown ? '正在导入…' : '导入 Markdown 文件' }}</strong><small>导入到当前默认工作区</small></button>
       </div>
+      <p v-if="bundleNotice" class="backend-notice">{{ bundleNotice }}</p>
 
       <form v-if="s3FormOpen" class="minio-config-form" @submit.prevent="saveS3Connection">
-        <strong>{{ s3EditingSourceId ? '编辑 S3 连接' : '连接 S3 兼容对象存储' }}</strong>
-        <small>兼容 AWS S3、MinIO、R2、Ceph；{{ usesMobileUi ? '连接配置与密钥保存在应用私有目录。' : '连接配置保存在本机，密钥保存在系统凭据库。' }}</small>
+        <strong>编辑旧版直连 S3（废弃）</strong>
+        <small>请尽快迁到「云服务」后台托管。{{ usesMobileUi ? '连接配置与密钥仍在应用私有目录。' : '连接配置仍在本机，密钥在系统凭据库。' }}</small>
         <label>显示名称<input v-model="s3Name" placeholder="例如：团队附件库" /></label>
         <label>Endpoint<input v-model="s3Endpoint" required placeholder="https://minio.example.com" /></label>
         <label>Bucket<input v-model="s3Bucket" required placeholder="knowledge-base" /></label>
@@ -1100,9 +1287,9 @@ function restoreDefaultUpdateEndpoints() {
 
       <form v-if="supportsAgentSkills && codexFormOpen" class="minio-config-form codex-mcp-form" @submit.prevent="applyCodexMcp">
         <strong>Agent 知识库</strong>
-        <small>{{ codexStatusSummary }} · 把本地/SMB 工作区接入 Codex / Cursor / Claude Code 的 MCP。Skill 在「Agent Skills」管理；接入时会同步到对应客户端目录。Windows 上若 Codex 仍显示未连接，请更新接入后完全重启 Codex。</small>
+        <small>{{ codexStatusSummary }}。有后台地址时写入 HTTP；否则写入本机 `tie mcp`，让客户端拉起 MCP。Skill 仍会同步。</small>
         <label>
-          <span>工作区（存储源）</span>
+          <span>工作区</span>
           <TieSelect
             v-model="codexSourceId"
             :options="codexSourceOptions"
@@ -1131,16 +1318,19 @@ function restoreDefaultUpdateEndpoints() {
             </span>
           </label>
         </div>
-        <small v-if="agentMcpStatus && !agentMcpStatus.nodeAvailable" class="backend-error">未检测到 Node.js，请先安装并确保可在终端运行 node。</small>
-        <small v-if="agentMcpStatus && !agentMcpStatus.mcpReady && agentMcpStatus.nodeAvailable" class="backend-error">
-          {{ agentMcpStatus.mcpError || 'MCP 包未就绪' }}
-          <button type="button" class="link-button" @click="pickMcpSourcePath">手动选择 tie-mcp 目录</button>
-        </small>
+        <div class="mcp-handoff">
+          <div>
+            <strong>给 Agent 的接入提示词</strong>
+            <small>{{ mcpStatusText }}。有后台地址时提示词写 HTTP；否则写本机 `tie mcp`。</small>
+          </div>
+          <button type="button" :disabled="!selectedMcpSource" @click="copyMcpHandoff">{{ mcpHandoffCopied ? '已复制' : '复制提示词' }}</button>
+        </div>
+        <small v-if="!remoteMcpUrl && !tieCliPath" class="backend-error">未找到 tie CLI，本地模式无法交给 Agent。可先构建 tie，或绑定已开启 MCP HTTP 的后台。</small>
         <p v-if="codexError" class="backend-error">{{ codexError }}</p>
         <div>
           <button type="button" :disabled="codexBusy" @click="codexFormOpen = false">取消</button>
           <button type="button" :disabled="!selectedMcpSource" @click="openSkillsWorkspace">管理 Skills</button>
-          <button type="submit" :disabled="codexBusy || !selectedMcpSource || !selectedClients.length || (agentMcpStatus !== null && !agentMcpStatus.mcpReady)">
+          <button type="submit" :disabled="codexBusy || !selectedMcpSource || !selectedClients.length || (!remoteMcpUrl && !tieCliPath)">
             {{ codexBusy ? '正在接入…' : (anySelectedConfigured ? '更新接入' : '接入所选客户端') }}
           </button>
         </div>
@@ -1182,8 +1372,8 @@ function restoreDefaultUpdateEndpoints() {
           <button
             type="button"
             class="storage-drag-handle"
-            title="拖动调整优先级"
-            aria-label="拖动调整优先级"
+            title="拖动调整工作区顺序"
+            aria-label="拖动调整工作区顺序"
             @pointerdown="startSourceDrag($event, source.id)"
           >⋮⋮</button>
           <div class="storage-settings-main" :title="sourceTitle(source)">
@@ -1197,18 +1387,30 @@ function restoreDefaultUpdateEndpoints() {
           <div class="storage-settings-actions" @mousedown.stop @click.stop>
             <button type="button" title="上移" :disabled="!canMoveSource(source.id, -1)" @click="moveSource(source.id, -1)">↑</button>
             <button type="button" title="下移" :disabled="!canMoveSource(source.id, 1)" @click="moveSource(source.id, 1)">↓</button>
-            <button v-if="canSync(source)" :disabled="syncingRemote || store.reloading" title="同步此存储源" @click="syncSource(source.id)">↻</button>
+            <button v-if="canSync(source)" :disabled="syncingRemote || store.reloading" title="同步此工作区" @click="syncSource(source.id)">↻</button>
+            <button v-if="isDesktop && (source.kind === 'local' || source.kind === 'smb')" class="labeled" type="button" title="配置多设备同步（保存后自动对齐）" @click="openGitSync(source.id)">同步</button>
             <button v-if="isDesktop && (source.kind === 'local' || source.kind === 'smb')" :disabled="source.available === false" title="在文件管理器中打开" @click="openSource(source.path)">↗</button>
-            <button v-if="source.kind === 's3'" title="编辑连接" @click="openS3Form(source.id)">✎</button>
+            <button v-if="source.kind === 's3' && !isBackendManagedS3SourceId(source.id)" title="编辑旧版直连 S3" @click="openS3Form(source.id)">✎</button>
             <button v-else-if="source.kind === 'backend'" title="修改后台服务" @click="emit('connect-backend')">✎</button>
             <button v-else-if="canRename(source)" title="重命名显示名称" @click="renameSource(source.id)">✎</button>
-            <button v-if="canDisconnect(source)" title="断开存储源" @click="disconnectSource(source.id)">×</button>
+            <button v-if="canDisconnect(source)" title="移除工作区" @click="disconnectSource(source.id)">×</button>
           </div>
         </div>
       </div>
-      <p v-else class="storage-settings-empty">{{ usesMobileUi ? '还没有连接 S3 或云服务，点「添加存储源」配置。' : '还没有连接存储源，点击「添加存储源」开始。' }}</p>
+      <p v-else class="storage-settings-empty">还没有工作区。点「添加工作区」选择一个文件夹。</p>
 
-      <p class="storage-settings-note">{{ usesMobileUi ? '本地页面保存在所选目录；也可与 S3 / 后台远程源并存。连接远程源后点「同步并载入」。' : '所有存储源的页面都在左侧同一棵树里；Agent Skills 是并列的特殊工作区。这里只调整优先级和管理连接。' }}</p>
+      <form v-if="gitSourceId" class="storage-settings-note" @submit.prevent="saveGitSync">
+        <label>多设备同步地址
+          <input v-model="gitRemoteUrl" type="text" placeholder="https://example.com/notes.git" :disabled="gitBusy" required>
+        </label>
+        <div>
+          <button type="submit" :disabled="gitBusy">{{ gitBusy ? '处理中…' : '启用并保存后自动对齐' }}</button>
+          <button v-if="isDesktop" type="button" :disabled="gitBusy" @click="downloadGitRuntime">下载同步组件</button>
+        </div>
+        <p v-if="gitNotice">{{ gitNotice }}</p>
+      </form>
+
+      <p class="storage-settings-note">{{ backend.connected ? '当前是本地 + 服务器。页面写在各个工作区里，保存后同步到这一台服务器。' : '当前是本地。可以添加多个工作区；绑定一台服务器后才会云同步。' }}</p>
     </section>
   </div>
 </template>

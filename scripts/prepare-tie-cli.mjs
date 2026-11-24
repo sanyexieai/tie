@@ -40,7 +40,7 @@ if (!triple) {
 console.log(`[prepare-tie-cli] building tie-cli for ${triple}`)
 run('cargo', ['build', '-p', 'tie-cli', '--release', '--manifest-path', path.join(tauriDir, 'Cargo.toml')])
 
-const exeName = process.platform === 'win32' ? 'tie.exe' : 'tie'
+const exeName = process.platform === 'win32' ? 'tie-cli.exe' : 'tie-cli'
 const built = path.join(tauriDir, 'target', 'release', exeName)
 if (!fs.existsSync(built)) {
   console.error(`未找到构建产物: ${built}`)

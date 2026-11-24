@@ -177,6 +177,18 @@ export function createCliPageBackend(workspacePath, cliPath, extras = {}) {
       }
       return runTie(cliPath, root, args)
     },
+    exportClosure({ page, depth, withChildren, out } = {}) {
+      const args = ['export', '--page', String(page)]
+      if (depth != null) args.push('--depth', String(depth))
+      if (withChildren === false) args.push('--no-children')
+      if (out) args.push('--out', path.resolve(String(out)))
+      return runTie(cliPath, root, args)
+    },
+    importClosure({ path: dir, strategy } = {}) {
+      const args = ['import', path.resolve(String(dir))]
+      if (strategy) args.push('--strategy', String(strategy))
+      return runTie(cliPath, root, args)
+    },
     files: {
       list({ query, ext, limit = 50 } = {}) {
         const args = ['files', 'list', '--limit', String(limit)]

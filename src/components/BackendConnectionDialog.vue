@@ -19,7 +19,6 @@ const newServerEndpoint = ref('')
 const email = ref('')
 const password = ref('')
 const name = ref('')
-const workspaceName = ref('')
 const notice = ref('')
 const advancedOpen = ref(false)
 const serviceEndpoint = ref(backend.profile.endpoint)
@@ -53,37 +52,12 @@ async function syncWorkspacePages() {
 async function submit() {
   notice.value = ''
   try {
-    if (!selectedServer.value) throw new Error('请先添加并选择后台服务器')
+    if (!selectedServer.value) throw new Error('请先选择一台服务器')
     await backend.authenticate(mode.value, selectedServer.value.endpoint, email.value.trim(), password.value, name.value.trim())
     password.value = ''
     await store.syncLocalToDefaultBackend()
     await syncWorkspacePages()
-    notice.value = '已登录，默认云工作区已就绪。'
-  } catch { /* store exposes message */ }
-}
-async function addWorkspace() {
-  if (!workspaceName.value.trim()) return
-  try {
-    await backend.createWorkspace(workspaceName.value.trim())
-    workspaceName.value = ''
-    await syncWorkspacePages()
-    notice.value = '已增加一个云工作区。'
-  } catch { /* store exposes message */ }
-}
-async function removeWorkspace(workspaceId: string, workspaceName: string) {
-  if (!window.confirm(`删除云工作区「${workspaceName}」？其中的全部页面会被永久删除。`)) return
-  try {
-    await backend.deleteWorkspace(workspaceId)
-    await syncWorkspacePages()
-    notice.value = '云工作区已删除。'
-  } catch { /* store exposes message */ }
-}
-async function renameWorkspace(workspaceId: string, currentName: string) {
-  const name = window.prompt('云工作区名称', currentName)
-  if (name === null || !name.trim() || name.trim() === currentName) return
-  try {
-    await backend.renameWorkspace(workspaceId, name.trim())
-    notice.value = '云工作区已重命名。'
+    notice.value = '已绑定服务器，云同步已开启。'
   } catch { /* store exposes message */ }
 }
 async function logout() {
@@ -94,15 +68,15 @@ async function logout() {
 
 <template>
   <div class="backend-dialog-backdrop" @mousedown.self="emit('close')">
-    <section class="backend-dialog" role="dialog" aria-modal="true" aria-label="连接云服务">
-      <header><div><strong>云服务</strong><small>登录后即可使用后台默认云工作区，无需配置存储</small></div><button aria-label="关闭" @click="emit('close')">×</button></header>
+      <section class="backend-dialog" role="dialog" aria-modal="true" aria-label="绑定服务器">
+      <header><div><strong>绑定服务器</strong><small>只绑定一台。绑定后进入本地 + 服务器，保存时云同步</small></div><button aria-label="关闭" @click="emit('close')">×</button></header>
 
       <template v-if="!backend.connected">
         <div class="backend-mode-tabs"><button :class="{ selected: mode === 'login' }" @click="mode = 'login'">登录</button><button :class="{ selected: mode === 'register' }" @click="mode = 'register'">注册</button></div>
         <button type="button" class="backend-link-button" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级选项' : '高级选项' }}</button>
         <div v-if="advancedOpen" class="backend-advanced-settings">
-          <div class="backend-server-list"><strong>选择后台服务器</strong><div v-for="server in backend.servers" :key="server.id" class="backend-server-row"><button :class="{ selected: selectedServerId === server.id }" @click="selectServer(server.id)">{{ server.endpoint }}<small v-if="server.id === 'default-local'">默认后台</small></button><label><input type="checkbox" :checked="server.defaultPrompt" @change="onDefaultPromptChange(server.id, $event)"> 默认弹窗</label></div><p v-if="!backend.servers.length" class="backend-empty">请先添加后台地址。</p></div>
-          <div class="backend-add-server"><input v-model="newServerEndpoint" inputmode="url" placeholder="添加后台服务地址，例如 https://example.com:32043" /><button :disabled="backend.loading || !newServerEndpoint.trim()" @click="addServer">添加服务器</button></div>
+          <div class="backend-server-list"><strong>服务器地址（同时只绑定一台）</strong><div v-for="server in backend.servers" :key="server.id" class="backend-server-row"><button :class="{ selected: selectedServerId === server.id }" @click="selectServer(server.id)">{{ server.endpoint }}<small v-if="server.id === 'default-local'">默认地址</small></button><label><input type="checkbox" :checked="server.defaultPrompt" @change="onDefaultPromptChange(server.id, $event)"> 启动时询问</label></div><p v-if="!backend.servers.length" class="backend-empty">请先填写服务器地址。</p></div>
+          <div class="backend-add-server"><input v-model="newServerEndpoint" inputmode="url" placeholder="例如 https://example.com:32043" /><button :disabled="backend.loading || !newServerEndpoint.trim()" @click="addServer">使用这个地址</button></div>
           <button class="backend-link-button" :disabled="backend.loading || !selectedServer" @click="testConnection">测试连接</button>
         </div>
         <label v-if="mode === 'register'">显示名称<input v-model="name" autocomplete="name" placeholder="你的名称" /></label>
@@ -112,16 +86,13 @@ async function logout() {
       </template>
 
       <template v-else>
-        <div class="backend-account"><span>●</span><div><strong>{{ accountName }}</strong><small>{{ backend.profile.endpoint }}</small></div><button @click="logout">退出登录</button></div>
+        <div class="backend-account"><span>●</span><div><strong>{{ accountName }}</strong><small>{{ backend.profile.endpoint }} · 云同步已开启</small></div><button @click="logout">解除绑定</button></div>
+        <p class="backend-notice">本地的每个工作区都会同步到这台服务器。页面仍写在本机，保存后自动对齐。</p>
         <div class="backend-service-settings">
-          <div class="backend-workspace-heading"><span>后台服务</span><button :disabled="backend.loading" @click="testConnection">测试连接</button></div>
+          <div class="backend-workspace-heading"><span>服务器</span><button :disabled="backend.loading" @click="testConnection">测试连接</button></div>
           <label>服务地址<input v-model="serviceEndpoint" inputmode="url" /></label>
-          <button class="backend-link-button" :disabled="backend.loading || !serviceEndpoint.trim()" @click="saveServiceEndpoint">保存后台服务设置</button>
+          <button class="backend-link-button" :disabled="backend.loading || !serviceEndpoint.trim()" @click="saveServiceEndpoint">保存服务器地址</button>
         </div>
-        <div class="backend-workspace-heading"><span>云工作区</span><button :disabled="backend.loading" @click="backend.refreshWorkspaces">↻</button></div>
-        <div v-if="backend.workspaces.length" class="backend-workspace-list"><div v-for="workspace in backend.workspaces" :key="workspace.id"><span><strong>{{ workspace.name }}</strong><small>已加入左侧存储源列表</small></span><button :disabled="backend.loading" title="重命名云工作区" @click="renameWorkspace(workspace.id, workspace.name)">✎</button><button :disabled="backend.loading" title="删除云工作区" @click="removeWorkspace(workspace.id, workspace.name)">×</button></div></div>
-        <p v-else class="backend-empty">登录后会自动准备默认云工作区。</p>
-        <div class="backend-create-workspace"><input v-model="workspaceName" placeholder="再加一个工作区（可选）" @keydown.enter="addWorkspace" /><button :disabled="backend.loading || !workspaceName.trim()" @click="addWorkspace">添加</button></div>
       </template>
       <button v-if="selectedServer?.defaultPrompt" class="backend-link-button" @click="dismissDefaultPrompt">以后不再弹出登录框</button><p v-if="backend.error" class="backend-error">{{ backend.error }}</p><p v-else-if="notice" class="backend-notice">{{ notice }}</p>
     </section>

@@ -108,9 +108,9 @@ export async function loadAllBackendPages(localPages: Page[] = []): Promise<Sync
   if (!profile.accessToken) return []
   try {
     const workspaces = await backendService.listWorkspaces(profile)
-    const boundWorkspaceIds = new Set(workspaces.filter((workspace) => workspace.storageProviderId).map((workspace) => workspace.id))
+    // storageProviderId 只决定服务端落盘（磁盘|S3），页面一律走 workspace API。
     const mappedWorkspaceIds = new Set(Object.values(backendService.loadWorkspaceMappings()))
-    const pages = (await Promise.all(workspaces.filter((workspace) => !boundWorkspaceIds.has(workspace.id) && !mappedWorkspaceIds.has(workspace.id)).map(async (workspace) => {
+    const pages = (await Promise.all(workspaces.filter((workspace) => !mappedWorkspaceIds.has(workspace.id)).map(async (workspace) => {
       const items = await backendService.listPages(profile, workspace.id)
       return items.map((page) => ({ ...page, storageSourceId: `backend:${workspace.id}` }))
     }))).flat()

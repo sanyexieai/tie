@@ -26,6 +26,19 @@ export interface BackendStorageSource {
   createdAt: string
 }
 
+export interface BackendMcpStatus {
+  enabled: boolean
+  running: boolean
+  url: string | null
+  error: string | null
+}
+
+export interface BackendHealth {
+  ok: boolean
+  service?: string
+  mcp?: BackendMcpStatus
+}
+
 export interface BackendProfile {
   endpoint: string
   accessToken: string | null
@@ -258,11 +271,12 @@ export const backendService = {
     this.saveProfile(profile)
     return profile
   },
-  async health(endpoint: string) {
+  async health(endpoint: string): Promise<BackendHealth> {
     let response: Response
     try { response = await fetch(`${normalizeEndpoint(endpoint)}/health`) }
     catch { throw new Error('无法连接后台，请检查地址和服务是否已启动') }
     if (!response.ok) throw new Error('后台健康检查失败')
+    return response.json() as Promise<BackendHealth>
   },
   async register(endpoint: string, email: string, password: string, name: string) {
     const profile = { ...initialProfile(), endpoint: normalizeEndpoint(endpoint) }
@@ -288,6 +302,16 @@ export const backendService = {
   },
   async renameWorkspace(profile: BackendProfile, workspaceId: string, name: string) {
     return request<BackendWorkspace>(profile, `/api/v1/workspaces/${workspaceId}`, { method: 'PATCH', body: JSON.stringify({ name }) })
+  },
+  async updateWorkspace(
+    profile: BackendProfile,
+    workspaceId: string,
+    input: { name?: string; storageProviderId?: string | null },
+  ) {
+    return request<BackendWorkspace>(profile, `/api/v1/workspaces/${workspaceId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    })
   },
   async deleteWorkspace(profile: BackendProfile, workspaceId: string) {
     await request<null>(profile, `/api/v1/workspaces/${workspaceId}`, { method: 'DELETE' })

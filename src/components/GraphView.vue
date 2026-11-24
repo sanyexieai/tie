@@ -30,10 +30,10 @@ const store = useWorkspaceStore()
 const filter = ref('')
 const sourceFilter = ref<string | null>(null)
 const sourceFilterOptions = computed(() => [
-  { value: null as string | null, label: '全部存储源' },
-  ...store.allSources.map((source) => ({
+  { value: null as string | null, label: '全部工作区' },
+  ...store.allSources.filter((source) => source.kind === 'local' || source.kind === 'smb').map((source) => ({
     value: source.id as string | null,
-    label: `${source.kind === 'backend' ? '后台 · ' : source.kind === 's3' ? 'S3 · ' : source.kind === 'smb' ? 'SMB · ' : '本地 · '}${source.name}`,
+    label: source.name,
   })),
 ])
 const tagFilter = ref<string | null>(null)
@@ -546,7 +546,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="graph-toolbar">
         <input v-model="filter" type="search" placeholder="筛选页面…" />
-        <TieSelect v-model="sourceFilter" :options="sourceFilterOptions" aria-label="筛选存储源" />
+        <TieSelect v-model="sourceFilter" :options="sourceFilterOptions" aria-label="筛选工作区" />
         <label class="graph-toggle"><input v-model="showTags" type="checkbox" />标签</label>
         <label class="graph-toggle"><input v-model="showOrphans" type="checkbox" />孤立页</label>
         <button v-if="tagFilter" type="button" class="graph-reset" :title="`清除标签筛选 #${tagFilter}`" @click="clearTagFilter">#{{ tagFilter }} ×</button>

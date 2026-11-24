@@ -65,6 +65,9 @@ describe('tie backend api', { concurrency: 1 }, () => {
     assert.equal(response.status, 200)
     assert.equal(body.ok, true)
     assert.equal(body.service, 'tie-backend')
+    assert.equal(body.mcp.enabled, false)
+    assert.equal(body.mcp.running, false)
+    assert.equal(body.mcp.url, null)
   })
 
   it('registers, logs in, and reads profile', async () => {

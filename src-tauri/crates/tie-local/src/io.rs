@@ -1,8 +1,12 @@
 use crate::page::{
-    archive_page_revision, frontmatter, normalize_page_sources, page_has_changed, parse_page,
-    remove_page_assets,
+    archive_page_revision, normalize_page_sources, page_has_changed, parse_page, read_stored_page,
+    remove_page_assets, write_page_meta,
 };
-use crate::paths::{markdown_path, page_asset_dir, revision_dir, sanitize_asset_name};
+use crate::paths::{
+    allocate_page_path, find_page_file, page_asset_dir, revision_dir, sanitize_asset_name,
+    workspace_relative,
+};
+use tie_common::fs_path::paths_equal;
 use tie_common::{Page, PageRevision, StorageSource};
 use std::{fs, path::PathBuf};
 
@@ -22,9 +26,9 @@ pub fn save_page_to_root(
 ) -> Result<Page, String> {
     let page = normalize_page_sources(page);
     fs::create_dir_all(root.join("pages")).map_err(|error| error.to_string())?;
-    let path = markdown_path(root, &page.id);
-    if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(previous) = parse_page(&content) {
+    let previous_path = find_page_file(root, &page.id);
+    if let Some(path) = &previous_path {
+        if let Ok(previous) = read_stored_page(root, path) {
             if let Some(expected) = expected_updated_at {
                 if previous.updated_at != expected {
                     return Err("页面文件已在磁盘上被修改，请重新载入后再保存".to_owned());
@@ -35,8 +39,35 @@ pub fn save_page_to_root(
             }
         }
     }
-    fs::write(path, frontmatter(&page)).map_err(|error| error.to_string())?;
+    let path = allocate_page_path(root, &page.id, &page.title);
+    let bytes = page.markdown.as_bytes();
+    let unchanged = fs::read(&path).ok().is_some_and(|current| current == bytes);
+    if !unchanged {
+        fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    }
+    write_page_meta(root, &page, &workspace_relative(root, &path)?)?;
+    if let Some(previous) = previous_path {
+        if !paths_equal(&previous, &path) {
+            let _ = fs::remove_file(previous);
+        }
+    }
     Ok(page)
+}
+
+/// Rename an existing page file to its title. Does not rewrite content.
+pub fn relocate_page_file(root: &std::path::Path, page_id: &str, title: &str) -> Result<(), String> {
+    let Some(current) = find_page_file(root, page_id) else {
+        return Ok(());
+    };
+    let target = allocate_page_path(root, page_id, title);
+    if paths_equal(&current, &target) {
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::rename(&current, &target).map_err(|error| format!("无法按标题重命名页面文件：{error}"))?;
+    crate::paths::retarget_page_meta(root, page_id, &workspace_relative(root, &target)?)
 }
 
 pub fn save_page(
@@ -159,8 +190,7 @@ pub fn permanently_delete_pages(sources: &[StorageSource], pages: &[Page]) -> Re
             .find(|source| source.id == page.storage_source_id)
             .ok_or("页面所属存储源不存在")?;
         let root = PathBuf::from(&source.path);
-        let markdown = markdown_path(&root, &page.id);
-        if markdown.exists() {
+        if let Some(markdown) = find_page_file(&root, &page.id) {
             fs::remove_file(markdown).map_err(|error| format!("无法彻底删除页面：{error}"))?;
         }
         let history = revision_dir(&root, &page.id);
@@ -200,6 +230,66 @@ pub fn read_file_page_asset(
     let root = source_root(sources, &page.storage_source_id)?;
     let asset_name = sanitize_asset_name(asset_name)?;
     fs::read(page_asset_dir(&root, &page.id).join(asset_name)).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    fn sample(id: &str, title: &str) -> Page {
+        Page {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            icon: String::new(),
+            parent_id: None,
+            sort_key: 0,
+            markdown: format!("# {title}\n"),
+            tags: Vec::new(),
+            created_at: "2026-01-01T00:00:00.000Z".to_owned(),
+            updated_at: "2026-01-01T00:00:00.000Z".to_owned(),
+            deleted_at: None,
+            storage_source_id: "src".to_owned(),
+            storage_source_ids: vec!["src".to_owned()],
+        }
+    }
+
+    #[test]
+    fn duplicate_titles_get_separate_files_and_rename_drops_the_old_name() {
+        let root = env::temp_dir().join(format!("tie-page-names-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        save_page_to_root(&root, sample("pg_a", "无标题"), None).unwrap();
+        save_page_to_root(&root, sample("pg_b", "无标题"), None).unwrap();
+        assert!(root.join("pages").join("无标题.md").is_file());
+        assert!(root.join("pages").join("无标题-2.md").is_file());
+        save_page_to_root(&root, sample("pg_a", "欢迎使用 Tie"), None).unwrap();
+        assert!(root.join("pages").join("欢迎使用 Tie.md").is_file());
+        assert!(!root.join("pages").join("无标题.md").exists());
+        assert!(root.join("pages").join("无标题-2.md").is_file());
+        let first = fs::read_to_string(root.join("pages").join("欢迎使用 Tie.md")).unwrap();
+        assert!(first.starts_with("# 欢迎使用 Tie"));
+        assert!(!first.contains("tie_version"));
+        assert!(root.join(".tie").join("meta").join("pg_a").is_file());
+        assert!(find_page_file(&root, "pg_b").is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn saving_a_legacy_page_strips_tie_frontmatter_only() {
+        let root = env::temp_dir().join(format!("tie-strip-header-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("pages")).unwrap();
+        let legacy = "---\ntie_version: 1\nid: pg_aabbccddeeff0011\nparent_id: \nsort_key: 0\nicon: \ntags: []\ncreated_at: 2026-01-01T00:00:00.000Z\nupdated_at: 2026-01-01T00:00:00.000Z\n---\n\n# 旧页\n\n正文\n";
+        fs::write(root.join("pages").join("pg_aabbccddeeff0011.md"), legacy).unwrap();
+        let mut page = crate::page::parse_page(legacy).unwrap();
+        page.storage_source_id = "src".into();
+        save_page_to_root(&root, page, None).unwrap();
+        let written = fs::read_to_string(find_page_file(&root, "pg_aabbccddeeff0011").unwrap()).unwrap();
+        assert!(!written.contains("tie_version"));
+        assert!(written.contains("正文"));
+        assert!(!root.join("pages").join("pg_aabbccddeeff0011.md").exists() || !written.starts_with("---"));
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 pub fn export_page_markdown(page: &Page, target_path: &str) -> Result<(), String> {

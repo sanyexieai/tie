@@ -45,29 +45,31 @@ npm run tie:prepare
 - `src-tauri/target/release/tie`（或 `.exe`）
 - 或 `src-tauri/binaries/tie-<host-triple>`（`tie:prepare` 产物）
 
+有后台且 `/health` 给出 `mcp.url` 时用后台 HTTP；否则直接调用 `tie` CLI。按 Skill `tie-mcp-connect`。不要在本机再起 HTTP，也不要配 `command: node`。
+
 ### B. Tie 桌面端
 
 1. 打开 Tie → **存储设置 → Agent 知识库**
-2. 选工作区与客户端 → **接入所选客户端**
-3. 桌面会写入 MCP 配置里的 `TIE_CLI`（若已构建/打包 sidecar）
-4. **新开** Agent 会话后再试 `tie_doctor`
+2. 已绑定后台且 MCP HTTP 在跑：选客户端 → **接入所选客户端**，配置写入后台地址
+3. 没绑后台：同一按钮会去掉旧的 node 启动项。之后直接调用本机 `tie`，不要期待 `tie_doctor` 这种 MCP 工具
+4. **新开** Agent 会话后再试
 
-### C. 命令行接入脚本
+### C. 命令行
 
 ```bash
-npm run mcp:setup -- --workspace /绝对路径/工作区
+npm run mcp:setup -- --workspace /绝对路径/工作区 --url http://后台主机:8787/mcp
 ```
 
-脚本若找到已构建的 `tie`，会写入 `TIE_CLI`。
+不传 `--url` 时只去掉旧的 node 启动项，并打印本机 `tie` 路径。
 
 ## 兼容问题交给 AI（不要手改）
 
 | 现象 | 做法 |
 |------|------|
-| MCP 起不来 / CLI 未找到 | 按上面构建并设置 `TIE_CLI`，更新 MCP env，重开会话 |
+| MCP 起不来 / CLI 未找到 | 按上面构建并设置 `TIE_CLI`。有后台地址才写 HTTP；否则直接调用 CLI |
 | `format check` 报缺 frontmatter / 缺 id | `tie_get` 读到内容后用 `tie_write`（带 `pageId` 或 `matchTitle`）重写；**禁止**手写 YAML frontmatter |
 | 旧 `file:///` 链接 | 用 `tie_write` 改成 `tie://file/…` 或 `tie://path/…`；或跟 Skill `tie-update` 看 migration |
-| 页面能读但 Agent 配置仍指向旧路径 | 备份后重跑桌面「接入」或 `mcp:setup` |
+| 客户端仍用 node 启动 server.js | 重跑桌面「接入」或 `mcp:setup`。有后台就加 `--url`，否则该项会被去掉 |
 | 多源 / 云同步 | CLI 只负责**本地工作区**；S3/后台仍用 Tie 桌面，不要用 CLI 冒充同步 |
 
 ## 验收

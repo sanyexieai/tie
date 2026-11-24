@@ -732,6 +732,45 @@ pub(crate) fn add_storage_source(
 }
 
 #[tauri::command]
+pub(crate) fn page_file_path(
+    app: AppHandle,
+    page_id: String,
+    storage_source_id: String,
+) -> Result<String, String> {
+    let (sources, _) = workspace_sources(&app)?;
+    let source = sources
+        .iter()
+        .find(|source| source.id == storage_source_id)
+        .ok_or("页面所属存储源不存在")?;
+    let path = tie_storage::local::find_page_file(Path::new(&source.path), &page_id)
+        .ok_or("页面文件不存在")?;
+    Ok(fs_path::for_shell_open(&path).to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub(crate) fn export_tie_file(
+    app: AppHandle,
+    page_id: String,
+    storage_source_id: String,
+    title: String,
+    out_path: String,
+) -> Result<String, String> {
+    let (sources, _) = workspace_sources(&app)?;
+    let source = sources
+        .iter()
+        .find(|source| source.id == storage_source_id)
+        .ok_or("页面所属存储源不存在")?;
+    let path = tie_storage::local::write_exported_tie(
+        Path::new(out_path.trim()),
+        Path::new(&source.path),
+        &storage_source_id,
+        &page_id,
+        &title,
+    )?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
 pub(crate) fn save_page(
     app: AppHandle,
     page: Page,

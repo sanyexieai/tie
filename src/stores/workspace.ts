@@ -1,6 +1,6 @@
 import { computed, ref, watch } from 'vue'
-import { defineStore } from 'pinia'
-import { backendService, backendS3ProviderSource, backendWorkspaceSource, isBackendRemoteSourceId } from '@/services/backend'
+import { acceptHMRUpdate, defineStore } from 'pinia'
+import { backendService, backendWorkspaceSource, isBackendRemoteSourceId } from '@/services/backend'
 import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageContentEqual, pageSourceIds, pageWriteEqual, prunePageSources, remapPageSourceIds, withPageSources } from '@/services/page-sources'
 import { reconcileSaveAgainstRemote } from '@/services/save-reconcile'
 import { isLocalWinningConflict } from '@/services/storage/sync-merge'
@@ -87,11 +87,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   const rawSources = computed(() => dedupeStorageSources([
     ...(workspace.value?.sources ?? []).filter(isWorkspaceFileSource),
-    ...(backend.connected ? backend.workspaces.flatMap((item) => {
-      const bound = item.storageProviderId ? backend.providers.find((provider) => provider.id === item.storageProviderId) : null
-      return bound ? [backendS3ProviderSource(bound)] : [backendWorkspaceSource(item, backend.profile.endpoint)]
-    }) : []),
-    ...(backend.connected ? backend.providers.filter((item) => item.kind === 's3').map((item) => backendS3ProviderSource(item)) : []),
+    // 云端只暴露工作区源；S3 是服务端 storageProviderId，不再单独成源。
+    ...(backend.connected ? backend.workspaces.map((item) => backendWorkspaceSource(item, backend.profile.endpoint)) : []),
+    // 存量直连 S3 只读兼容（设置页已禁止新建）。
     ...(s3ProvidersVersion.value >= 0 ? loadLocalS3Providers().map(s3StorageSource) : []),
   ]))
 
@@ -642,17 +640,88 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return true
   }
 
+  function applySnapshot(snapshot: { workspace: Workspace; pages: Page[] }) {
+    workspace.value = snapshot.workspace
+    setPages(snapshot.pages)
+    syncStorageSourceOrder()
+    persistPreferences()
+  }
+
   async function openFromFiles() {
     const result = await workspaceService.openMarkdownFiles()
     if (!result) return false
-    workspace.value = result.snapshot.workspace
-    setPages(result.snapshot.pages)
-    syncStorageSourceOrder()
-    persistPreferences()
+    applySnapshot(result.snapshot)
     const pageId = result.openedPageIds.find((id) => result.snapshot.pages.some((page) => page.id === id && !page.deletedAt))
       ?? result.openedPageIds[0]
+      ?? result.snapshot.pages.find((page) => !page.deletedAt)?.id
       ?? null
     if (pageId) openPage(pageId)
+    return true
+  }
+
+  async function openTieEntry() {
+    const result = await workspaceService.openTieEntry()
+    if (!result) return false
+    applySnapshot(result.snapshot)
+    const pageId = result.rootPageId && result.snapshot.pages.some((page) => page.id === result.rootPageId && !page.deletedAt)
+      ? result.rootPageId
+      : result.snapshot.pages.find((page) => !page.deletedAt)?.id ?? null
+    if (pageId) openPage(pageId)
+    return true
+  }
+
+  async function importTiez() {
+    const result = await workspaceService.importTiez()
+    if (!result) return false
+    applySnapshot(result.snapshot)
+    const pageId = result.rootPageId && result.snapshot.pages.some((page) => page.id === result.rootPageId && !page.deletedAt)
+      ? result.rootPageId
+      : result.snapshot.pages.find((page) => !page.deletedAt)?.id ?? null
+    if (pageId) openPage(pageId)
+    return true
+  }
+
+  async function packCurrentSourceTiez(sourceId?: string) {
+    const id = sourceId
+      ?? activeStorageSourceId.value
+      ?? defaultStorageSourceId.value
+      ?? allSources.value.find((source) => source.kind === 'local' || source.kind === 'smb')?.id
+    if (!id) return false
+    const result = await workspaceService.packWorkspaceTiez(id)
+    return Boolean(result)
+  }
+
+  /** Browser demo: import `.tiez` into localStorage workspace. */
+  async function importTiezBrowser() {
+    const { pickTiezFile, unpackTiezFile } = await import('@/services/tiez-browser')
+    const file = await pickTiezFile()
+    if (!file) return false
+    const packed = await unpackTiezFile(file)
+    const sourceId = 'source-demo-local'
+    const name = packed.solutionName || '浏览器演示工作区'
+    const snapshot = {
+      workspace: {
+        id: 'local-demo',
+        name,
+        sources: [{ id: sourceId, name, path: 'localStorage', kind: 'local' as const, available: true }],
+      },
+      pages: packed.pages.map((page) => ({
+        ...page,
+        storageSourceId: sourceId,
+        storageSourceIds: [sourceId],
+      })),
+    }
+    localStorage.setItem('tie-demo-workspace-v1', JSON.stringify(snapshot))
+    applySnapshot(snapshot)
+    const pageId = snapshot.pages.find((page) => !page.deletedAt)?.id ?? null
+    if (pageId) openPage(pageId)
+    return true
+  }
+
+  async function exportTiezBrowser() {
+    const { packPagesToTiez, downloadBlob } = await import('@/services/tiez-browser')
+    const packed = packPagesToTiez(pages.value, { name: workspace.value?.name })
+    downloadBlob(packed.blob, packed.filename)
     return true
   }
 
@@ -766,7 +835,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       ?? defaultStorageSourceId.value
       ?? fallbackPage?.storageSourceId
     if (!storageSourceId) {
-      throw new Error(usesMobileUi.value ? '请先添加本地目录、S3 或云服务' : '请先连接一个存储源')
+      throw new Error('请先添加一个工作区')
     }
     const page = await workspaceService.createPage(parentId, storageSourceId)
     pages.value = mergePagesById([...pages.value, page])
@@ -781,8 +850,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function markdownWithTitle(markdown: string, title: string) {
-    if (/^# .+$/m.test(markdown)) return markdown.replace(/^# .*$/m, `# ${title}`)
-    return `# ${title}\n\n${markdown}`
+    if (!markdown.startsWith('# ')) return markdown
+    return markdown.replace(/^# .*/, `# ${title}`)
   }
 
   function pageLinkPattern(pageId: PageId) {
@@ -808,9 +877,30 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return child
   }
 
+  /** 用原文做标题创建子页面，留在父页面，便于正文里就地显示。 */
+  async function createChildFromText(parentId: PageId, rawTitle: string) {
+    const parent = pages.value.find((page) => page.id === parentId && !page.deletedAt)
+    if (!parent) throw new Error('父页面不存在')
+    const title = rawTitle.trim().replace(/\s+/g, ' ').slice(0, 120)
+    if (!title) throw new Error('请先选中要展开的文字')
+    const created = await workspaceService.createPage(parentId, parent.storageSourceId)
+    const saved = await workspaceService.savePage({
+      ...created,
+      title,
+      markdown: `# ${title}\n\n`,
+      updatedAt: new Date().toISOString(),
+    })
+    const index = pages.value.findIndex((page) => page.id === saved.id)
+    if (index === -1) pages.value.push(saved)
+    else pages.value[index] = saved
+    expandPage(parentId)
+    showingTrash.value = false
+    return saved
+  }
+
   async function createLinkedPage(title: string) {
     const storageSourceId = activePage.value?.storageSourceId ?? defaultStorageSourceId.value
-    if (!storageSourceId) throw new Error('请先连接一个存储源')
+    if (!storageSourceId) throw new Error('请先添加一个工作区')
     const created = await workspaceService.createPage(null, storageSourceId)
     const cleanTitle = title.trim() || '无标题'
     const saved = await workspaceService.savePage({ ...created, title: cleanTitle, markdown: `# ${cleanTitle}\n\n`, updatedAt: new Date().toISOString() })
@@ -823,11 +913,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (!original) return null
     const created = await workspaceService.createPage(original.parentId, original.storageSourceId)
     const title = `${original.title || '无标题'} 副本`
-    const body = original.markdown.replace(/^# .*\n?/, '').trimStart()
+    const hasHeading = original.markdown.startsWith('# ')
+    const body = hasHeading ? original.markdown.replace(/^# .*\n?/, '').trimStart() : original.markdown
     const saved = await workspaceService.savePage({
       ...created,
       title,
-      markdown: `# ${title}\n\n${body}`,
+      markdown: hasHeading ? `# ${title}\n\n${body}` : body,
       tags: [...original.tags],
       updatedAt: new Date().toISOString(),
     })
@@ -959,7 +1050,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (previous?.deletedAt && !page.deletedAt && !options?.restore) {
       throw new Error('页面已移入回收站，请先恢复页面再编辑')
     }
-    // 树层级只认 frontmatter.parent_id；正文里的 tie://page 链接只做关联，不回写子页列表。
+    // 树层级只认 parent_id（写在 .tie/meta）；正文里的 tie://page 链接只做关联，不回写子页列表。
     const contentDraft = migratePageWorkspaceHrefs(page)
     // 无正文/标题/标签/删除态/树结构差异时不写盘、不刷新 updatedAt（避免自动保存空转）。
     if (!options?.force && previous && pageWriteEqual(contentDraft, previous)) {
@@ -1251,6 +1342,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return removed
   }
 
+  const trashNotice = ref('')
+  let trashNoticeTimer: number | undefined
+
   async function trashPage(pageId: PageId) {
     const removed = collectSubtree(pageId)
     const deletedAt = new Date().toISOString()
@@ -1264,7 +1358,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       }))
       pages.value = pages.value.map((page) => updated.find((candidate) => candidate.id === page.id) ?? page)
       if (removed.has(activePageId.value ?? '')) activePageId.value = pages.value.find((page) => !page.deletedAt)?.id ?? null
+      trashNotice.value = removed.size > 1 ? `已移到回收站（${removed.size} 页）` : '已移到回收站'
+      if (trashNoticeTimer) window.clearTimeout(trashNoticeTimer)
+      trashNoticeTimer = window.setTimeout(() => { trashNotice.value = '' }, 4000)
     } finally { saving.value = false }
+  }
+
+  function dismissTrashNotice() {
+    trashNotice.value = ''
   }
 
   async function restorePage(pageId: PageId) {
@@ -1581,5 +1682,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, saving, reloading, initialized, tree, trashedPages, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncLocalToDefaultBackend, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, canBindPageTo, bindPageToSource, unbindPageFromSource, setPagePrimarySource, pushPageToMirrors, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, saving, reloading, initialized, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncLocalToDefaultBackend, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, canBindPageTo, bindPageToSource, unbindPageFromSource, setPagePrimarySource, pushPageToMirrors, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })
+
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useWorkspaceStore, import.meta.hot))
+}

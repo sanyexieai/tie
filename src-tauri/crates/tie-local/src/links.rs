@@ -228,8 +228,9 @@ pub fn rewrite_legacy_workspace_hrefs(markdown: &str, page_source_id: &str) -> S
             out.push_str(&rewritten);
             continue;
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        let ch = markdown[i..].chars().next().unwrap_or('\u{FFFD}');
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
@@ -245,5 +246,15 @@ mod tests {
         let out = rewrite_legacy_workspace_hrefs(input, source);
         assert!(out.contains(&format!("tie://file/{source}/file_abc")));
         assert!(out.contains(&format!("tie://path/{source}/docs/a.pdf")));
+    }
+
+    #[test]
+    fn preserves_non_ascii_while_rewriting_hrefs() {
+        let source = "src_local_0123456789abcdef";
+        let input = "# 项目记录\n\n中文正文 tie://file/file_abc";
+        let out = rewrite_legacy_workspace_hrefs(input, source);
+        assert!(out.starts_with("# 项目记录\n"));
+        assert!(out.contains("中文正文"));
+        assert!(out.contains(&format!("tie://file/{source}/file_abc")));
     }
 }

@@ -10,10 +10,14 @@ const store = useWorkspaceStore()
 const backend = useBackendStore()
 const topLevelDragOver = ref(false)
 const deleteError = ref('')
+const bundleBusy = ref(false)
+const isDesktop = '__TAURI_INTERNALS__' in window
 const emit = defineEmits<{ close: []; 'open-storage-settings': [] }>()
 const sourcesById = computed(() => Object.fromEntries(store.allSources.map((source) => [source.id, source])))
 const activePageCount = computed(() => store.pages.filter((page) => !page.deletedAt).length)
+const trashCount = computed(() => store.trashedPages.length)
 const defaultSourceName = computed(() => store.allSources.find((source) => source.id === store.defaultStorageSourceId)?.name ?? '未设置')
+const connectionLabel = computed(() => backend.connected ? '本地 + 服务器' : '本地')
 
 watch(() => backend.connected, (connected) => {
   if (connected) void backend.refreshWorkspaces()
@@ -58,6 +62,25 @@ async function renameWorkspace() {
   if (name === null || name.trim() === store.workspace?.name) return
   await store.renameWorkspace(name)
 }
+
+async function openTie() {
+  bundleBusy.value = true
+  try { await store.openTieEntry() } finally { bundleBusy.value = false }
+}
+async function importTiez() {
+  bundleBusy.value = true
+  try {
+    if (isDesktop) await store.importTiez()
+    else await store.importTiezBrowser()
+  } finally { bundleBusy.value = false }
+}
+async function exportTiez() {
+  bundleBusy.value = true
+  try {
+    if (isDesktop) await store.packCurrentSourceTiez()
+    else await store.exportTiezBrowser()
+  } finally { bundleBusy.value = false }
+}
 </script>
 
 <template>
@@ -77,8 +100,18 @@ async function renameWorkspace() {
       <button :class="{ selected: store.showingSearch }" @click="store.openSearch()"><span>⌕</span> 搜索</button>
       <button :class="{ selected: store.showingTags }" @click="store.openTags()"><span>#</span> 标签</button>
       <button :class="{ selected: store.showingGraph }" @click="store.openGraph()"><span>◌</span> 图谱</button>
-      <button :class="{ selected: store.showingTrash }" @click="store.openTrash()"><span>⌫</span> 回收站</button>
+      <button :class="{ selected: store.showingTrash }" @click="store.openTrash()"><span>⌫</span> 回收站<span v-if="trashCount" class="sidebar-trash-count">{{ trashCount }}</span></button>
     </nav>
+    <p v-if="store.trashNotice" class="sidebar-trash-toast" role="status">
+      {{ store.trashNotice }}
+      <button type="button" @click="store.openTrash()">查看</button>
+      <button type="button" class="ghost" @click="store.dismissTrashNotice()">×</button>
+    </p>
+    <div class="sidebar-bundle-actions">
+      <button v-if="isDesktop" type="button" :disabled="bundleBusy" @click="openTie">打开 .tie</button>
+      <button type="button" :disabled="bundleBusy" @click="importTiez">导入 .tiez</button>
+      <button type="button" :disabled="bundleBusy" @click="exportTiez">导出 .tiez</button>
+    </div>
 
     <div class="sidebar-section-title">
       <span>我的页面</span>
@@ -86,8 +119,8 @@ async function renameWorkspace() {
       <div class="sidebar-section-actions">
         <button
           type="button"
-          title="同步并载入全部存储源"
-          aria-label="同步并载入全部存储源"
+          title="同步并载入工作区"
+          aria-label="同步并载入工作区"
           :disabled="store.reloading"
           @click="reloadPages"
         >{{ store.reloading ? '…' : '↻' }}</button>
@@ -161,9 +194,9 @@ async function renameWorkspace() {
       </button>
     </div>
 
-    <button class="sidebar-storage-trigger" type="button" title="打开设置：外观、存储源与优先级" @click="emit('open-storage-settings')">
+    <button class="sidebar-storage-trigger" type="button" title="打开设置：工作区与服务器" @click="emit('open-storage-settings')">
       <span>⚙ 设置<span v-if="store.syncConflictsCount > 0" class="sidebar-sync-conflicts">{{ store.syncConflictsCount }}</span></span>
-      <small>{{ store.syncConflictsCount > 0 ? `${store.syncConflictsCount} 个同步冲突 · ` : '' }}默认 · {{ defaultSourceName }}</small>
+      <small>{{ store.syncConflictsCount > 0 ? `${store.syncConflictsCount} 个同步冲突 · ` : '' }}{{ connectionLabel }} · {{ defaultSourceName }}</small>
     </button>
   </aside>
 </template>

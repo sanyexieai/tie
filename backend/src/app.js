@@ -24,20 +24,7 @@ import {
   putProviderAsset,
   putProviderPage,
 } from './s3.js'
-import {
-  deleteWorkspacePageAssets,
-  listWorkspacePageAssets,
-  readWorkspacePageAsset,
-  saveWorkspacePageAsset,
-} from './workspace-assets.js'
-import {
-  deleteWorkspacePages,
-  getWorkspacePage,
-  listWorkspacePages,
-  listWorkspaceRevisions,
-  readWorkspaceRevision,
-  saveWorkspacePage,
-} from './workspace-pages.js'
+import * as workspaceStorage from './workspace-storage.js'
 import {
   listWorkspaceFiles,
   getWorkspaceFile,
@@ -48,6 +35,7 @@ import {
 import { assertAssetPayload, mimeFromAssetName, sanitizeAssetName } from './assets.js'
 import { suggestTags } from './ai.js'
 import { assertProductionReady, createCorsMiddleware, resolveJwtSecret } from './config.js'
+import { mcpStatus, mcpUrlForRequest, proxyMcpRequest } from './mcp-http.js'
 
 export function createApp(options = {}) {
   const jwtSecret = resolveJwtSecret(options)
@@ -55,6 +43,14 @@ export function createApp(options = {}) {
   const app = express()
 
   app.use(createCorsMiddleware())
+  app.use((req, res, next) => {
+    const path = req.originalUrl || req.url || ''
+    if (path === '/mcp' || path.startsWith('/mcp/') || path.startsWith('/mcp?')) {
+      proxyMcpRequest(req, res)
+      return
+    }
+    next()
+  })
   app.use(express.json({ limit: '12mb' }))
 
 function nowIso() { return new Date().toISOString() }
@@ -127,8 +123,19 @@ function handleError(res, error) {
   res.status(status).json({ message: error.message ?? '服务器错误' })
 }
 
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, service: 'tie-backend', time: nowIso() })
+app.get('/health', (req, res) => {
+  const mcp = mcpStatus()
+  res.json({
+    ok: true,
+    service: 'tie-backend',
+    time: nowIso(),
+    mcp: {
+      enabled: mcp.enabled,
+      running: mcp.running,
+      url: mcpUrlForRequest(req),
+      error: mcp.error,
+    },
+  })
 })
 
 app.post('/api/v1/auth/register', async (req, res) => {
@@ -175,6 +182,12 @@ app.post('/api/v1/workspaces', auth, (req, res) => {
   const name = String(req.body.name ?? '').trim()
   if (!name) return res.status(400).json({ message: '工作区名称不能为空' })
   const workspace = { id: newId('ws'), name, ownerId: req.user.sub, createdAt: nowIso() }
+  const storageProviderId = String(req.body.storageProviderId ?? '').trim()
+  if (storageProviderId) {
+    const provider = findProvider(storageProviderId, req.user.sub)
+    if (!provider || provider.kind !== 's3') return res.status(400).json({ message: 'storageProviderId 无效' })
+    workspace.storageProviderId = storageProviderId
+  }
   const workspaces = store.loadWorkspaces()
   workspaces.push(workspace)
   store.saveWorkspaces(workspaces)
@@ -184,9 +197,21 @@ app.post('/api/v1/workspaces', auth, (req, res) => {
 app.patch('/api/v1/workspaces/:workspaceId', auth, (req, res) => {
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
-  const name = String(req.body.name ?? '').trim()
-  if (!name) return res.status(400).json({ message: '工作区名称不能为空' })
-  workspace.name = name
+  if (req.body.name !== undefined) {
+    const name = String(req.body.name ?? '').trim()
+    if (!name) return res.status(400).json({ message: '工作区名称不能为空' })
+    workspace.name = name
+  }
+  if (req.body.storageProviderId !== undefined) {
+    const storageProviderId = String(req.body.storageProviderId ?? '').trim()
+    if (!storageProviderId) {
+      delete workspace.storageProviderId
+    } else {
+      const provider = findProvider(storageProviderId, req.user.sub)
+      if (!provider || provider.kind !== 's3') return res.status(400).json({ message: 'storageProviderId 无效' })
+      workspace.storageProviderId = storageProviderId
+    }
+  }
   const workspaces = store.loadWorkspaces().map((item) => item.id === workspace.id ? workspace : item)
   store.saveWorkspaces(workspaces)
   res.json(workspace)
@@ -267,79 +292,89 @@ app.get('/api/v1/providers/:providerId/health', auth, async (req, res) => {
   } catch (error) { handleError(res, error) }
 })
 
-app.get('/api/v1/workspaces/:workspaceId/pages', auth, (req, res) => {
-  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
-  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
-  res.json(listWorkspacePages(workspace.id, `backend:${workspace.id}`))
-})
-
-app.get('/api/v1/workspaces/:workspaceId/pages/:pageId', auth, (req, res) => {
+app.get('/api/v1/workspaces/:workspaceId/pages', auth, async (req, res) => {
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
-    res.json(getWorkspacePage(workspace.id, req.params.pageId, `backend:${workspace.id}`))
+    res.json(await workspaceStorage.listPages(workspace, findProvider, req.user.sub))
   } catch (error) { handleError(res, error) }
 })
 
-app.put('/api/v1/workspaces/:workspaceId/pages/:pageId', auth, (req, res) => {
+app.get('/api/v1/workspaces/:workspaceId/pages/:pageId', auth, async (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try {
+    res.json(await workspaceStorage.getPage(workspace, req.params.pageId, findProvider, req.user.sub))
+  } catch (error) { handleError(res, error) }
+})
+
+app.put('/api/v1/workspaces/:workspaceId/pages/:pageId', auth, async (req, res) => {
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
     const expectedUpdatedAt = req.headers['if-unmodified-since']
-    const saved = saveWorkspacePage(workspace.id, {
-      ...req.body,
-      id: req.params.pageId,
-      storageSourceId: `backend:${workspace.id}`,
-    }, expectedUpdatedAt)
+    const saved = await workspaceStorage.savePage(
+      workspace,
+      { ...req.body, id: req.params.pageId },
+      expectedUpdatedAt,
+      findProvider,
+      req.user.sub,
+    )
     res.json(saved)
   } catch (error) { handleError(res, error) }
 })
 
-app.post('/api/v1/workspaces/:workspaceId/pages', auth, (req, res) => {
-  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
-  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
-  deleteWorkspacePages(workspace.id, req.body.pageIds ?? [])
-  res.status(204).end()
-})
-
-app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/revisions', auth, (req, res) => {
-  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
-  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
-  res.json(listWorkspaceRevisions(workspace.id, req.params.pageId))
-})
-
-app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/revisions/:revisionId', auth, (req, res) => {
+app.post('/api/v1/workspaces/:workspaceId/pages', auth, async (req, res) => {
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
-    res.json(readWorkspaceRevision(workspace.id, req.params.pageId, req.params.revisionId, `backend:${workspace.id}`))
+    await workspaceStorage.removePages(workspace, req.body.pageIds ?? [], findProvider, req.user.sub)
+    res.status(204).end()
   } catch (error) { handleError(res, error) }
 })
 
-app.put('/api/v1/workspaces/:workspaceId/pages/:pageId/assets/:assetName', auth, express.raw({ type: 'application/octet-stream', limit: '20mb' }), (req, res) => {
+app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/revisions', auth, async (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try {
+    res.json(await workspaceStorage.listRevisions(workspace, req.params.pageId, findProvider, req.user.sub))
+  } catch (error) { handleError(res, error) }
+})
+
+app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/revisions/:revisionId', auth, async (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try {
+    res.json(await workspaceStorage.readRevision(workspace, req.params.pageId, req.params.revisionId, findProvider, req.user.sub))
+  } catch (error) { handleError(res, error) }
+})
+
+app.put('/api/v1/workspaces/:workspaceId/pages/:pageId/assets/:assetName', auth, express.raw({ type: 'application/octet-stream', limit: '20mb' }), async (req, res) => {
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
     const data = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? [])
-    const assetName = saveWorkspacePageAsset(workspace.id, req.params.pageId, req.params.assetName, data)
+    const assetName = await workspaceStorage.saveAsset(workspace, req.params.pageId, req.params.assetName, data, findProvider, req.user.sub)
     res.status(201).json({ assetName })
   } catch (error) { handleError(res, error) }
 })
 
-app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/assets/:assetName', auth, (req, res) => {
+app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/assets/:assetName', auth, async (req, res) => {
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
-    const data = readWorkspacePageAsset(workspace.id, req.params.pageId, req.params.assetName)
+    const data = await workspaceStorage.readAsset(workspace, req.params.pageId, req.params.assetName, findProvider, req.user.sub)
     res.setHeader('content-type', mimeFromAssetName(req.params.assetName))
     res.send(data)
   } catch (error) { handleError(res, error) }
 })
 
-app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/assets', auth, (req, res) => {
+app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/assets', auth, async (req, res) => {
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
-  res.json({ assets: listWorkspacePageAssets(workspace.id, req.params.pageId) })
+  try {
+    res.json({ assets: await workspaceStorage.listAssets(workspace, req.params.pageId, findProvider, req.user.sub) })
+  } catch (error) { handleError(res, error) }
 })
 
 app.get('/api/v1/providers/:providerId/pages', auth, async (req, res) => {

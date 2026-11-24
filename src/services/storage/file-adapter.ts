@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { Page, PageRevision, StorageSource } from '@/types'
 import { pageBoundToSource } from '@/services/page-sources'
 import { isRetryableStorageError, queueFailureMessage } from '@/services/storage/retry'
+import { gitErrorMessage, gitSyncCanFallback, syncWorkspaceWithGit } from '@/services/storage/git-sync'
 import { emptySyncResult, mergeSyncPages } from '@/services/storage/sync-merge'
 import { syncQueue } from '@/services/storage/sync-queue'
 import type { SavePageOptions, StorageAdapter, StorageCapabilities, SyncSourceContext } from '@/services/storage/types'
@@ -87,6 +88,14 @@ export const fileStorageAdapter: StorageAdapter = {
   },
   async syncSource(sourceId, context?: SyncSourceContext) {
     try {
+      if (await isTauri()) {
+        try {
+          await syncWorkspaceWithGit(sourceId)
+        } catch (error) {
+          const message = gitErrorMessage(error)
+          if (!gitSyncCanFallback(message)) return emptySyncResult(sourceId, message)
+        }
+      }
       const loaded = await this.loadPages(sourceId)
       if (loaded.error) return emptySyncResult(sourceId, loaded.error)
       const remoteIds = new Set(loaded.pages.map((page) => page.id))

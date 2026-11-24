@@ -121,23 +121,14 @@ test('writePage accepts JSON-wrapped markdown payload and restores markdown body
 test('writePage rewrites legacy file and path hrefs with sourceId', () => {
   const root = makeWorkspace()
   const sourceId = 'src_local_2e27348a0aa628a6'
+  fs.mkdirSync(path.join(root, '.tie'), { recursive: true })
+  fs.writeFileSync(path.join(root, '.tie', 'source-id'), `${sourceId}\n`)
   const ws = createWorkspace(root)
-  const created = ws.writePage({
+  const updated = ws.writePage({
     title: '旧链迁移',
     markdown: '# 旧链迁移\n\n[书](tie://file/file_abc)\n[稿](tie://path/docs/a.pdf)\n![](tie://asset/pg_x/a.png)\n',
   })
-  // no storage source on a brand-new workspace without env; set via existing page
-  fs.writeFileSync(path.join(root, 'pages', `${created.page.id}.md`), frontmatter({
-    ...ws.getById(created.page.id),
-    storageSourceId: sourceId,
-    storageSourceIds: [sourceId],
-  }))
-  const ws2 = createWorkspace(root)
-  const updated = ws2.writePage({
-    pageId: created.page.id,
-    markdown: '# 旧链迁移\n\n[书](tie://file/file_abc)\n[稿](tie://path/docs/a.pdf)\n![](tie://asset/pg_x/a.png)\n',
-  })
-  const page = ws2.getById(updated.page.id)
+  const page = ws.getById(updated.page.id)
   assert.ok(page.markdown.includes(`tie://file/${encodeURIComponent(sourceId)}/file_abc`))
   assert.ok(page.markdown.includes(`tie://path/${encodeURIComponent(sourceId)}/docs/a.pdf`))
   assert.ok(page.markdown.includes('tie://asset/pg_x/a.png'))

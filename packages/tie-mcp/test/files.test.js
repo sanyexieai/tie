@@ -131,20 +131,21 @@ test('copy rejects directories deeper than 8 levels', () => {
 test('ingest urls include source id inferred from pages', () => {
   const root = makeWorkspace()
   const sourceId = 'src_local_2e27348a0aa628a6'
-  fs.writeFileSync(path.join(root, 'pages', 'pg_home.md'), frontmatter({
-    id: 'pg_home',
-    title: 'Home',
-    icon: '',
-    parentId: null,
-    sortKey: 0,
-    markdown: '# Home\n',
-    tags: [],
-    createdAt: '2026-09-10T00:00:00.000Z',
-    updatedAt: '2026-09-10T00:00:00.000Z',
-    deletedAt: null,
-    storageSourceId: sourceId,
-    storageSourceIds: [sourceId],
-  }))
+  // 旧文件仍可能带 storage_source_id；新写入的 frontmatter 已省略该字段。
+  fs.writeFileSync(path.join(root, 'pages', 'pg_home.md'), `---
+tie_version: 1
+id: pg_home
+storage_source_id: ${sourceId}
+parent_id: 
+sort_key: 0
+icon: 
+tags: []
+created_at: 2026-09-10T00:00:00.000Z
+updated_at: 2026-09-10T00:00:00.000Z
+---
+
+# Home
+`)
   const ws = createWorkspace(root)
   const file = path.join(root, 'note.txt')
   fs.writeFileSync(file, 'hello')

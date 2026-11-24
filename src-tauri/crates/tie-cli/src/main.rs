@@ -3,12 +3,17 @@ use serde::Serialize;
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use tie_local::{LocalWorkspace, WritePageInput};
+mod mcp;
+
+use tie_local::{
+    pack_tiez, unpack_tiez, ExportOptions, ImportStrategy, LocalWorkspace, WritePageInput,
+    DEFAULT_EXPORT_DEPTH,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "tie", version, about = "Tie local-first knowledge CLI")]
 struct Cli {
-    /// Workspace root containing pages/
+    /// Workspace root, or a `.tie` solution file (env: TIE_WORKSPACE)
     #[arg(long, env = "TIE_WORKSPACE", global = true)]
     workspace: Option<PathBuf>,
 
@@ -28,7 +33,6 @@ enum FormatCmd {
 
 #[derive(Subcommand, Debug)]
 enum FilesCmd {
-    /// List registered files
     List {
         #[arg(long)]
         query: Option<String>,
@@ -37,15 +41,12 @@ enum FilesCmd {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
-    /// Get one registered file by id
     Get {
         file_id: String,
     },
-    /// Resolve open path for a file id
     OpenHint {
         file_id: String,
     },
-    /// Register a path (`link` absolute, or `copy` into `.tie/files/`)
     Ingest {
         path: PathBuf,
         #[arg(long, default_value = "link")]
@@ -56,11 +57,89 @@ enum FilesCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum HistoryCmd {
+    /// List revisions for a page
+    List {
+        id_or_title: String,
+    },
+    /// Read one revision as JSON page
+    Get {
+        id_or_title: String,
+        revision_id: String,
+    },
+    /// Restore a revision onto the current page (archives current first)
+    Restore {
+        id_or_title: String,
+        revision_id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SolutionCmd {
+    /// Write / refresh the `.tie` solution file at the workspace root
+    Write {
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Show the solution file (or inferred metadata)
+    Show,
+}
+
+#[derive(Subcommand, Debug)]
 enum Commands {
-    /// Create pages/ under a workspace root
+    /// Create pages/ + `.tie` solution under a workspace root
     Init {
         /// Directory to initialize (default: --workspace / cwd)
         path: Option<PathBuf>,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Resolve and print workspace info from a directory or `.tie` file
+    Open {
+        /// Path to workspace dir or `.tie` (default: --workspace)
+        path: Option<PathBuf>,
+    },
+    /// Pack workspace tree into a `.tiez` archive
+    Pack {
+        /// Output `.tiez` path
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Unpack a `.tiez` archive into a directory
+    Unpack {
+        archive: PathBuf,
+        /// Output directory (must not exist or be empty)
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Manage the text `.tie` solution file
+    Solution {
+        #[command(subcommand)]
+        action: SolutionCmd,
+    },
+    /// List page summaries
+    List {
+        #[arg(long, default_value_t = false)]
+        include_deleted: bool,
+    },
+    /// Soft-delete a page (recycle bin via deleted_at)
+    Delete {
+        id_or_title: String,
+    },
+    /// Restore a soft-deleted page
+    Restore {
+        id_or_title: String,
+    },
+    /// Permanently delete a page (default: must be in recycle bin)
+    Purge {
+        id_or_title: String,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    /// Page revision history
+    History {
+        #[command(subcommand)]
+        action: HistoryCmd,
     },
     /// Read a page by id or exact title
     Get {
@@ -88,7 +167,6 @@ enum Commands {
     },
     /// Print the page tree (JSON)
     Tree {
-        /// Optional root page id or title (default: all top-level pages)
         root: Option<String>,
     },
     /// File registry under .tie/files
@@ -101,13 +179,33 @@ enum Commands {
         #[command(subcommand)]
         action: FormatCmd,
     },
+    /// Export a page closure into a directory
+    Export {
+        #[arg(long)]
+        page: String,
+        #[arg(long, default_value_t = DEFAULT_EXPORT_DEPTH)]
+        depth: usize,
+        #[arg(long, overrides_with = "no_children")]
+        with_children: bool,
+        #[arg(long, overrides_with = "with_children")]
+        no_children: bool,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Import an export directory into the workspace
+    Import {
+        path: PathBuf,
+        #[arg(long, default_value = "skip")]
+        strategy: String,
+    },
+    /// Speak MCP on stdin/stdout. Agents launch: tie mcp
+    Mcp,
     /// Create or update a page (auto frontmatter + history)
     Write {
         #[arg(long)]
         title: Option<String>,
         #[arg(long)]
         page_id: Option<String>,
-        /// Markdown body; if omitted, read stdin when piped
         #[arg(long)]
         markdown: Option<String>,
         #[arg(long)]
@@ -137,25 +235,101 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
+    let workspace_flag = cli.workspace.clone();
+    let source_id = cli.source_id.clone();
     match cli.command {
-        Commands::Init { path } => {
+        Commands::Init { path, name } => {
             let target = path
-                .or_else(|| cli.workspace.clone())
+                .or(workspace_flag)
                 .unwrap_or_else(|| PathBuf::from("."));
-            let source = cli.source_id.as_deref().unwrap_or("");
+            let source = source_id.as_deref().unwrap_or("");
             let ws = LocalWorkspace::init(&target, source)?;
+            let sol = if let Some(name) = name {
+                Some(ws.write_solution_file(Some(&name))?)
+            } else {
+                let path = ws.solution_path();
+                if path.exists() {
+                    Some(path)
+                } else {
+                    Some(ws.write_solution_file(None)?)
+                }
+            };
             print_json(&serde_json::json!({
                 "workspace": ws.root().display().to_string(),
                 "sourceId": ws.default_source_id(),
+                "solution": sol.map(|p| p.display().to_string()),
             }))
         }
+        Commands::Open { path } => {
+            let entry = path
+                .or(workspace_flag)
+                .ok_or("请指定要打开的目录或 .tie 文件")?;
+            let ws = LocalWorkspace::open_entry(&entry, source_id.as_deref())?;
+            print_json(&serde_json::json!({
+                "workspace": ws.root().display().to_string(),
+                "sourceId": ws.default_source_id(),
+                "solution": ws.solution_path().display().to_string(),
+                "solutionExists": ws.solution_path().is_file(),
+            }))
+        }
+        Commands::Unpack { archive, out } => print_json(&unpack_tiez(&archive, &out)?),
         other => {
-            let root = cli
-                .workspace
-                .clone()
-                .ok_or("请通过 --workspace 或 TIE_WORKSPACE 指定工作区根目录（含 pages/）")?;
-            let ws = LocalWorkspace::open(&root, cli.source_id.as_deref())?;
+            let root = workspace_flag
+                .ok_or("请通过 --workspace 或 TIE_WORKSPACE 指定工作区根目录或 .tie 解决方案")?;
+            let ws = LocalWorkspace::open_entry(&root, source_id.as_deref())?;
             match other {
+                Commands::Pack { out } => print_json(&pack_tiez(ws.root(), &out)?),
+                Commands::Solution { action } => match action {
+                    SolutionCmd::Write { name } => {
+                        let path = ws.write_solution_file(name.as_deref())?;
+                        print_json(&serde_json::json!({
+                            "solution": path.display().to_string(),
+                            "workspace": ws.root().display().to_string(),
+                            "sourceId": ws.default_source_id(),
+                        }))
+                    }
+                    SolutionCmd::Show => {
+                        let path = ws.solution_path();
+                        if path.is_file() {
+                            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                            let sol = tie_local::parse_solution_text(&text)?;
+                            print_json(&serde_json::json!({
+                                "path": path.display().to_string(),
+                                "solution": sol,
+                            }))
+                        } else {
+                            print_json(&serde_json::json!({
+                                "path": path.display().to_string(),
+                                "exists": false,
+                                "workspace": ws.root().display().to_string(),
+                                "sourceId": ws.default_source_id(),
+                            }))
+                        }
+                    }
+                },
+                Commands::List { include_deleted } => {
+                    print_json(&ws.list_pages(include_deleted)?)
+                }
+                Commands::Delete { id_or_title } => print_json(&ws.soft_delete(&id_or_title)?),
+                Commands::Restore { id_or_title } => {
+                    print_json(&ws.restore_deleted(&id_or_title)?)
+                }
+                Commands::Purge { id_or_title, force } => {
+                    print_json(&ws.purge_page(&id_or_title, force)?)
+                }
+                Commands::History { action } => match action {
+                    HistoryCmd::List { id_or_title } => {
+                        print_json(&ws.list_revisions(&id_or_title)?)
+                    }
+                    HistoryCmd::Get {
+                        id_or_title,
+                        revision_id,
+                    } => print_json(&ws.get_revision(&id_or_title, &revision_id)?),
+                    HistoryCmd::Restore {
+                        id_or_title,
+                        revision_id,
+                    } => print_json(&ws.restore_revision(&id_or_title, &revision_id)?),
+                },
                 Commands::Get { id_or_title } => {
                     let page = ws
                         .resolve(&id_or_title)?
@@ -203,6 +377,28 @@ fn run() -> Result<(), String> {
                         Ok(())
                     }
                 },
+                Commands::Export {
+                    page,
+                    depth,
+                    with_children: _,
+                    no_children,
+                    out,
+                } => print_json(&ws.export_closure(
+                    &page,
+                    &ExportOptions {
+                        depth,
+                        with_children: !no_children,
+                        out,
+                    },
+                )?),
+                Commands::Import { path, strategy } => {
+                    let strategy: ImportStrategy = strategy.parse()?;
+                    print_json(&ws.import_closure(&path, strategy)?)
+                }
+                Commands::Mcp => {
+                    mcp::serve(&ws)?;
+                    Ok(())
+                }
                 Commands::Write {
                     title,
                     page_id,
@@ -232,7 +428,9 @@ fn run() -> Result<(), String> {
                     })?;
                     print_json(&result)
                 }
-                Commands::Init { .. } => unreachable!(),
+                Commands::Init { .. }
+                | Commands::Open { .. }
+                | Commands::Unpack { .. } => unreachable!(),
             }
         }
     }
@@ -246,8 +444,6 @@ fn print_json<T: Serialize>(value: &T) -> Result<(), String> {
     Ok(())
 }
 
-/// Read body from stdin only when piped with real content.
-/// `/dev/null` (stdio ignore) is not a terminal but yields empty — treat as omitted.
 fn read_markdown_stdin() -> Result<Option<String>, String> {
     let mut stdin = std::io::stdin();
     if stdin.is_terminal() {
@@ -263,4 +459,3 @@ fn read_markdown_stdin() -> Result<Option<String>, String> {
         Ok(Some(buf))
     }
 }
-

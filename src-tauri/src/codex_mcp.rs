@@ -516,18 +516,7 @@ fn escape_toml_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| format!("\"{value}\""))
 }
 
-fn escape_toml_key(key: &str) -> String {
-    if key
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-    {
-        key.to_owned()
-    } else {
-        escape_toml_string(key)
-    }
-}
-
-/// Windows `canonicalize` 会产出 `\\?\C:\...`；Node / Codex 环境变量里常认不了，写入外部配置前去掉。
+/// Windows `canonicalize` 会产出 `\\?\C:\...`；写入外部配置前去掉。
 fn path_for_external_config(path: &Path) -> PathBuf {
     tie_storage::fs_path::for_external_config(path)
 }
@@ -565,7 +554,7 @@ fn parse_configured_workspace_json(config: &str) -> Option<String> {
         .map(|item| item.to_owned())
 }
 
-fn parse_server_path_toml(config: &str) -> Option<String> {
+fn parse_mcp_url_toml(config: &str) -> Option<String> {
     let mut in_server = false;
     for line in config.lines() {
         let trimmed = line.trim();
@@ -577,32 +566,37 @@ fn parse_server_path_toml(config: &str) -> Option<String> {
             in_server = false;
             continue;
         }
-        if in_server && trimmed.starts_with("args") {
-            let (_, raw) = trimmed.split_once('=')?;
-            let args: Vec<String> = serde_json::from_str(raw.trim()).ok()?;
-            return args.first().cloned();
+        if in_server && trimmed.starts_with("url") {
+            let raw = trimmed.split_once('=')?.1.trim().trim_matches('"');
+            if raw.starts_with("http://") || raw.starts_with("https://") {
+                return Some(raw.to_owned());
+            }
         }
     }
     None
 }
 
-fn parse_server_path_json(config: &str) -> Option<String> {
-    serde_json::from_str::<Value>(config)
+fn parse_mcp_url_json(config: &str) -> Option<String> {
+    let url = serde_json::from_str::<Value>(config)
         .ok()?
         .get("mcpServers")?
         .get(SERVER_NAME)?
-        .get("args")?
-        .as_array()?
-        .first()?
-        .as_str()
-        .map(str::to_owned)
+        .get("url")?
+        .as_str()?
+        .trim()
+        .to_owned();
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Some(url)
+    } else {
+        None
+    }
 }
 
-fn codex_approval_configured(config: &str) -> bool {
+fn tie_entry_uses_command_toml(config: &str) -> bool {
     let mut in_server = false;
     for line in config.lines() {
         let trimmed = line.trim();
-        if trimmed == "[mcp_servers.tie]" {
+        if trimmed == "[mcp_servers.tie]" || trimmed.starts_with("[mcp_servers.tie.") {
             in_server = true;
             continue;
         }
@@ -610,14 +604,65 @@ fn codex_approval_configured(config: &str) -> bool {
             in_server = false;
             continue;
         }
-        if in_server && trimmed.starts_with("default_tools_approval_mode") {
-            return trimmed
-                .split_once('=')
-                .map(|(_, value)| value.trim().trim_matches('"') == "approve")
-                .unwrap_or(false);
+        if in_server && (trimmed.starts_with("command") || trimmed.starts_with("args")) {
+            return true;
         }
     }
     false
+}
+
+fn tie_entry_is_local_mcp_toml(config: &str) -> bool {
+    let mut in_server = false;
+    let mut command = String::new();
+    let mut args = String::new();
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[mcp_servers.tie]" {
+            in_server = true;
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_server {
+                break;
+            }
+            continue;
+        }
+        if !in_server {
+            continue;
+        }
+        if let Some((_, value)) = trimmed.split_once('=') {
+            let key = trimmed.split_once('=').map(|(key, _)| key.trim()).unwrap_or("");
+            if key == "command" {
+                command = value.trim().trim_matches('"').to_lowercase();
+            }
+            if key == "args" {
+                args = value.to_lowercase();
+            }
+        }
+    }
+    !command.contains("node") && command.contains("tie") && args.contains("mcp")
+}
+
+fn tie_entry_is_local_mcp_json(config: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(config) else {
+        return false;
+    };
+    let Some(entry) = value.get("mcpServers").and_then(|item| item.get(SERVER_NAME)) else {
+        return false;
+    };
+    let command = entry.get("command").and_then(Value::as_str).unwrap_or("").to_lowercase();
+    let args = entry.get("args").map(|item| item.to_string()).unwrap_or_default().to_lowercase();
+    !command.contains("node") && command.contains("tie") && args.contains("mcp")
+}
+
+fn tie_entry_uses_command_json(config: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(config) else {
+        return false;
+    };
+    let Some(entry) = value.get("mcpServers").and_then(|item| item.get(SERVER_NAME)) else {
+        return false;
+    };
+    entry.get("command").is_some() || entry.get("args").is_some()
 }
 
 fn strip_mcp_server_block(config: &str) -> String {
@@ -655,105 +700,168 @@ fn strip_mcp_server_block(config: &str) -> String {
     text.trim().to_owned()
 }
 
-fn mcp_package_cwd(server_path: &Path) -> Option<PathBuf> {
-    // .../tie-mcp/src/server.js → .../tie-mcp
-    server_path
-        .parent()
-        .and_then(|src| src.parent())
-        .map(|path| path.to_path_buf())
-        .filter(|path| path.is_dir())
+fn normalize_mcp_url(raw: &str) -> Result<String, String> {
+    let url = raw.trim();
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(url.to_owned())
+    } else {
+        Err("MCP 地址需要以 http:// 或 https:// 开头".into())
+    }
 }
 
-fn build_mcp_block(server_path: &Path, workspace_path: &Path, app: Option<&AppHandle>) -> String {
-    let server_path = path_for_external_config(server_path);
-    let workspace_path = path_for_external_config(workspace_path);
-    let node = node_bin()
-        .map(|path| path_for_external_config(&path).to_string_lossy().into_owned())
-        .unwrap_or_else(|| {
-            if cfg!(windows) {
-                "node.exe".to_owned()
-            } else {
-                "node".to_owned()
-            }
-        });
-    let mut block = format!(
-        "[mcp_servers.tie]\ncommand = {}\nargs = [{}]\ndefault_tools_approval_mode = \"approve\"\nstartup_timeout_sec = 60\nenabled = true\n",
-        escape_toml_string(&node),
-        escape_toml_string(&server_path.to_string_lossy()),
-    );
-    if let Some(cwd) = mcp_package_cwd(&server_path) {
-        block.push_str(&format!(
-            "cwd = {}\n",
-            escape_toml_string(&path_for_external_config(&cwd).to_string_lossy())
-        ));
+fn http_mcp_block(url: &str) -> String {
+    format!(
+        "[mcp_servers.tie]\nurl = {}\nenabled = true\n",
+        escape_toml_string(url)
+    )
+}
+
+fn change_actor_label(agent: &str) -> String {
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_default();
+    let host = host.trim();
+    if host.is_empty() {
+        agent.to_owned()
+    } else {
+        format!("{agent} · {host}")
     }
-    block.push_str("\n[mcp_servers.tie.env]\n");
-    for (key, value) in mcp_runtime_env(&workspace_path, app) {
-        block.push_str(&format!(
-            "{} = {}\n",
-            escape_toml_key(&key),
-            escape_toml_string(&value)
-        ));
+}
+
+fn local_mcp_env(workspace: &Path, actor: &str) -> Vec<(String, String)> {
+    let mut env = vec![(
+        "TIE_WORKSPACE".to_owned(),
+        path_for_external_config(workspace).to_string_lossy().into_owned(),
+    )];
+    let actor = actor.trim();
+    if !actor.is_empty() {
+        env.push(("TIE_ACTOR".to_owned(), actor.to_owned()));
+    }
+    env.push(("PATH".into(), command_path_env()));
+    #[cfg(windows)]
+    {
+        for key in ["SystemRoot", "SYSTEMROOT", "windir", "WINDIR"] {
+            if let Ok(value) = std::env::var(key) {
+                if !value.is_empty() {
+                    env.push((key.to_owned(), value));
+                }
+            }
+        }
+    }
+    env
+}
+
+fn local_mcp_block(command: &str, workspace: &Path, actor: &str) -> String {
+    let mut block = format!(
+        "[mcp_servers.tie]\ncommand = {}\nargs = [\"mcp\"]\nenabled = true\n\n[mcp_servers.tie.env]\n",
+        escape_toml_string(command)
+    );
+    for (key, value) in local_mcp_env(workspace, actor) {
+        block.push_str(&format!("{} = {}\n", key, escape_toml_string(&value)));
     }
     block
+}
+
+fn local_mcp_json(command: &str, workspace: &Path, actor: &str, with_type: bool) -> Value {
+    let mut entry = Map::new();
+    if with_type {
+        entry.insert("type".into(), json!("stdio"));
+    }
+    entry.insert("command".into(), json!(command));
+    entry.insert("args".into(), json!(["mcp"]));
+    let mut env_map = Map::new();
+    for (key, value) in local_mcp_env(workspace, actor) {
+        env_map.insert(key, json!(value));
+    }
+    entry.insert("env".into(), Value::Object(env_map));
+    Value::Object(entry)
+}
+
+fn current_app_exe() -> Option<PathBuf> {
+    std::env::current_exe().ok().map(|path| path.canonicalize().unwrap_or(path))
+}
+
+fn same_file(path: &Path, app: &Path) -> bool {
+    let candidate = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    candidate == *app
 }
 
 fn look_like_tie_cli_name(name: &str) -> bool {
     #[cfg(windows)]
     {
         let lower = name.to_ascii_lowercase();
-        lower == "tie.exe" || (lower.starts_with("tie-") && lower.ends_with(".exe"))
+        lower == "tie-cli.exe" || (lower.starts_with("tie-") && lower.ends_with(".exe") && lower != "tie.exe")
     }
     #[cfg(not(windows))]
     {
-        name == "tie" || (name.starts_with("tie-") && !name.contains('.'))
+        name == "tie-cli" || (name.starts_with("tie-") && !name.contains('.'))
     }
+}
+
+fn binary_serves_mcp(path: &Path) -> bool {
+    let Ok(output) = Command::new(path).arg("--help").output() else {
+        return false;
+    };
+    if !output.status.success() && output.stdout.is_empty() {
+        return false;
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    text.lines().any(|line| line.trim().starts_with("mcp"))
 }
 
 fn find_tie_cli_in_dir(dir: &Path) -> Option<PathBuf> {
-    let exact = dir.join(if cfg!(windows) { "tie.exe" } else { "tie" });
-    if exact.is_file() {
-        return Some(exact);
+    let app = current_app_exe();
+    let reject = |path: &Path| app.as_ref().is_some_and(|exe| same_file(path, exe));
+    let mut found = Vec::new();
+    let preferred = dir.join(if cfg!(windows) { "tie-cli.exe" } else { "tie-cli" });
+    if preferred.is_file() && !reject(&preferred) {
+        found.push(preferred);
     }
-    let entries = fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        // Avoid matching unrelated files; externalBin sidecars are `tie-<triple>`.
-        if look_like_tie_cli_name(&name) {
-            return Some(path);
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || reject(&path) || found.iter().any(|item| item == &path) {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if look_like_tie_cli_name(&name) {
+                found.push(path);
+            }
         }
     }
-    None
+    found.into_iter().find(|path| binary_serves_mcp(path))
 }
 
 fn resolve_tie_cli_binary(app: Option<&AppHandle>) -> Option<PathBuf> {
+    let running_app = current_app_exe();
     if let Ok(from_env) = std::env::var("TIE_CLI") {
         let path = PathBuf::from(from_env.trim());
-        if path.is_file() {
+        if path.is_file() && running_app.as_ref().is_none_or(|exe| !same_file(&path, exe)) {
             return Some(path);
         }
     }
 
     let mut dirs: Vec<PathBuf> = Vec::new();
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dirs.push(manifest_dir.join("binaries"));
+    for profile in ["release", "debug"] {
+        dirs.push(manifest_dir.join("target").join(profile));
+    }
+    if let Some(app) = app {
+        if let Ok(resource) = app.path().resource_dir() {
+            dirs.push(resource.join("binaries"));
+            dirs.push(resource);
+        }
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             dirs.push(dir.to_path_buf());
         }
-    }
-    if let Some(app) = app {
-        if let Ok(resource) = app.path().resource_dir() {
-            dirs.push(resource.clone());
-            dirs.push(resource.join("binaries"));
-        }
-    }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for profile in ["release", "debug"] {
-        dirs.push(manifest_dir.join("target").join(profile));
     }
 
     for dir in dirs {
@@ -772,145 +880,17 @@ fn resolve_tie_cli_binary(app: Option<&AppHandle>) -> Option<PathBuf> {
     stdout
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
+        .filter(|line| !line.is_empty())
         .map(PathBuf::from)
-        .filter(|path| path.is_file())
+        .find(|path| path.is_file() && binary_serves_mcp(path))
 }
 
-fn mcp_runtime_env(workspace_path: &Path, app: Option<&AppHandle>) -> Vec<(String, String)> {
-    let workspace = path_for_external_config(workspace_path);
-    let mut env = vec![(
-        "TIE_WORKSPACE".to_owned(),
-        workspace.to_string_lossy().into_owned(),
-    )];
-    if let Some(cli) = resolve_tie_cli_binary(app) {
-        env.push((
-            "TIE_CLI".to_owned(),
-            path_for_external_config(&cli).to_string_lossy().into_owned(),
-        ));
-    }
-
-    // Windows 上 Codex 给 MCP 子进程的环境极精简，缺 PATH/SYSTEMROOT 时 node 经常起不来
-    #[cfg(windows)]
-    {
-        env.push(("PATH".into(), command_path_env()));
-        let push_env = |env: &mut Vec<(String, String)>, key: &str| {
-            if let Ok(value) = std::env::var(key) {
-                if !value.is_empty() {
-                    env.push((key.to_owned(), value));
-                }
-            }
-        };
-        for key in [
-            "SystemRoot",
-            "SYSTEMROOT",
-            "windir",
-            "WINDIR",
-            "ComSpec",
-            "COMSPEC",
-            "USERPROFILE",
-            "HOMEDRIVE",
-            "HOMEPATH",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "ProgramData",
-            "PROGRAMDATA",
-            "ProgramFiles",
-            "ProgramFiles(x86)",
-            "TEMP",
-            "TMP",
-            "PATHEXT",
-            "USERNAME",
-            "USERDOMAIN",
-            "NUMBER_OF_PROCESSORS",
-            "PROCESSOR_ARCHITECTURE",
-        ] {
-            push_env(&mut env, key);
-        }
-        // 兜底：即使当前进程缺这些变量，也写入常见默认值
-        let defaults = [
-            ("SystemRoot", r"C:\Windows"),
-            ("SYSTEMROOT", r"C:\Windows"),
-            ("windir", r"C:\Windows"),
-            ("WINDIR", r"C:\Windows"),
-            ("ComSpec", r"C:\Windows\System32\cmd.exe"),
-            ("COMSPEC", r"C:\Windows\System32\cmd.exe"),
-            ("PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC"),
-        ];
-        for (key, value) in defaults {
-            if !env.iter().any(|(existing, _)| existing.eq_ignore_ascii_case(key)) {
-                env.push((key.to_owned(), value.to_owned()));
-            }
-        }
-        if let Ok(profile) = std::env::var("USERPROFILE") {
-            if !env.iter().any(|(k, _)| k == "APPDATA") {
-                env.push((
-                    "APPDATA".into(),
-                    format!(r"{profile}\AppData\Roaming"),
-                ));
-            }
-            if !env.iter().any(|(k, _)| k == "LOCALAPPDATA") {
-                env.push((
-                    "LOCALAPPDATA".into(),
-                    format!(r"{profile}\AppData\Local"),
-                ));
-            }
-            if !env.iter().any(|(k, _)| k == "TEMP") {
-                env.push(("TEMP".into(), format!(r"{profile}\AppData\Local\Temp")));
-            }
-            if !env.iter().any(|(k, _)| k == "TMP") {
-                env.push(("TMP".into(), format!(r"{profile}\AppData\Local\Temp")));
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        env.push(("PATH".into(), command_path_env()));
-    }
-
-    env
-}
-
-fn mcp_server_json(
-    server_path: &Path,
-    workspace_path: &Path,
-    with_type: bool,
-    app: Option<&AppHandle>,
-) -> Value {
-    let server_path = path_for_external_config(server_path);
-    let workspace_path = path_for_external_config(workspace_path);
+fn http_mcp_json(url: &str, with_type: bool) -> Value {
     let mut entry = Map::new();
     if with_type {
-        entry.insert("type".into(), json!("stdio"));
+        entry.insert("type".into(), json!("http"));
     }
-    let node = node_bin()
-        .map(|path| path_for_external_config(&path).to_string_lossy().into_owned())
-        .unwrap_or_else(|| {
-            if cfg!(windows) {
-                "node.exe".to_owned()
-            } else {
-                "node".to_owned()
-            }
-        });
-    entry.insert("command".into(), json!(node));
-    entry.insert(
-        "args".into(),
-        json!([server_path.to_string_lossy().to_string()]),
-    );
-    entry.insert("startup_timeout_sec".into(), json!(60));
-    entry.insert("enabled".into(), json!(true));
-    if let Some(cwd) = mcp_package_cwd(&server_path) {
-        entry.insert(
-            "cwd".into(),
-            json!(path_for_external_config(&cwd).to_string_lossy().to_string()),
-        );
-    }
-    let mut env_map = Map::new();
-    for (key, value) in mcp_runtime_env(&workspace_path, app) {
-        env_map.insert(key, json!(value));
-    }
-    entry.insert("env".into(), Value::Object(env_map));
+    entry.insert("url".into(), json!(url));
     Value::Object(entry)
 }
 
@@ -928,7 +908,16 @@ fn backup_file(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn write_codex_config(app: &AppHandle, server_path: &Path, workspace: &Path) -> Result<(), String> {
+enum TieMcpLaunch<'a> {
+    Http(&'a str),
+    Local {
+        command: &'a str,
+        workspace: &'a Path,
+        actor: &'a str,
+    },
+}
+
+fn write_codex_config(app: &AppHandle, launch: TieMcpLaunch<'_>) -> Result<(), String> {
     let config_path = codex_config_path(app)?;
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -940,20 +929,21 @@ fn write_codex_config(app: &AppHandle, server_path: &Path, workspace: &Path) -> 
     };
     backup_file(&config_path)?;
     let cleaned = strip_mcp_server_block(&existing);
-    let block = build_mcp_block(server_path, workspace, Some(app));
+    let block = match launch {
+        TieMcpLaunch::Http(url) => http_mcp_block(url),
+        TieMcpLaunch::Local { command, workspace, actor } => local_mcp_block(command, workspace, actor),
+    };
     let next = if cleaned.is_empty() {
         block
     } else {
-        format!("{}\n\n{}", cleaned, block)
+        format!("{cleaned}\n\n{block}")
     };
     fs::write(&config_path, format!("{}\n", next.trim_end())).map_err(|error| error.to_string())
 }
 
 fn upsert_json_mcp_config(
-    app: &AppHandle,
     config_path: &Path,
-    server_path: &Path,
-    workspace: &Path,
+    launch: TieMcpLaunch<'_>,
     with_type: bool,
 ) -> Result<(), String> {
     if let Some(parent) = config_path.parent() {
@@ -991,10 +981,12 @@ fn upsert_json_mcp_config(
         *servers = json!({});
     }
 
-    servers.as_object_mut().unwrap().insert(
-        SERVER_NAME.to_owned(),
-        mcp_server_json(server_path, workspace, with_type, Some(app)),
-    );
+    let servers = servers.as_object_mut().unwrap();
+    let entry = match launch {
+        TieMcpLaunch::Http(url) => http_mcp_json(url, with_type),
+        TieMcpLaunch::Local { command, workspace, actor } => local_mcp_json(command, workspace, actor, with_type),
+    };
+    servers.insert(SERVER_NAME.to_owned(), entry);
 
     let pretty = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
     fs::write(config_path, format!("{pretty}\n")).map_err(|error| error.to_string())
@@ -1162,7 +1154,7 @@ fn collect_skill_workspaces(app: &AppHandle) -> Vec<PathBuf> {
     };
 
     for client in AgentClient::all() {
-        if let Ok(status) = client_status(app, client, true) {
+        if let Ok(status) = client_status(app, client) {
             if let Some(path) = status.workspace_path {
                 push(PathBuf::from(path));
             }
@@ -1338,46 +1330,38 @@ fn validate_workspace(path: &Path) -> Result<PathBuf, String> {
     Ok(root)
 }
 
-fn client_status(
-    app: &AppHandle,
-    client: AgentClient,
-    node: bool,
-) -> Result<AgentClientStatus, String> {
+fn client_status(app: &AppHandle, client: AgentClient) -> Result<AgentClientStatus, String> {
     let config_path = config_path_for(app, client)?;
+    let stale = "配置仍是用 node 启动 server.js。请更新接入：有后台地址时改为 HTTP，否则去掉该项并用本机 tie CLI。";
     let (configured, workspace_path, error) = if config_path.is_file() {
         let content = fs::read_to_string(&config_path).unwrap_or_default();
+        let url = match client {
+            AgentClient::Codex => parse_mcp_url_toml(&content),
+            AgentClient::Cursor | AgentClient::Claude => parse_mcp_url_json(&content),
+        };
+        let uses_command = match client {
+            AgentClient::Codex => tie_entry_uses_command_toml(&content),
+            AgentClient::Cursor | AgentClient::Claude => tie_entry_uses_command_json(&content),
+        };
+        let local_mcp = match client {
+            AgentClient::Codex => tie_entry_is_local_mcp_toml(&content),
+            AgentClient::Cursor | AgentClient::Claude => tie_entry_is_local_mcp_json(&content),
+        };
         let workspace = match client {
             AgentClient::Codex => parse_configured_workspace_toml(&content),
             AgentClient::Cursor | AgentClient::Claude => parse_configured_workspace_json(&content),
         };
-        let server_path = match client {
-            AgentClient::Codex => parse_server_path_toml(&content),
-            AgentClient::Cursor | AgentClient::Claude => parse_server_path_json(&content),
-        };
-        let error = if !node {
-            Some("未检测到 Node.js".into())
-        } else if workspace.is_none() {
-            Some("配置中缺少 TIE_WORKSPACE".into())
-        } else if !workspace
-            .as_ref()
-            .map(|path| Path::new(path).join("pages").is_dir())
-            .unwrap_or(false)
-        {
-            Some("配置的 Tie 工作区无效".into())
-        } else if !server_path
-            .as_ref()
-            .map(|path| Path::new(path).is_file())
-            .unwrap_or(false)
-        {
-            Some("配置的 tie-mcp 服务入口不存在".into())
-        } else if client == AgentClient::Codex && !codex_approval_configured(&content) {
-            Some("Codex 配置缺少 MCP 工具审批策略".into())
+        if url.is_some() && !uses_command {
+            (true, workspace, None)
+        } else if local_mcp {
+            (true, workspace, None)
+        } else if uses_command {
+            (false, workspace, Some(stale.into()))
         } else {
-            None
-        };
-        (error.is_none(), workspace, error)
+            (false, None, None)
+        }
     } else {
-        (false, None, Some("尚未写入客户端配置".into()))
+        (false, None, None)
     };
 
     Ok(AgentClientStatus {
@@ -1396,20 +1380,17 @@ fn status_for(app: &AppHandle) -> Result<AgentMcpStatus, String> {
         .ok()
         .map(|dir| dir.join("src").join("server.js"))
         .filter(|path| path.is_file());
-
-    let source_ok = resolve_mcp_package_source(app).is_ok();
-    let mcp_ready = node && (server.is_some() || source_ok);
-    let mcp_error = if !node {
-        Some("未检测到 Node.js".into())
-    } else if !source_ok && server.is_none() {
-        Some(resolve_mcp_package_source(app).unwrap_err())
-    } else {
+    let cli = resolve_tie_cli_binary(Some(app));
+    let mcp_ready = cli.is_some();
+    let mcp_error = if cli.is_some() {
         None
+    } else {
+        Some("未找到 tie CLI".into())
     };
 
     let mut clients = Vec::new();
     for client in AgentClient::all() {
-        clients.push(client_status(app, client, node)?);
+        clients.push(client_status(app, client)?);
     }
 
     Ok(AgentMcpStatus {
@@ -1647,26 +1628,46 @@ fn configure_for_clients(
     app: &AppHandle,
     workspace_path: &str,
     clients: &[String],
+    mcp_url: Option<&str>,
 ) -> Result<AgentMcpStatus, String> {
     let selected = parse_clients(clients)?;
     let workspace = validate_workspace(Path::new(workspace_path.trim()))?;
-    let server_path = ensure_mcp_runtime(app)?;
+    let mcp_url = match mcp_url.map(str::trim).filter(|url| !url.is_empty()) {
+        Some(url) => Some(normalize_mcp_url(url)?),
+        None => None,
+    };
+    let cli_command = if mcp_url.is_none() {
+        let cli = resolve_tie_cli_binary(Some(app)).ok_or_else(|| "未找到 tie CLI，无法提供本地 MCP".to_owned())?;
+        Some(path_for_external_config(&cli).to_string_lossy().into_owned())
+    } else {
+        None
+    };
 
     for client in &selected {
+        let actor = change_actor_label(client.label());
+        let launch = match mcp_url.as_deref() {
+            Some(url) => TieMcpLaunch::Http(url),
+            None => TieMcpLaunch::Local {
+                command: cli_command.as_deref().unwrap_or(""),
+                workspace: &workspace,
+                actor: &actor,
+            },
+        };
         match client {
-            AgentClient::Codex => write_codex_config(app, &server_path, &workspace)?,
-            AgentClient::Cursor => {
-                upsert_json_mcp_config(app, &cursor_config_path(app)?, &server_path, &workspace, false)?
-            }
-            AgentClient::Claude => {
-                upsert_json_mcp_config(app, &claude_config_path(app)?, &server_path, &workspace, true)?
-            }
+            AgentClient::Codex => write_codex_config(app, launch)?,
+            AgentClient::Cursor => upsert_json_mcp_config(&cursor_config_path(app)?, launch, false)?,
+            AgentClient::Claude => upsert_json_mcp_config(&claude_config_path(app)?, launch, true)?,
         }
     }
 
     ensure_workspace_packaged_skills(app, &workspace)?;
     sync_workspace_skills(app, &workspace, &selected)?;
     status_for(app)
+}
+
+#[tauri::command]
+pub fn locate_tie_cli(app: AppHandle) -> Option<String> {
+    resolve_tie_cli_binary(Some(&app)).map(|path| path.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -1679,8 +1680,9 @@ pub fn configure_agent_mcp(
     app: AppHandle,
     workspace_path: String,
     clients: Vec<String>,
+    mcp_url: Option<String>,
 ) -> Result<AgentMcpStatus, String> {
-    configure_for_clients(&app, &workspace_path, &clients)
+    configure_for_clients(&app, &workspace_path, &clients, mcp_url.as_deref())
 }
 
 #[tauri::command]
@@ -1697,6 +1699,7 @@ pub fn configure_codex_mcp(
         &app,
         &workspace_path,
         &["codex".to_owned()],
+        None,
     )?))
 }
 

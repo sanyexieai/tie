@@ -90,6 +90,7 @@ export const supportsAgentSkills = computed(() => supportsSmbStorage.value)
 
 /** 移动端仅支持本地目录、S3 与自定义后台存储源 */
 export function isMobileSupportedStorageKind(kind: StorageKind | string) {
+  // 存量直连 s3 仍可显示；新连接应走 backend。
   return kind === 'local' || kind === 's3' || kind === 'backend'
 }
 

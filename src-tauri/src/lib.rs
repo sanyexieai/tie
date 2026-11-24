@@ -87,6 +87,8 @@ pub fn run() {
             s3::files::ingest_s3_workspace_file,
             s3::files::prepare_s3_workspace_file,
             local::commands::load_workspace,
+            local::commands::page_file_path,
+            local::commands::export_tie_file,
             local::commands::save_page,
             local::commands::add_storage_source,
             local::commands::remove_storage_source,
@@ -128,10 +130,31 @@ pub fn run() {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             desktop::export_page_markdown_bundle,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::export_page_closure,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::tie_bundle::open_tie_entry,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::tie_bundle::pack_workspace_tiez,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::tie_bundle::unpack_tiez_to_dir,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::tie_bundle::ensure_source_solution,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::git_sync::git_enable_sync,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::git_sync::git_sync_workspace,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::git_sync::git_runtime_status,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::git_sync::git_ensure_runtime,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::git_sync::list_page_audit_events,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             ai_cli::ai_cli_status,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             ai_cli::ai_cli_suggest_tags,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            codex_mcp::locate_tie_cli,
             codex_mcp::agent_mcp_status,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             codex_mcp::configure_agent_mcp,

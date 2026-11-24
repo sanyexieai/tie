@@ -12,7 +12,7 @@ const pages = computed(() => store.pages
   .slice(0, 8))
 function emitWorkspaceCommand(name: string) { window.dispatchEvent(new Event(name)) }
 const actions = computed(() => [
-  { id: 'new', label: '新建页面', hint: '在当前存储源创建顶层页面', run: async () => { await store.createPage(null) } },
+  { id: 'new', label: '新建页面', hint: '在当前工作区创建顶层页面', run: async () => { await store.createPage(null) } },
   { id: 'open-files', label: '从文件打开', hint: '打开本地 Markdown；必要时自动创建工作区', requiresDesktop: true, run: async () => { await store.openFromFiles() } },
   { id: 'new-child', label: '新建子页面', hint: '在当前页面下创建子页面', requiresPage: true, run: async () => { if (store.activePage) await store.createChildPage(store.activePage.id) } },
   { id: 'duplicate', label: '复制当前页面', hint: '复制内容、标签和所在页面层级', requiresPage: true, run: async () => { if (store.activePage) await store.duplicatePage(store.activePage.id) } },
@@ -20,7 +20,7 @@ const actions = computed(() => [
   { id: 'find', label: '页面内查找', hint: '在当前页面查找或替换内容', requiresPage: true, run: () => emitWorkspaceCommand('tie:find-in-page') },
   { id: 'source', label: '切换源码模式', hint: '在富文本和 Markdown 源码间切换', requiresPage: true, run: () => emitWorkspaceCommand('tie:toggle-source-mode') },
   { id: 'history', label: '页面历史', hint: '预览或恢复当前页面版本', requiresPage: true, run: () => emitWorkspaceCommand('tie:open-page-history') },
-  { id: 'refresh', label: '刷新当前页面', hint: '从存储源重新读取，丢弃未保存修改', requiresPage: true, run: () => emitWorkspaceCommand('tie:refresh-page') },
+  { id: 'refresh', label: '刷新当前页面', hint: '从工作区重新读取，丢弃未保存修改', requiresPage: true, run: () => emitWorkspaceCommand('tie:refresh-page') },
   { id: 'focus', label: '切换专注模式', hint: '隐藏或恢复左右侧栏', run: () => emitWorkspaceCommand('tie:toggle-focus-mode') },
   { id: 'search', label: '全局搜索', hint: '搜索标题、标签和正文', run: () => store.openSearch() },
   { id: 'tags', label: '标签', hint: '浏览工作区标签', run: () => store.openTags() },
@@ -32,7 +32,7 @@ const total = computed(() => pages.value.length + actions.value.length)
 
 function sourceLabel(sourceId: string) {
   const source = store.allSources.find((item) => item.id === sourceId)
-  return source ? `${source.kind === 'backend' ? '后台' : source.kind === 's3' ? 'S3' : source.kind === 'smb' ? 'SMB' : '本地'} · ${source.name}` : '未知来源'
+  return source?.name || '未知工作区'
 }
 async function select(index: number) {
   const page = pages.value[index]

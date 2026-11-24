@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { backendService, type BackendProfile, type BackendServer, type BackendStorageSource, type BackendWorkspace } from '@/services/backend'
+import { backendService, type BackendHealth, type BackendMcpStatus, type BackendProfile, type BackendServer, type BackendStorageSource, type BackendWorkspace } from '@/services/backend'
 
 export const useBackendStore = defineStore('backend', () => {
   const profile = ref<BackendProfile>(backendService.loadProfile())
@@ -13,7 +13,12 @@ export const useBackendStore = defineStore('backend', () => {
   const initialized = ref(false)
   const syncing = ref(false)
   const lastSyncedAt = ref<string | null>(null)
+  const mcp = ref<BackendMcpStatus | null>(null)
   const connected = computed(() => Boolean(profile.value.accessToken && profile.value.user))
+
+  function applyHealth(health: BackendHealth) {
+    mcp.value = health.mcp ?? null
+  }
 
   function saveProfile() { backendService.saveProfile(profile.value) }
   function addServer(endpoint: string) { const server = backendService.addServer(endpoint); servers.value = backendService.loadServers(); return server }
@@ -49,6 +54,7 @@ export const useBackendStore = defineStore('backend', () => {
     try {
       profile.value.user = await backendService.me(profile.value)
       saveProfile()
+      applyHealth(await backendService.health(profile.value.endpoint))
       await refreshWorkspaces()
       lastSyncedAt.value = new Date().toISOString()
     } catch {
@@ -65,6 +71,7 @@ export const useBackendStore = defineStore('backend', () => {
         : await backendService.register(endpoint, email, password, name)
       profile.value = { endpoint, accessToken: result.accessToken, user: result.user }
       saveProfile()
+      applyHealth(await backendService.health(endpoint))
       await refreshWorkspaces()
     } catch (reason) {
       error.value = reason instanceof Error ? reason.message : '后台登录失败'
@@ -164,11 +171,17 @@ export const useBackendStore = defineStore('backend', () => {
       throw reason
     } finally { loading.value = false }
   }
+  async function refreshMcp() {
+    if (!profile.value.endpoint) { mcp.value = null; return }
+    try { applyHealth(await backendService.health(profile.value.endpoint)) }
+    catch { mcp.value = null }
+  }
   function logout() {
     profile.value = backendService.clearProfile(profile.value.endpoint)
     workspaces.value = []; providers.value = []; providerAvailability.value = {}
+    mcp.value = null
     error.value = ''
   }
 
-  return { profile, servers, workspaces, providers, providerAvailability, loading, error, initialized, syncing, lastSyncedAt, connected, initialize, addServer, updateServerEndpoint, removeServer, setDefaultPrompt, dismissDefaultPrompt, authenticate, checkHealth, refreshWorkspaces, createWorkspace, renameWorkspace, deleteWorkspace, createProvider, renameProvider, deleteProvider, sync, logout }
+  return { profile, servers, workspaces, providers, providerAvailability, loading, error, initialized, syncing, lastSyncedAt, mcp, connected, initialize, addServer, updateServerEndpoint, removeServer, setDefaultPrompt, dismissDefaultPrompt, authenticate, checkHealth, refreshMcp, refreshWorkspaces, createWorkspace, renameWorkspace, deleteWorkspace, createProvider, renameProvider, deleteProvider, sync, logout }
 })

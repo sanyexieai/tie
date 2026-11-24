@@ -8,9 +8,10 @@ import { isS3SourceId, s3ConnectionForSource, buildS3SourceIdHealingRemap } from
 import { migratePageWorkspaceHrefs } from '@/services/link-runtime'
 import { isCloudStorageSourceId } from '@/services/storage-identity'
 import { backendStorageAdapter, loadAllBackendPages } from '@/services/storage/backend-adapter'
-import { backendS3StorageAdapter, loadAllBackendS3Pages } from '@/services/storage/backend-s3-adapter'
+import { backendS3StorageAdapter } from '@/services/storage/backend-s3-adapter'
 import { browserStorageAdapter, loadBrowserSnapshot } from '@/services/storage/browser-adapter'
 import { fileStorageAdapter } from '@/services/storage/file-adapter'
+import { syncAfterSave } from '@/services/storage/git-sync'
 import { loadAllS3Pages, s3StorageAdapter } from '@/services/storage/s3-adapter'
 import { sourceStatusStore } from '@/services/storage/source-status'
 import { emptySyncResult, isLocalWinningConflict } from '@/services/storage/sync-merge'
@@ -79,18 +80,7 @@ export const storageRegistry = {
       pages.push(...reconciled.pages)
     }
 
-    const backendS3Results = await loadAllBackendS3Pages(localPages)
-    for (const syncResult of backendS3Results) {
-      const reconciled = await this.reconcileLocalWins(syncResult, localPages)
-      syncResults.push(reconciled)
-      if (reconciled.error) {
-        errors.set(reconciled.sourceId, reconciled.error)
-        sourceStatusStore.setError(reconciled.sourceId, reconciled.error)
-      } else {
-        sourceStatusStore.setSynced(reconciled.sourceId)
-      }
-      pages.push(...reconciled.pages)
-    }
+    // backend-s3 不再作为独立源拉取；S3 落盘由 workspace.storageProviderId 在服务端处理。
 
     sourceStatusStore.refreshPendingCounts(syncQueue.pendingCountsBySource())
     return { pages, syncResults, errors }
@@ -161,6 +151,10 @@ export const storageRegistry = {
       ...options,
       writeSourceId: primaryWrite,
     })
+    // 保存成功后静默对齐本机/SMB 对端（Git）；失败不撤销本次保存。
+    if (isFileSourceId(primaryWrite)) {
+      void syncAfterSave(primaryWrite)
+    }
     return normalizePageSources({
       ...saved,
       markdown: saved.markdown || normalized.markdown,

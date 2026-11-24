@@ -1,6 +1,8 @@
-use crate::page::{ensure_demo, merge_loaded_pages, normalize_page_sources, parse_page};
+use crate::io::relocate_page_file;
+use crate::page::{ensure_demo, merge_loaded_pages, normalize_page_sources, open_or_adopt};
 use crate::paths::default_workspace_root;
 use crate::settings::{load, save, source_from_path, workspace_sources};
+use crate::solution::{sync_root_tie_files, RootTiePage};
 use tie_common::fs_path;
 use tie_common::{StorageSource, Workspace, WorkspaceSettings, WorkspaceSnapshot};
 use std::{fs, path::PathBuf};
@@ -26,21 +28,34 @@ pub fn load_file_workspace(
             continue;
         }
         source.available = true;
-        for entry in fs::read_dir(pages_dir).map_err(|error| error.to_string())? {
+        let mut located = Vec::new();
+        let mut tie_pages = Vec::new();
+        for entry in fs::read_dir(&pages_dir).map_err(|error| error.to_string())? {
             let path = entry.map_err(|error| error.to_string())?.path();
             if path.extension().is_some_and(|extension| extension == "md") {
-                let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-                let mut page =
-                    parse_page(&content).map_err(|error| format!("{}: {error}", path.display()))?;
+                let mut page = open_or_adopt(&root, &path, &source.id)?;
                 if page.storage_source_id.is_empty() {
                     page.storage_source_id = source.id.clone();
                 }
                 if !page.storage_source_ids.iter().any(|id| id == &source.id) {
                     page.storage_source_ids.push(source.id.clone());
                 }
+                located.push((page.id.clone(), page.title.clone(), page.created_at.clone()));
+                tie_pages.push(RootTiePage {
+                    id: page.id.clone(),
+                    title: page.title.clone(),
+                    created_at: page.created_at.clone(),
+                    is_root: page.deleted_at.is_none()
+                        && page.parent_id.as_deref().unwrap_or("").is_empty(),
+                });
                 pages.push(normalize_page_sources(page));
             }
         }
+        located.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
+        for (id, title, _) in located {
+            let _ = relocate_page_file(&root, &id, &title);
+        }
+        let _ = sync_root_tie_files(&root, &source.id, &tie_pages);
     }
     Ok(WorkspaceSnapshot {
         workspace: Workspace {

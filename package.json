@@ -59,6 +59,7 @@
     "@tiptap/starter-kit": "^3.30.5",
     "@tiptap/vue-3": "^3.30.5",
     "@vueuse/core": "^13.9.0",
+    "fflate": "^0.8.3",
     "jszip": "^3.10.1",
     "lowlight": "^3.3.0",
     "mermaid": "^12.2.0",

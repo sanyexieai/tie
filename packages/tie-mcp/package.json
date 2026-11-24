@@ -5,10 +5,12 @@
   "type": "module",
   "description": "Local-first MCP server for Tie workspaces (Codex / other agents)",
   "bin": {
-    "tie-mcp": "./src/server.js"
+    "tie-mcp": "./src/server.js",
+    "tie-mcp-http": "./src/http-server.js"
   },
   "scripts": {
     "start": "node src/server.js",
+    "start:http": "node src/http-server.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {

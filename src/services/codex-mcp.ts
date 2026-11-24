@@ -92,13 +92,19 @@ export function saveCodexMcpPreference(pref: CodexMcpPreference) {
   }))
 }
 
+export async function locateTieCli(): Promise<string | null> {
+  if (!('__TAURI_INTERNALS__' in window)) return null
+  return invoke<string | null>('locate_tie_cli')
+}
+
 export async function fetchAgentMcpStatus(): Promise<AgentMcpStatus | null> {
   if (!('__TAURI_INTERNALS__' in window)) return null
   return invoke<AgentMcpStatus>('agent_mcp_status')
 }
 
-export async function configureAgentMcp(workspacePath: string, clients: AgentClientId[]): Promise<AgentMcpStatus> {
-  return invoke<AgentMcpStatus>('configure_agent_mcp', { workspacePath, clients })
+export async function configureAgentMcp(workspacePath: string, clients: AgentClientId[], mcpUrl?: string | null): Promise<AgentMcpStatus> {
+  const url = mcpUrl?.trim()
+  return invoke<AgentMcpStatus>('configure_agent_mcp', { workspacePath, clients, mcpUrl: url || null })
 }
 
 export async function setMcpSourcePath(path: string): Promise<AgentMcpStatus> {

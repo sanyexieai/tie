@@ -5,7 +5,7 @@ description = "Tie local-first CLI (headless workspace access)"
 edition = "2021"
 
 [[bin]]
-name = "tie"
+name = "tie-cli"
 path = "src/main.rs"
 
 [dependencies]

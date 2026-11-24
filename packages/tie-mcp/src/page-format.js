@@ -5,10 +5,8 @@ export function frontmatter(page) {
   const tags = (page.tags ?? []).join(', ')
   const deleted = page.deletedAt ? `deleted_at: ${page.deletedAt}\n` : ''
   const icon = String(page.icon ?? '').replace(/[\n\r]/g, '')
-  const primary = page.storageSourceId ?? ''
-  const ids = [...new Set([primary, ...(page.storageSourceIds ?? [])].filter(Boolean))]
-  const extraSources = ids.length > 1 ? `storage_source_ids: [${ids.join(', ')}]\n` : ''
-  return `---\ntie_version: 1\nid: ${page.id}\nstorage_source_id: ${primary}\n${extraSources}parent_id: ${parent}\nsort_key: ${page.sortKey ?? 0}\nicon: ${icon}\ntags: [${tags}]\ncreated_at: ${page.createdAt}\nupdated_at: ${page.updatedAt}\n${deleted}---\n\n${page.markdown ?? ''}`
+  // 绑定源不进正文；读旧文件仍解析 storage_source_*。
+  return `---\ntie_version: 1\nid: ${page.id}\nparent_id: ${parent}\nsort_key: ${page.sortKey ?? 0}\nicon: ${icon}\ntags: [${tags}]\ncreated_at: ${page.createdAt}\nupdated_at: ${page.updatedAt}\n${deleted}---\n\n${page.markdown ?? ''}`
 }
 
 function value(lines, key) {
@@ -40,9 +38,11 @@ function normalizePageSources(page) {
 }
 
 export function parsePage(content) {
-  const start = content.indexOf('---\n')
+  // Accept CRLF checkouts / editors on Windows; writers still emit LF.
+  const normalized = String(content ?? '').replace(/\r\n/g, '\n')
+  const start = normalized.indexOf('---\n')
   if (start === -1) throw new Error('缺少 Frontmatter 起始标记')
-  const rest = content.slice(start + 4)
+  const rest = normalized.slice(start + 4)
   const end = rest.indexOf('---\n')
   if (end === -1) throw new Error('缺少 Frontmatter 结束标记')
   const meta = rest.slice(0, end)
@@ -58,7 +58,7 @@ export function parsePage(content) {
     .map((tag) => tag.trim())
     .filter(Boolean)
   const titleLine = markdown.split('\n').find((line) => line.startsWith('# '))
-  const title = titleLine ? titleLine.slice(2).trim() : '无标题'
+  const title = titleLine ? titleLine.slice(2) : '无标题'
   const parentRaw = value(lines, 'parent_id')
   return normalizePageSources({
     id,
@@ -77,14 +77,13 @@ export function parsePage(content) {
 }
 
 export function newPageId() {
-  return `pg_${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`
+  const hex = Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
+  return `pg_${hex}`
 }
 
 export function ensureTitleMarkdown(title, body) {
-  const cleanTitle = String(title || '无标题').trim() || '无标题'
-  const text = String(body ?? '').replace(/^\uFEFF/, '')
-  if (/^#\s+/.test(text)) return text
-  const trimmed = text.trim()
-  if (!trimmed) return `# ${cleanTitle}\n\n`
-  return `# ${cleanTitle}\n\n${trimmed}\n`
+  const text = String(body ?? '')
+  if (text.split('\n').some((line) => line.startsWith('# '))) return text
+  const heading = String(title ?? '').trim() || '无标题'
+  return `# ${heading}\n\n${text}`
 }

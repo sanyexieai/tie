@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import type { Editor } from '@tiptap/core'
 import { Extension, mergeAttributes } from '@tiptap/core'
-import { Plugin } from '@tiptap/pm/state'
+import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { TextSelection } from '@tiptap/pm/state'
+import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import StarterKit from '@tiptap/starter-kit'
 import Link from '@tiptap/extension-link'
 import { TieCodeBlock } from '@/extensions/code-block'
@@ -20,6 +22,7 @@ import { Markdown } from '@tiptap/markdown'
 import { common, createLowlight } from 'lowlight'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import type { Page, StorageSource } from '@/types'
+import { focusPheromone, pheromoneRevision, pheromoneState, pheromonesFor, startPheromoneDraft, type PheromoneKind } from '@/services/pheromone'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { canStorePageAssets, embedImageFile, inlineImageSrcToFile, isImageFile, normalizeImageFile, parseAssetUrl, resolveAssetDisplayUrl, shouldHandleImagePaste, uploadPastedImage } from '@/services/attachments'
 import { cachedFileResource, canRebindRegisteredFile, listRegisteredFiles, probeRelativePath } from '@/services/files'
@@ -41,7 +44,7 @@ import {
   sourceById,
 } from '@/services/link-runtime'
 
-const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page> }>()
+const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page>; expandToChild?: (title: string) => Promise<Page>; enablePheromone?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
 const lowlight = createLowlight(common)
 const showPagePicker = ref(false)
@@ -51,6 +54,7 @@ const wikiQuery = ref('')
 const wikiStart = ref<number | null>(null)
 const selectedPageIndex = ref(0)
 const slashQuery = ref<string | null>(null)
+const contextMenu = ref<{ x: number; y: number; from: number; to: number; text: string; canExpand: boolean } | null>(null)
 const slashStart = ref<number | null>(null)
 const selectedCommandIndex = ref(0)
 const linkSourcePicker = ref<{ kind: 'file' | 'directory' | 'relative' } | null>(null)
@@ -63,8 +67,7 @@ const matchingPages = computed(() => {
 })
 function sourceLabel(page: Page) {
   const source = props.sources.find((item) => item.id === page.storageSourceId)
-  if (!source) return '未知来源'
-  return `${source.kind === 'smb' ? 'SMB' : '本地'} · ${source.name}`
+  return source?.name || '未知工作区'
 }
 
 interface SlashCommand {
@@ -143,7 +146,13 @@ function decorateFileLinks() {
     if (href.startsWith('tie://') || /^file:/i.test(href)) {
       anchor.removeAttribute('target')
     }
-    if (!classifyLocalLink(href)) continue
+    if (!classifyLocalLink(href)) {
+      const pageId = href.startsWith('tie://page/') ? href.slice('tie://page/'.length) : ''
+      const linked = pageId ? props.pages.find((page) => page.id === pageId && !page.deletedAt) : null
+      anchor.classList.toggle('child-page-card', Boolean(linked && linked.parentId === props.pageId))
+      continue
+    }
+    anchor.classList.remove('child-page-card')
     applyLocalLinkClasses(anchor, href, context)
   }
 }
@@ -639,7 +648,8 @@ const slashCommands: SlashCommand[] = [
   { id: 'local-file', label: '文件', hint: '区内相对或导入副本，区外登记；可选手源', keywords: ['file', 'local', '文件', '本地', '链接', '登记', '跨源', '导入'], run: (editor) => beginLinkInsert(editor, 'file') },
   { id: 'local-directory', label: '目录', hint: '区内相对路径，区外登记；可选手源', keywords: ['folder', 'directory', '目录', '文件夹', '本地', '链接', '登记', '跨源'], run: (editor) => beginLinkInsert(editor, 'directory') },
   { id: 'relative-path', label: '相对路径', hint: '写入指定存储源的相对路径', keywords: ['relative', 'path', '相对', '路径', '工作区'], run: (editor) => beginLinkInsert(editor, 'relative') },
-  { id: 'child-page', label: '子页面', hint: '在当前页面下创建页面', keywords: ['page', 'child', '页面', '子页面'], run: () => emit('create-child') },
+  { id: 'child-page', label: '子页面', hint: '在当前页面下创建空白子页面', keywords: ['page', 'child', '页面', '子页面'], run: () => emit('create-child') },
+  { id: 'expand-child', label: '展开为子页面', hint: '用当前这句话做标题，并留在父页面', keywords: ['expand', 'turn', '展开', '子页面', '句子'], run: (editor) => { void expandParagraphToChild(editor) } },
 ]
 
 const filteredCommands = computed(() => {
@@ -677,13 +687,137 @@ function resolveClickedHref(event: MouseEvent) {
   return anchorHrefFromEvent(event) || linkMarkHrefFromEvent(event)
 }
 
+function childCardForEvent(event: MouseEvent) {
+  const root = editor.value?.view.dom
+  if (!root) return null
+  const raw = event.target
+  const el = raw instanceof Element ? raw : raw instanceof Node ? raw.parentElement : null
+  const direct = el?.closest('a.child-page-card')
+  if (direct instanceof HTMLAnchorElement && root.contains(direct)) return direct
+  let nearest: HTMLAnchorElement | null = null
+  let best = Number.POSITIVE_INFINITY
+  for (const card of root.querySelectorAll<HTMLAnchorElement>('a.child-page-card')) {
+    const box = card.getBoundingClientRect()
+    if (event.clientY < box.top - 4 || event.clientY > box.bottom + 4) continue
+    const dx = event.clientX < box.left ? box.left - event.clientX : event.clientX > box.right ? event.clientX - box.right : 0
+    if (dx < best) {
+      best = dx
+      nearest = card
+    }
+  }
+  return nearest
+}
+
+function childTitleBounds(anchor: HTMLElement) {
+  let left = Number.POSITIVE_INFINITY
+  let right = Number.NEGATIVE_INFINITY
+  let top = Number.POSITIVE_INFINITY
+  let bottom = Number.NEGATIVE_INFINITY
+  for (const node of anchor.childNodes) {
+    if (node.nodeType !== Node.TEXT_NODE || !node.textContent?.trim()) continue
+    const range = document.createRange()
+    range.selectNodeContents(node)
+    for (const rect of range.getClientRects()) {
+      left = Math.min(left, rect.left)
+      right = Math.max(right, rect.right)
+      top = Math.min(top, rect.top)
+      bottom = Math.max(bottom, rect.bottom)
+    }
+  }
+  if (!Number.isFinite(left)) return null
+  return { left: left - 22, right: right + 4, top: top - 4, bottom: bottom + 4 }
+}
+
+function hitChildTitle(anchor: HTMLElement, event: MouseEvent) {
+  const bounds = childTitleBounds(anchor)
+  if (!bounds) return false
+  return event.clientX >= bounds.left && event.clientX <= bounds.right && event.clientY >= bounds.top && event.clientY <= bounds.bottom
+}
+
+function childLinkEnd(view: NonNullable<typeof editor.value>['view'], anchor: HTMLElement) {
+  const href = anchor.getAttribute('href') || ''
+  const pos = view.posAtDOM(anchor, 0)
+  const linkType = view.state.schema.marks.link
+  let end = -1
+  const block = view.state.doc.resolve(pos)
+  view.state.doc.nodesBetween(block.start(), block.end(), (node, nodePos) => {
+    if (!node.isText) return
+    const mark = node.marks.find((item) => item.type === linkType && item.attrs.href === href)
+    if (!mark) return
+    const nodeEnd = nodePos + node.nodeSize
+    if (pos >= nodePos && pos <= nodeEnd) end = nodeEnd
+  })
+  return end
+}
+
+function placeCaretAfterChildTitle(anchor: HTMLElement) {
+  const view = editor.value?.view
+  if (!view) return
+  try {
+    const end = childLinkEnd(view, anchor)
+    if (end < 0) return
+    const linkType = view.state.schema.marks.link
+    let tr = view.state.tr
+    const next = tr.doc.resolve(end).nodeAfter
+    const gapReady = next?.isText && next.text?.startsWith('\u200b') && !next.marks.some((mark) => mark.type === linkType)
+    let caret = end + 1
+    if (!gapReady) {
+      tr = tr.insert(end, view.state.schema.text('\u200b'))
+      tr = tr.removeMark(end, end + 1, linkType)
+    }
+    tr = tr.setSelection(TextSelection.create(tr.doc, caret)).setStoredMarks([])
+    view.dispatch(tr)
+    if (!view.hasFocus()) view.focus()
+  } catch {
+    view.focus()
+  }
+}
+
 function shouldOpenFromPointerEvent(event: MouseEvent) {
   // `click` is primary-button only; `auxclick` is middle/other. Don't gate on event.button —
   // some WebKitGTK builds leave button unset on click and would silently no-op.
   return event.type === 'click' || event.type === 'auxclick'
 }
 
+function blankAfterChildTitle(anchor: HTMLElement, event: MouseEvent) {
+  const view = editor.value?.view
+  const bounds = childTitleBounds(anchor)
+  if (!view || !bounds || event.clientX <= bounds.right) return false
+  if (event.clientY < bounds.top || event.clientY > bounds.bottom) return false
+  const coords = view.posAtCoords({ left: event.clientX, top: event.clientY })
+  if (!coords) return false
+  let linkEnd: number
+  try {
+    linkEnd = view.posAtDOM(anchor, anchor.childNodes.length)
+  } catch {
+    return false
+  }
+  // 点在标题之后的空白时，坐标会吸附到标题末尾；点到后面的别的文字则落在更后的位置。
+  return coords.pos <= linkEnd
+}
+
 function openInternalLink(event: MouseEvent) {
+  const card = childCardForEvent(event)
+  if (card) {
+    const onTitle = hitChildTitle(card, event)
+    const onSameLineBlank = !onTitle && blankAfterChildTitle(card, event)
+    if (!onTitle && !onSameLineBlank) return false
+    event.preventDefault()
+    event.stopPropagation()
+    closeSlashMenu()
+    closePagePicker()
+    if (onTitle) {
+      if (shouldOpenFromPointerEvent(event) && event.type === 'click') {
+        const href = card.getAttribute('href') || ''
+        const prefix = 'tie://page/'
+        if (href.startsWith(prefix)) emit('navigate', href.slice(prefix.length))
+      }
+      return true
+    }
+    // 只在按下时放一次光标。等 click 再挪，会先在标题里闪一下。
+    if (event.type === 'mousedown') placeCaretAfterChildTitle(card)
+    return true
+  }
   const href = resolveClickedHref(event)
   const prefix = 'tie://page/'
   if (!href?.startsWith(prefix)) return false
@@ -803,6 +937,11 @@ function handleSurfaceClick(event: MouseEvent) {
 
 function chipClassForHref(href: string) {
   const value = String(href || '').trim()
+  if (value.startsWith('tie://page/')) {
+    const pageId = value.slice('tie://page/'.length)
+    const linked = props.pages.find((page) => page.id === pageId && !page.deletedAt)
+    if (linked && linked.parentId === props.pageId) return 'child-page-card'
+  }
   if (value.startsWith(PATH_URL_PREFIX) || value.startsWith('tie://path/')) return 'file-link file-link-relative'
   if (value.startsWith('tie://file/') || /^file:/i.test(value)) return 'file-link file-link-absolute'
   return null
@@ -851,6 +990,57 @@ const TieLink = Link.extend({
   },
 }).configure(tieLinkOptions)
 
+const pheromonePluginKey = new PluginKey('tie-pheromone')
+
+function findQuoteRange(doc: ProseMirrorNode, quote: string): { from: number; to: number } | null {
+  let found: { from: number; to: number } | null = null
+  doc.descendants((node, pos) => {
+    if (found || !node.isTextblock) return
+    const index = node.textContent.indexOf(quote)
+    if (index < 0) return
+    found = { from: pos + 1 + index, to: pos + 1 + index + quote.length }
+    return false
+  })
+  return found
+}
+
+function createPheromoneExtension() {
+  return Extension.create({
+    name: 'pheromoneMarks',
+    addProseMirrorPlugins() {
+      return [
+        new Plugin({
+          key: pheromonePluginKey,
+          props: {
+            decorations(state) {
+              if (!props.enablePheromone) return DecorationSet.empty
+              const decorations = []
+              for (const item of pheromonesFor(props.pageId)) {
+                const range = findQuoteRange(state.doc, item.quote)
+                if (!range || range.from >= range.to) continue
+                decorations.push(Decoration.inline(range.from, range.to, {
+                  class: `pheromone-mark pheromone-${item.kind}${item.id === pheromoneState.activeId ? ' is-active' : ''}`,
+                  'data-pheromone-id': item.id,
+                }))
+              }
+              decorations.sort((left, right) => left.from - right.from)
+              return DecorationSet.create(state.doc, decorations)
+            },
+            handleClick(_view, _pos, event) {
+              const raw = event.target
+              const element = raw instanceof Element ? raw : raw instanceof Node ? raw.parentElement : null
+              const id = element?.closest('[data-pheromone-id]')?.getAttribute('data-pheromone-id')
+              if (!id) return false
+              focusPheromone(id)
+              return false
+            },
+          },
+        }),
+      ]
+    },
+  })
+}
+
 let syncingExternalValue = false
 const editor = useEditor({
   content: props.modelValue,
@@ -872,6 +1062,7 @@ const editor = useEditor({
     TableRow,
     TableHeader,
     TableCell,
+    createPheromoneExtension(),
   ],
   editorProps: {
     attributes: { class: 'tiptap-content', spellcheck: String(props.spellcheck) },
@@ -908,6 +1099,7 @@ const editor = useEditor({
       return false
     },
     handleDOMEvents: {
+      mousedown: (_view, event) => handleEditorMouseDown(event),
       auxclick: (_view, event) => handleEditorMouseDown(event),
       click: (_view, event) => handleEditorClick(event),
       compositionend: (_view) => {
@@ -917,6 +1109,11 @@ const editor = useEditor({
       },
     },
     handleKeyDown: (_view, event) => {
+      if (contextMenu.value && event.key === 'Escape') {
+        event.preventDefault()
+        closeContextMenu()
+        return true
+      }
       // Windows 中文输入法在英文标点下直接输入 /；部分环境 key 为 Process，靠 onUpdate/compositionend 兜底。
       if ((event.key === '/' || event.key === '／' || event.key === '、' || event.code === 'Slash') && !event.ctrlKey && !event.metaKey && !event.altKey) {
         queueMicrotask(() => {
@@ -1025,7 +1222,9 @@ const editor = useEditor({
     void rewriteInlineImageNodes(currentEditor)
     scheduleDecorateFileLinks()
   },
-  onSelectionUpdate: ({ editor: currentEditor }) => updateMenus(currentEditor),
+  onSelectionUpdate: ({ editor: currentEditor }) => {
+    updateMenus(currentEditor)
+  },
 })
 
 watch(() => props.modelValue, (markdown) => {
@@ -1046,12 +1245,22 @@ watch(() => props.modelValue, (markdown) => {
   scheduleDecorateFileLinks()
 })
 
-watch(() => props.pages.map((page) => `${page.id}:${page.storageSourceId}:${(page.storageSourceIds ?? []).join(',')}`).join('|'), () => {
+watch(() => props.pages.map((page) => `${page.id}:${page.parentId ?? ''}:${page.deletedAt ?? ''}:${page.title}`).join('|'), () => {
   refreshAssetImages()
   scheduleDecorateFileLinks()
 })
 watch(() => props.spellcheck, (enabled) => editor.value?.view.dom.setAttribute('spellcheck', String(enabled)))
 watch(() => props.pageId, () => scheduleDecorateFileLinks())
+watch(() => pheromoneRevision(props.pageId), () => {
+  const current = editor.value
+  if (!current || current.isDestroyed) return
+  current.view.dispatch(current.state.tr.setMeta('pheromone', true))
+  const activeId = pheromoneState.activeId
+  if (!activeId || !pheromoneState.panelOpen) return
+  requestAnimationFrame(() => {
+    document.querySelector(`[data-pheromone-id="${CSS.escape(activeId)}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  })
+})
 watch(() => props.sources.map((source) => `${source.id}:${source.path ?? ''}`).join('|'), () => scheduleDecorateFileLinks())
 
 function refreshAssetImages() {
@@ -1079,6 +1288,132 @@ function insertPageLink(page: Page) {
     current.chain().focus().extendMarkRange('link').setLink({ href }).run()
   }
   closePagePicker()
+}
+
+function selectionForMenu(currentEditor: Editor) {
+  if (slashQuery.value !== null || showPagePicker.value) return null
+  const { from, to, empty } = currentEditor.state.selection
+  if (empty || from === to) return null
+  const text = currentEditor.state.doc.textBetween(from, to, ' ').replace(/\s+/g, ' ').trim()
+  const limit = props.enablePheromone ? 280 : 120
+  if (!text || text.length > limit) return null
+  return { from, to, text, canExpand: text.length <= 120 && Boolean(props.expandToChild) }
+}
+
+function onEditorContextMenu(event: MouseEvent) {
+  contextMenu.value = null
+  const current = editor.value
+  if (!current) return
+  if (!props.expandToChild && !props.enablePheromone) return
+  const selection = selectionForMenu(current)
+  if (!selection) return
+  if (!props.enablePheromone && !selection.canExpand) return
+  event.preventDefault()
+  const menuWidth = 168
+  const menuHeight = props.enablePheromone ? 248 : 148
+  contextMenu.value = {
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+    ...selection,
+  }
+}
+
+function closeContextMenu() {
+  contextMenu.value = null
+}
+
+function rangeForText(current: Editor, from: number, to: number, text: string) {
+  const size = current.state.doc.content.size
+  if (from >= 1 && to <= size && from < to) {
+    const currentText = current.state.doc.textBetween(from, to, ' ').replace(/\s+/g, ' ').trim()
+    if (currentText === text) return { from, to }
+  }
+  let found: { from: number; to: number } | null = null
+  current.state.doc.descendants((node, pos) => {
+    if (!node.isText || !node.text) return
+    let offset = node.text.indexOf(text)
+    while (offset >= 0) {
+      const start = pos + offset
+      const end = start + text.length
+      if (!found || Math.abs(start - from) < Math.abs(found.from - from)) found = { from: start, to: end }
+      offset = node.text.indexOf(text, offset + text.length)
+    }
+  })
+  return found
+}
+
+async function replaceRangeWithChildCard(current: Editor, from: number, to: number, text: string) {
+  if (!props.expandToChild) return
+  const page = await props.expandToChild(text)
+  const href = `tie://page/${page.id}`
+  const range = rangeForText(current, from, to, text)
+  if (!range) throw new Error('这段文字已经变化，没有写成子页面')
+  const inserted = current.chain().focus().setTextSelection(range).insertContent({
+    type: 'text',
+    text,
+    marks: [{ type: 'link', attrs: { href } }],
+  }).run()
+  if (!inserted) throw new Error('没有把原文替换成子页面')
+  closeContextMenu()
+  scheduleDecorateFileLinks()
+}
+
+let contextActionRunning = false
+
+async function runContextAction(action: 'expand' | 'cut' | 'copy' | 'paste' | PheromoneKind) {
+  if (contextActionRunning) return
+  const current = editor.value
+  const menu = contextMenu.value
+  if (!current || !menu) return
+  contextActionRunning = true
+  const { from, to, text } = menu
+  try {
+    if (action === 'objection' || action === 'correction' || action === 'support') {
+      closeContextMenu()
+      startPheromoneDraft(props.pageId, text, action)
+      return
+    }
+    if (action === 'expand') {
+      closeContextMenu()
+      await replaceRangeWithChildCard(current, from, to, text)
+      return
+    }
+    if (action === 'copy') {
+      await navigator.clipboard.writeText(text)
+      closeContextMenu()
+      return
+    }
+    if (action === 'cut') {
+      await navigator.clipboard.writeText(text)
+      closeContextMenu()
+      const range = rangeForText(current, from, to, text)
+      if (range) current.chain().focus().deleteRange(range).run()
+      return
+    }
+    const pasted = await navigator.clipboard.readText()
+    closeContextMenu()
+    const range = rangeForText(current, from, to, text) ?? { from, to }
+    current.chain().focus().setTextSelection(range).insertContent(pasted).run()
+  } catch (error) {
+    closeContextMenu()
+    window.alert(error instanceof Error ? error.message : '展开为子页面失败')
+  } finally {
+    contextActionRunning = false
+  }
+}
+
+async function expandParagraphToChild(current: Editor) {
+  const { $from } = current.state.selection
+  const text = $from.parent.textContent.replace(/\s+/g, ' ').trim()
+  if (!text) {
+    emit('create-child')
+    return
+  }
+  try {
+    await replaceRangeWithChildCard(current, $from.start(), $from.end(), text.slice(0, 120))
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : '展开为子页面失败')
+  }
 }
 
 function updateMenus(currentEditor: Editor) {
@@ -1235,7 +1570,26 @@ function findText(query: string, direction = 1) {
   return { count: matches.length, index: index + 1 }
 }
 
+function onWindowPointerDown(event: PointerEvent) {
+  const target = event.target
+  const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null
+  const menu = element?.closest('.editor-context-menu')
+  if (menu) {
+    const button = element?.closest('button')
+    const action = button?.dataset.action
+    if (event.button === 0 && button && (action === 'expand' || action === 'cut' || action === 'copy' || action === 'paste' || action === 'objection' || action === 'correction' || action === 'support')) {
+      event.preventDefault()
+      event.stopPropagation()
+      void runContextAction(action)
+    }
+    return
+  }
+  contextMenu.value = null
+}
+
+onMounted(() => window.addEventListener('pointerdown', onWindowPointerDown, true))
 onBeforeUnmount(() => {
+  window.removeEventListener('pointerdown', onWindowPointerDown, true)
   if (decorateFilesTimer) clearTimeout(decorateFilesTimer)
   editor.value?.destroy()
 })
@@ -1244,7 +1598,7 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
 </script>
 
 <template>
-  <div class="tiptap-editor" v-if="editor" @click="handleSurfaceClick" @paste.capture="onPasteCapture">
+  <div class="tiptap-editor" v-if="editor" @click="handleSurfaceClick" @paste.capture="onPasteCapture" @contextmenu="onEditorContextMenu">
     <slot name="meta"></slot>
     <div v-if="showPagePicker" class="page-picker" :style="floatingMenuStyle">
       <input v-if="pagePickerMode === 'slash'" v-model="pageQuery" autofocus placeholder="搜索并关联页面…" />
@@ -1254,6 +1608,23 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
       </button>
       <button v-if="!matchingPages.length && pagePickerMode === 'wiki' && wikiQuery.trim()" class="page-picker-create" @mousedown.prevent="createWikiPage"><span>创建“{{ wikiQuery.trim() }}”</span><small>并插入页面链接</small></button>
       <p v-else-if="!matchingPages.length">没有匹配页面</p>
+    </div>
+    <div
+      v-if="contextMenu"
+      class="editor-context-menu"
+      role="menu"
+      :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }"
+      @pointerdown.prevent.stop
+      @mousedown.prevent.stop
+      @contextmenu.prevent
+    >
+      <button v-if="contextMenu.canExpand" type="button" role="menuitem" data-action="expand">展开为子页面</button>
+      <button v-if="enablePheromone" type="button" role="menuitem" data-action="objection">提出异议</button>
+      <button v-if="enablePheromone" type="button" role="menuitem" data-action="correction">提出修正</button>
+      <button v-if="enablePheromone" type="button" role="menuitem" data-action="support">表示支持</button>
+      <button type="button" role="menuitem" class="menu-split" data-action="cut">剪切</button>
+      <button type="button" role="menuitem" data-action="copy">复制</button>
+      <button type="button" role="menuitem" data-action="paste">粘贴</button>
     </div>
     <div v-if="slashQuery !== null" class="slash-menu" role="listbox" aria-label="插入块" :style="floatingMenuStyle">
       <button
