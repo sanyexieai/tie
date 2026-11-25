@@ -15,14 +15,18 @@ pub(crate) fn backend_sync_cursor(app: AppHandle, source_id: String) -> Result<s
 }
 
 #[tauri::command]
-pub(crate) fn sync_backend_workspace(
+pub(crate) async fn sync_backend_workspace(
     app: AppHandle,
     source_id: String,
     url: String,
     workspace_id: String,
 ) -> Result<BackendSyncReport, String> {
-    let ws = open_workspace(&app, &source_id)?;
-    backend_sync::align(&ws, &url, &workspace_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        let ws = open_workspace(&app, &source_id)?;
+        backend_sync::align(&ws, &url, &workspace_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -47,12 +51,16 @@ pub(crate) fn add_page_opinion(
 }
 
 #[tauri::command]
-pub(crate) fn resolve_backend_sync_conflict(
+pub(crate) async fn resolve_backend_sync_conflict(
     app: AppHandle,
     source_id: String,
     page_id: String,
     keep_local: bool,
 ) -> Result<BackendSyncReport, String> {
-    let ws = open_workspace(&app, &source_id)?;
-    backend_sync::resolve_conflict(&ws, &page_id, keep_local)
+    tauri::async_runtime::spawn_blocking(move || {
+        let ws = open_workspace(&app, &source_id)?;
+        backend_sync::resolve_conflict(&ws, &page_id, keep_local)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
