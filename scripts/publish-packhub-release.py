@@ -15,7 +15,7 @@ CI（扁平产物目录）::
 
 默认**不传** version/build，由 PackHub 当前版本末位 +1、build +1。
 同一轮多平台会沿用第一次上传返回的号，避免连加。
-只有 ``--version`` / ``--build``、环境变量或 CI 的 ``GITHUB_REF_NAME`` 才会钉死版本。
+只有 ``--version`` / ``--build``、环境变量或 CI 的 ``RELEASE_TAG``（兼容 ``GITHUB_REF_NAME``）才会钉死版本。
 自动生成的 tauri-latest.json 会与线上已有桌面平台条目合并；只有 ``--replace-manifest`` 才会整份覆盖。
 """
 
@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -99,7 +100,10 @@ def env_first(*names: str, default: str = "") -> str:
 
 def version_from_tag(tag: str) -> str:
     tag = tag.strip()
-    return tag[1:] if tag.startswith("v") else tag
+    version = tag[1:] if tag.startswith("v") else tag
+    if version and not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
+        raise SystemExit(f"无效的发布版本: {tag}")
+    return version
 
 
 def version_from_package() -> str:
@@ -322,6 +326,7 @@ def generate_manifest(files: list[Path], version: str) -> Path | None:
     env = os.environ.copy()
     env["UPDATER_URL_MODE"] = "packhub"
     env["GITHUB_REF_NAME"] = f"v{version}"
+    env["RELEASE_TAG"] = f"v{version}"
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/merge-updater-manifest.py"), str(staging), str(output)],
         env=env,
@@ -435,7 +440,7 @@ def main() -> int:
     if not args.dry_run and not key:
         raise SystemExit("缺少 PACKHUB_UPLOAD_KEY：在仓库根目录 .env 填写，或传 --key")
 
-    version = args.version or env_first("PACKHUB_VERSION") or version_from_tag(env_first("GITHUB_REF_NAME"))
+    version = version_from_tag(args.version or env_first("PACKHUB_VERSION", "RELEASE_TAG", "GITHUB_REF_NAME"))
     build = args.build or env_first("PACKHUB_BUILD")
     notes = args.notes or env_first("PACKHUB_NOTES")
     wanted = tuple(args.platform) if args.platform else PLATFORMS

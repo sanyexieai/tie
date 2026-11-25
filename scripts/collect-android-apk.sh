@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APK_DIR="$ROOT/src-tauri/gen/android/app/build/outputs/apk/universal/release"
 OUT_DIR="${1:-$ROOT/release-artifacts-android}"
-VERSION="${GITHUB_REF_NAME:-local}"
+VERSION="${RELEASE_TAG:-${GITHUB_REF_NAME:-local}}"
 VERSION="${VERSION#v}"
 
 mkdir -p "$OUT_DIR"

@@ -228,8 +228,6 @@ jobs:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
 
       - name: Collect Android APK
-        env:
-          GITHUB_REF_NAME: ${{ env.RELEASE_TAG }}
         run: bash scripts/collect-android-apk.sh release-artifacts-android
 
       - name: Upload Android artifacts
@@ -267,8 +265,6 @@ jobs:
 
       - name: Merge updater manifest
         shell: bash
-        env:
-          GITHUB_REF_NAME: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -309,6 +305,5 @@ jobs:
           PACKHUB_SLUG: tie
           PACKHUB_UPLOAD_KEY: ${{ secrets.PACKHUB_UPLOAD_KEY }}
           PACKHUB_TIMEOUT: "1800"
-          GITHUB_REF_NAME: ${{ env.RELEASE_TAG }}
         timeout-minutes: 40
         run: python3 scripts/publish-packhub-release.py dist --manifest dist/tauri-latest.json

@@ -6,7 +6,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +36,8 @@ def version_from_tag(tag: str) -> str:
     tag = tag.strip()
     if tag.startswith("v"):
         tag = tag[1:]
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", tag):
+        raise ValueError(f"Invalid release version: {tag}")
     return tag
 
 
@@ -105,7 +109,7 @@ def main() -> int:
     artifacts_dir = Path(sys.argv[1])
     output_path = Path(sys.argv[2])
     repo = os.environ.get("GITHUB_REPOSITORY", "sanyexieai/tie")
-    tag = os.environ.get("GITHUB_REF_NAME", "").strip()
+    tag = (os.environ.get("RELEASE_TAG") or os.environ.get("GITHUB_REF_NAME", "")).strip()
 
     if not artifacts_dir.is_dir():
         print(f"Artifacts directory not found: {artifacts_dir}", file=sys.stderr)
@@ -181,6 +185,26 @@ def self_test() -> int:
             tag="v1.0.38",
         )
         assert android.endswith("/releases/android/tie-1.0.38-android-universal.apk"), android
+        with tempfile.TemporaryDirectory(prefix="tie-release-metadata-test-") as tmp:
+            root = Path(tmp)
+            bundle = root / "Tie_1.0.51_amd64.deb"
+            bundle.write_bytes(b"metadata fixture")
+            bundle.with_name(bundle.name + ".sig").write_text("signature fixture")
+            env = os.environ.copy()
+            env.update({"RELEASE_TAG": "v1.0.51", "GITHUB_REF_NAME": "main"})
+            env.pop("PACKHUB_VERSION", None)
+            generated = root / "latest.json"
+            result = subprocess.run([sys.executable, __file__, str(root), str(generated)], env=env, capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            assert json.loads(generated.read_text())["version"] == "1.0.51"
+            publisher = Path(__file__).with_name("publish-packhub-release.py")
+            command = [sys.executable, str(publisher), str(root), "--dry-run", "--platform", "linux", "--skip-manifest"]
+            result = subprocess.run(command, env=env, capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            assert json.loads(result.stdout)["version"] == "1.0.51"
+            env["RELEASE_TAG"] = "main"
+            result = subprocess.run(command, env=env, capture_output=True, text=True)
+            assert result.returncode != 0
         print("self-test ok", file=sys.stderr)
         return 0
     finally:

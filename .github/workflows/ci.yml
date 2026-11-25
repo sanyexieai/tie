@@ -52,6 +52,9 @@ jobs:
       - name: Run backend API tests
         run: npm run test:backend
 
+      - name: Test release metadata
+        run: python3 scripts/merge-updater-manifest.py --self-test
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
