@@ -6,7 +6,7 @@ ICON_SRC="$ROOT/src-tauri/icons/icon.png"
 ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
 ICON_DST="$ICON_DIR/com.tie.knowledge.png"
 DESKTOP_DIR="$HOME/.local/share/applications"
-DESKTOP="$DESKTOP_DIR/com.tie.knowledge.desktop"
+DESKTOP="$DESKTOP_DIR/com.tie.knowledge.dev.desktop"
 BINARY="$ROOT/src-tauri/target/debug/tie"
 
 if [[ ! -f "$ICON_SRC" ]]; then
@@ -21,7 +21,7 @@ cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=Tie
+Name=Tie (开发版)
 GenericName=Knowledge Editor
 Comment=Local-first markdown knowledge editor
 Exec=$BINARY
