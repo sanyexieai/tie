@@ -15,6 +15,7 @@ services:
         max-file: '3'
   https:
     image: nginx:stable-alpine
+    entrypoint: ['/bin/sh', '/etc/nginx/tie-entrypoint.sh']
     restart: unless-stopped
     depends_on:
       backend:
@@ -25,6 +26,7 @@ services:
       TLS_CERT_FILE: ${TLS_CERT_FILE:?Set certificate path relative to FNOS_CERT_DIR}
       TLS_KEY_FILE: ${TLS_KEY_FILE:?Set private key path relative to FNOS_CERT_DIR}
     volumes:
+      - ./https-entrypoint.sh:/etc/nginx/tie-entrypoint.sh:ro
       - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
       - ${FNOS_CERT_DIR:?Set fnOS certificate directory}:/fnos-certs:ro
       - ../../dist:/usr/share/nginx/html:ro

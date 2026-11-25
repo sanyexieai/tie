@@ -2,6 +2,8 @@
 
 使用 Node 后台和 Rust `tie-cli`，HTTPS 保持在 `32043`。网页、账号页、管理页、API、WebSocket 和 MCP 通过同一入口访问。
 
+HTTPS 使用 Tie 自己的入口脚本，替换证书路径模板后直接启动 nginx。自定义 443 配置无需默认 IPv6 配置脚本的包清单查询，避免 Alpine 的 `apk manifest` 阻塞入口启动。
+
 ## 准备产物
 
 1. 在项目根运行 `npm run preflight`、`npm run test:e2e` 和 Rust 测试。
