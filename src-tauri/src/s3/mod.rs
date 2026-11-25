@@ -68,13 +68,63 @@ fn delete_s3_credential_payload(app: &tauri::AppHandle, provider_id: &str) -> Re
     }
 }
 
-fn migrate_s3_credential_id(app: &tauri::AppHandle, from_id: &str, to_id: &str) {
+fn copy_legacy_s3_credential(
+    from_id: &str,
+    to_id: &str,
+    required: bool,
+    mut read: impl FnMut(&str) -> Result<String, String>,
+    write: impl FnOnce(&str, &str) -> Result<(), String>,
+) -> Result<(), String> {
     if from_id == to_id || from_id.is_empty() || to_id.is_empty() {
-        return;
+        return Ok(());
     }
-    if let Ok(payload) = read_s3_credential_payload(app, from_id) {
-        let _ = write_s3_credential_payload(app, to_id, &payload);
-        let _ = delete_s3_credential_payload(app, from_id);
+    if read(to_id).is_ok() {
+        return Ok(());
+    }
+    match read(from_id) {
+        Ok(payload) => write(to_id, &payload)
+            .map_err(|_| "S3 凭据迁移未完成，原凭据已保留，可稍后重试".to_owned()),
+        Err(_) if !required => Ok(()),
+        Err(_) => Err("无法读取原有 S3 凭据，连接配置未迁移，可稍后重试".to_owned()),
+    }
+}
+
+fn migrate_s3_credential_id(app: &tauri::AppHandle, from_id: &str, to_id: &str, required: bool) -> Result<(), String> {
+    // Keep the old vault entry usable if settings change while migration is running.
+    copy_legacy_s3_credential(from_id, to_id, required,
+        |id| read_s3_credential_payload(app, id),
+        |id, payload| write_s3_credential_payload(app, id, payload))
+}
+
+#[cfg(test)]
+mod credential_migration_tests {
+    use super::copy_legacy_s3_credential;
+    use std::{cell::RefCell, collections::HashMap};
+
+    #[test]
+    fn migration_copies_without_removing_the_legacy_entry() {
+        let vault = RefCell::new(HashMap::from([("old".to_owned(), "fixture-value".to_owned())]));
+        copy_legacy_s3_credential("old", "stable", true,
+            |id| vault.borrow().get(id).cloned().ok_or("missing".into()),
+            |id, payload| { vault.borrow_mut().insert(id.into(), payload.into()); Ok(()) }).unwrap();
+        assert_eq!(vault.borrow().get("old"), vault.borrow().get("stable"));
+        assert!(vault.borrow().contains_key("old"));
+    }
+
+    #[test]
+    fn failed_copy_keeps_the_original_and_reports_failure() {
+        let vault = HashMap::from([("old", "fixture-value")]);
+        assert!(copy_legacy_s3_credential("old", "stable", true,
+            |id| vault.get(id).map(|value| value.to_string()).ok_or("missing".into()),
+            |_, _| Err("vault unavailable".into())).is_err());
+        assert_eq!(vault.get("old"), Some(&"fixture-value"));
+    }
+
+    #[test]
+    fn existing_stable_credential_is_not_overwritten() {
+        copy_legacy_s3_credential("old", "stable", true,
+            |id| if id == "stable" { Ok("existing-value".into()) } else { panic!("legacy read is unnecessary") },
+            |_, _| panic!("existing credential must not be replaced")).unwrap();
     }
 }
 
@@ -82,14 +132,14 @@ fn migrate_s3_credential_id(app: &tauri::AppHandle, from_id: &str, to_id: &str) 
 fn stabilize_s3_providers(
     app: &tauri::AppHandle,
     providers: Vec<S3ProviderConfig>,
-) -> (Vec<S3ProviderConfig>, bool) {
+) -> Result<(Vec<S3ProviderConfig>, bool), String> {
     let mut changed = false;
     let mut by_stable: HashMap<String, S3ProviderConfig> = HashMap::new();
 
     for mut provider in providers {
         let stable_id = s3_provider_fingerprint(&provider.endpoint, &provider.bucket);
         if provider.id != stable_id {
-            migrate_s3_credential_id(app, &provider.id, &stable_id);
+            migrate_s3_credential_id(app, &provider.id, &stable_id, provider.credential_stored)?;
             provider.id = stable_id.clone();
             changed = true;
         }
@@ -122,7 +172,7 @@ fn stabilize_s3_providers(
     }
 
     let next: Vec<S3ProviderConfig> = by_stable.into_values().collect();
-    (next, changed)
+    Ok((next, changed))
 }
 
 pub(crate) fn read_s3_credential_payload(
@@ -150,14 +200,32 @@ pub(crate) fn s3_client_for_app(
 }
 
 #[tauri::command]
-pub(crate) fn load_s3_providers(app: tauri::AppHandle) -> Result<Vec<S3ProviderConfig>, String> {
-    let mut settings = load_settings(&app)?;
-    let (providers, changed) = stabilize_s3_providers(&app, settings.s3_providers.clone());
-    if changed {
-        settings.s3_providers = providers.clone();
-        save_settings(&app, &settings)?;
-    }
-    Ok(providers)
+pub(crate) async fn load_s3_provider_metadata(app: tauri::AppHandle) -> Result<Vec<S3ProviderConfig>, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(load_settings(&app)?.s3_providers))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn load_s3_providers(app: tauri::AppHandle) -> Result<Vec<S3ProviderConfig>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = load_settings(&app)?;
+        let (providers, changed) = stabilize_s3_providers(&app, settings.s3_providers.clone())?;
+        if changed {
+            // Credential migration may wait while the user edits workspace settings.
+            let mut latest = load_settings(&app)?;
+            if serde_json::to_value(&latest.s3_providers).map_err(|error| error.to_string())?
+                != serde_json::to_value(&settings.s3_providers).map_err(|error| error.to_string())?
+            {
+                return Err("S3 连接配置已改变，已保留当前设置，请稍后重试迁移".to_owned());
+            }
+            latest.s3_providers = providers.clone();
+            save_settings(&app, &latest)?;
+        }
+        Ok(providers)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -179,7 +247,7 @@ pub(crate) fn upsert_s3_provider(
     let mut next = provider;
     let stable_id = s3_provider_fingerprint(&next.endpoint, &next.bucket);
     if next.id != stable_id {
-        migrate_s3_credential_id(&app, &next.id, &stable_id);
+        migrate_s3_credential_id(&app, &next.id, &stable_id, next.credential_stored)?;
         next.id = stable_id;
     }
     if let Some(existing) = settings
@@ -191,7 +259,7 @@ pub(crate) fn upsert_s3_provider(
     } else {
         settings.s3_providers.push(next);
     }
-    let (providers, _) = stabilize_s3_providers(&app, settings.s3_providers.clone());
+    let (providers, _) = stabilize_s3_providers(&app, settings.s3_providers.clone())?;
     settings.s3_providers = providers.clone();
     save_settings(&app, &settings)?;
     Ok(providers)
@@ -310,15 +378,7 @@ pub(crate) fn remove_s3_credentials(
     app: tauri::AppHandle,
     provider_id: String,
 ) -> Result<(), String> {
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    {
-        return mobile::delete_mobile_credential(&app, &provider_id);
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        let _ = app;
-        credentials::remove_keyring_credential(&provider_id)
-    }
+    delete_s3_credential_payload(&app, &provider_id)
 }
 
 #[tauri::command]

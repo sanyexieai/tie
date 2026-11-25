@@ -821,7 +821,7 @@ fn collect_skill_workspaces(app: &AppHandle) -> Vec<PathBuf> {
 
 /// 启动 / 更新后：刷新 MCP 运行时，并用安装包模板覆盖各工作区打包 Skill（tie-memory + skills/*），再同步到 Agent Skill 目录。
 /// Skill 文件可用 ≠ 每次更新都要跑；Agent 收尾由版本化 migration 目录决定（见 tie-update）。
-pub fn refresh_mcp_and_skills_on_startup(app: &AppHandle) -> Result<(), String> {
+fn refresh_mcp_and_skills_on_startup(app: &AppHandle) -> Result<(), String> {
     match refresh_installed_mcp_runtime(app) {
         Ok(true) => eprintln!("[tie] MCP runtime refreshed from package"),
         Ok(false) => {}
@@ -855,6 +855,13 @@ pub fn refresh_mcp_and_skills_on_startup(app: &AppHandle) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn refresh_startup_integrations(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || refresh_mcp_and_skills_on_startup(&app))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 fn mcp_source_override_path(app: &AppHandle) -> Option<PathBuf> {

@@ -715,8 +715,12 @@ pub(crate) fn write_temp_file_bytes(file_name: String, data: Vec<u8>) -> Result<
 }
 
 #[tauri::command]
-pub(crate) fn load_workspace(app: AppHandle) -> Result<WorkspaceSnapshot, String> {
-    load_file_workspace(&app_data_dir(&app)?, "tie-workspace")
+pub(crate) async fn load_workspace(app: AppHandle) -> Result<WorkspaceSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        load_file_workspace(&app_data_dir(&app)?, "tie-workspace")
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

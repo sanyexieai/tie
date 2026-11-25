@@ -151,18 +151,64 @@ async function refreshProfile(profile: BackendProfile, force: boolean) {
   return backendService.refresh(profile, force)
 }
 
+export async function fetchBackendJsonWithTimeout<T>(url: string, options: RequestInit = {}): Promise<{ response: Response; body: T | null }> {
+  const callerSignal = options.signal
+  if (callerSignal?.aborted) throw callerSignal.reason ?? new DOMException('请求已取消', 'AbortError')
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout>
+  let abortFromCaller: () => void
+  const interrupted = new Promise<never>((_, reject) => {
+    abortFromCaller = () => {
+      const reason = callerSignal?.reason ?? new DOMException('请求已取消', 'AbortError')
+      reject(reason)
+      controller.abort(reason)
+    }
+    callerSignal?.addEventListener('abort', abortFromCaller, { once: true })
+    timer = setTimeout(() => {
+      const reason = new BackendRequestError('后台响应超时，请稍后重试', 0)
+      reject(reason)
+      controller.abort(reason)
+    }, 10_000)
+  })
+  try {
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(url, { ...options, signal: controller.signal })
+        const body = await response.json().catch((reason) => {
+          if (controller.signal.aborted) throw reason
+          return null
+        }) as T | null
+        return { response, body }
+      })(),
+      interrupted,
+    ])
+  } finally {
+    clearTimeout(timer!)
+    callerSignal?.removeEventListener('abort', abortFromCaller!)
+  }
+}
+
 async function request<T>(profile: BackendProfile, path: string, options: RequestInit = {}, allowRefresh = true): Promise<T> {
   const headers = new Headers(options.headers)
   headers.set('accept', 'application/json')
   if (options.body) headers.set('content-type', 'application/json')
   if (profile.accessToken) headers.set('authorization', `Bearer ${profile.accessToken}`)
   let response: Response
+  let body: { message?: string; error?: string } | T | null
   try {
-    response = await fetch(`${normalizeEndpoint(profile.endpoint)}${path}`, { ...options, headers })
-  } catch {
+    const url = `${normalizeEndpoint(profile.endpoint)}${path}`
+    if ((options.method ?? 'GET').toUpperCase() === 'GET') {
+      const result = await fetchBackendJsonWithTimeout<{ message?: string; error?: string } | T>(url, { ...options, headers })
+      response = result.response
+      body = result.body
+    } else {
+      response = await fetch(url, { ...options, headers })
+      body = await response.json().catch(() => null) as { message?: string; error?: string } | T | null
+    }
+  } catch (reason) {
+    if (reason instanceof BackendRequestError) throw reason
     throw new BackendRequestError('无法连接后台，请检查地址和服务是否已启动', 0)
   }
-  const body = await response.json().catch(() => null) as { message?: string; error?: string } | T | null
   if (response.status === 401 && allowRefresh && profile.refreshToken && path !== '/api/v1/auth/refresh') {
     await refreshProfile(profile, true)
     return request<T>(profile, path, options, false)
@@ -417,10 +463,15 @@ export const backendService = {
   },
   async health(endpoint: string): Promise<BackendHealth> {
     let response: Response
-    try { response = await fetch(`${normalizeEndpoint(endpoint)}/health`) }
-    catch { throw new Error('无法连接后台，请检查地址和服务是否已启动') }
+    let body: BackendHealth | null
+    try { ({ response, body } = await fetchBackendJsonWithTimeout<BackendHealth>(`${normalizeEndpoint(endpoint)}/health`)) }
+    catch (reason) {
+      if (reason instanceof BackendRequestError) throw reason
+      throw new Error('无法连接后台，请检查地址和服务是否已启动')
+    }
     if (!response.ok) throw new Error('后台健康检查失败')
-    return response.json() as Promise<BackendHealth>
+    if (!body) throw new Error('后台健康检查返回了空响应')
+    return body
   },
   async register(endpoint: string, email: string, password: string, name: string) {
     const profile = { ...initialProfile(), endpoint: normalizeEndpoint(endpoint) }

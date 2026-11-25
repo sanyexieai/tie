@@ -502,13 +502,16 @@ fn remove_codex_link(path: &Path) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn list_skill_connections(app: AppHandle) -> Result<Vec<SkillConnection>, String> {
-    let mut registry = load_registry(&app)?;
-    registry
-        .connections
-        .retain(|item| Path::new(&item.skill_path).is_file());
-    save_registry(&app, &registry)?;
-    Ok(registry.connections)
+pub async fn list_skill_connections(app: AppHandle) -> Result<Vec<SkillConnection>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut registry = load_registry(&app)?;
+        registry
+            .connections
+            .retain(|item| Path::new(&item.skill_path).is_file());
+        Ok(registry.connections)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

@@ -44,7 +44,7 @@ import {
   sourceById,
 } from '@/services/link-runtime'
 
-const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page>; expandToChild?: (title: string) => Promise<Page>; enablePheromone?: boolean }>()
+const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page>; expandToChild?: (title: string) => Promise<Page>; enablePheromone?: boolean; backgroundStarted?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
 const lowlight = createLowlight(common)
 const showPagePicker = ref(false)
@@ -93,10 +93,10 @@ function linkContext(): LinkContext {
 const linkTargetSources = computed(() => linkableSources(props.sources, pageSourceId()))
 
 async function ensureWorkspaceFilesLoaded() {
+  if (props.backgroundStarted === false) return
   const sourceIds = new Set<string>()
   const relatives: Array<{ sourceId: string; relativePath: string }> = []
   const pageId = pageSourceId()
-  if (pageId) sourceIds.add(pageId)
   const context = linkContext()
   const dom = editor.value?.view.dom
   if (dom) {
@@ -162,6 +162,8 @@ function scheduleDecorateFileLinks() {
   if (decorateFilesTimer) clearTimeout(decorateFilesTimer)
   decorateFilesTimer = setTimeout(() => {
     decorateFilesTimer = null
+    decorateFileLinks()
+    if (props.backgroundStarted === false) return
     void ensureWorkspaceFilesLoaded().then(() => decorateFileLinks())
   }, 40)
 }
@@ -1251,6 +1253,7 @@ watch(() => props.pages.map((page) => `${page.id}:${page.parentId ?? ''}:${page.
 })
 watch(() => props.spellcheck, (enabled) => editor.value?.view.dom.setAttribute('spellcheck', String(enabled)))
 watch(() => props.pageId, () => scheduleDecorateFileLinks())
+watch(() => props.backgroundStarted, (ready) => { if (ready) scheduleDecorateFileLinks() })
 watch(() => pheromoneRevision(props.pageId), () => {
   const current = editor.value
   if (!current || current.isDestroyed) return

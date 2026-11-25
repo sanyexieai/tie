@@ -20,6 +20,7 @@ export const LOCAL_S3_PROVIDERS_KEY = 'tie-s3-providers-v1'
 const SOURCE_ID_REMAP_KEY = 'tie-s3-source-id-remap-v1'
 
 let cachedProviders: LocalS3Provider[] | null = null
+let metadataOnly = false
 /** 最近一次指纹迁移：旧 `s3:uuid` → 新 `s3:fingerprint` */
 let lastSourceIdRemap = new Map<string, string>()
 
@@ -116,7 +117,7 @@ export function buildS3SourceIdHealingRemap(pages: Array<{ storageSourceId: stri
       }
     }
   }
-  if (remap.size) persistSourceIdRemap(remap)
+  if (remap.size && !metadataOnly) persistSourceIdRemap(remap)
   return remap
 }
 
@@ -140,7 +141,7 @@ function migrateSyncState(fromProviderId: string, toProviderId: string) {
  * 将随机 UUID provider id 迁到 endpoint+bucket 指纹；返回 `s3:old` → `s3:new`。
  * 凭据迁移由 Rust `load_s3_providers` 完成；此处负责配置与 sync-state。
  */
-export function stabilizeS3ProviderIds(providers: LocalS3Provider[]): {
+export function stabilizeS3ProviderIds(providers: LocalS3Provider[], options: { persist?: boolean } = {}): {
   providers: LocalS3Provider[]
   sourceIdRemap: Map<string, string>
 } {
@@ -152,7 +153,7 @@ export function stabilizeS3ProviderIds(providers: LocalS3Provider[]): {
     const stableId = s3ProviderIdFromEndpointBucket(provider.endpoint, provider.bucket)
     if (provider.id !== stableId) {
       sourceIdRemap.set(s3SourceId(provider.id), s3SourceId(stableId))
-      migrateSyncState(provider.id, stableId)
+      if (options.persist !== false) migrateSyncState(provider.id, stableId)
     }
     const next = { ...provider, id: stableId }
     const existing = byStable.get(stableId)
@@ -169,23 +170,45 @@ export function stabilizeS3ProviderIds(providers: LocalS3Provider[]): {
     })
   }
 
-  if (sourceIdRemap.size) rememberSourceIdRemap(sourceIdRemap)
+  if (sourceIdRemap.size) {
+    if (options.persist !== false) rememberSourceIdRemap(sourceIdRemap)
+    else for (const [from, to] of sourceIdRemap) lastSourceIdRemap.set(from, to)
+  }
   return { providers: [...byStable.values()], sourceIdRemap }
 }
 
+export async function loadS3ProviderMetadata() {
+  metadataOnly = true
+  const legacy = readLegacyProviders()
+  let native: LocalS3Provider[] = []
+  if (await isTauri()) {
+    try { native = await invoke<LocalS3Provider[]>('load_s3_provider_metadata') }
+    catch (error) {
+      console.warn('存储配置元数据读取失败，将使用本地缓存', error)
+      native = cachedProviders ?? []
+    }
+  }
+  const { providers, sourceIdRemap } = stabilizeS3ProviderIds([...native, ...legacy], { persist: false })
+  cachedProviders = providers
+  window.dispatchEvent(new Event('tie:s3-providers-changed'))
+  return sourceIdRemap
+}
+
 export async function refreshS3Providers(options: { migrateLegacy?: boolean } = {}) {
+  metadataOnly = false
   try {
     if (await isTauri()) {
-      if (options.migrateLegacy) {
-        const legacy = readLegacyProviders()
-        const current = await invoke<LocalS3Provider[]>('load_s3_providers')
-        if (legacy.length && !current.length) {
-          await invoke('save_s3_providers', { providers: legacy.map(normalizeProvider) })
-          localStorage.removeItem(LOCAL_S3_PROVIDERS_KEY)
-        }
+      const legacy = options.migrateLegacy ? readLegacyProviders() : []
+      let loaded = await invoke<LocalS3Provider[]>('load_s3_providers')
+      const known = new Set(loaded.map((provider) => s3ProviderIdFromEndpointBucket(provider.endpoint, provider.bucket)))
+      const missing = legacy.filter((provider) => !known.has(s3ProviderIdFromEndpointBucket(provider.endpoint, provider.bucket)))
+      if (missing.length) {
+        await invoke('save_s3_providers', { providers: [...loaded, ...missing].map(normalizeProvider) })
+        loaded = await invoke<LocalS3Provider[]>('load_s3_providers')
       }
+      if (legacy.length) localStorage.removeItem(LOCAL_S3_PROVIDERS_KEY)
       // Rust 侧会做指纹规范化 + 凭据迁移
-      const loaded = (await invoke<LocalS3Provider[]>('load_s3_providers')).map(normalizeProvider)
+      loaded = loaded.map(normalizeProvider)
       const { providers, sourceIdRemap } = stabilizeS3ProviderIds(loaded)
       const changed = sourceIdRemap.size > 0
         || providers.length !== loaded.length
@@ -201,9 +224,10 @@ export async function refreshS3Providers(options: { migrateLegacy?: boolean } = 
     }
   } catch (error) {
     console.warn('S3 Provider 加载失败，将使用本地缓存', error)
-    const { providers } = stabilizeS3ProviderIds(readLegacyProviders())
+    const { providers } = stabilizeS3ProviderIds(cachedProviders ?? readLegacyProviders())
     cachedProviders = providers
   }
+  persistSourceIdRemap(lastSourceIdRemap)
   window.dispatchEvent(new Event('tie:s3-providers-changed'))
   return cachedProviders ?? []
 }

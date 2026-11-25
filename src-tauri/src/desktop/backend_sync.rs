@@ -10,9 +10,13 @@ fn open_workspace(app: &AppHandle, source_id: &str) -> Result<tie_storage::local
 }
 
 #[tauri::command]
-pub(crate) fn backend_sync_cursor(app: AppHandle, source_id: String) -> Result<serde_json::Value, String> {
-    let ws = open_workspace(&app, &source_id)?;
-    backend_sync::read_sync_cursor(ws.root())
+pub(crate) async fn backend_sync_cursor(app: AppHandle, source_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let ws = open_workspace(&app, &source_id)?;
+        backend_sync::read_sync_cursor(ws.root())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -46,9 +50,13 @@ pub(crate) async fn sync_backend_workspace(
 }
 
 #[tauri::command]
-pub(crate) fn list_page_reviews(app: AppHandle, source_id: String, page_id: String) -> Result<serde_json::Value, String> {
-    let ws = open_workspace(&app, &source_id)?;
-    Ok(backend_sync::read_review_file(ws.root(), &page_id))
+pub(crate) async fn list_page_reviews(app: AppHandle, source_id: String, page_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let ws = open_workspace(&app, &source_id)?;
+        Ok(backend_sync::read_review_file(ws.root(), &page_id))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

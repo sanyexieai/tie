@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import AppSidebar from '@/components/AppSidebar.vue'
 import ContextPanel from '@/components/ContextPanel.vue'
 import DocumentEditor from '@/components/DocumentEditor.vue'
@@ -23,6 +24,7 @@ import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 import { startAutoSync } from '@/services/auto-sync'
 import { startBackendLive } from '@/services/backend-live'
+import { initializeWorkspaceStartup } from '@/services/startup'
 import { backendService } from '@/services/backend'
 import { checkForAppUpdateOnStartup } from '@/services/app-updater'
 import { installMobileBackHandler, resetMobileBackLeaveArm, uninstallMobileBackHandler } from '@/services/mobile-back'
@@ -337,16 +339,35 @@ onMounted(async () => {
   window.addEventListener('tie:toggle-focus-mode', toggleFocusMode)
   window.addEventListener('tie:show-changes', showChangesPanel)
   await initPlatform()
-  void refreshChangeOrigin()
   syncViewportHeight()
   syncMobileLayout()
   syncContextDrawer()
-  await backend.initialize()
-  const defaultServer = backend.servers.find((server) => server.defaultPrompt)
-  if (defaultServer && !backend.connected && !backendService.isDefaultPromptDismissed()) {
-    try { await backendService.health(defaultServer.endpoint); backendDialogOpen.value = true } catch { /* 后台未启动时不打扰用户 */ }
-  }
-  await store.initialize()
+  await initializeWorkspaceStartup({
+    localFirst: isTauriDesktop(),
+    initializeWorkspace: () => store.initialize(),
+    afterFirstPaint: async () => {
+      await nextTick()
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => { requestAnimationFrame(() => resolve()) })
+      })
+    },
+    initializeBackend: async () => {
+      await backend.initialize()
+      const defaultServer = backend.servers.find((server) => server.defaultPrompt)
+      if (defaultServer && !backend.connected && !backendService.isDefaultPromptDismissed()) {
+        void backendService.health(defaultServer.endpoint)
+          .then(() => { if (!backend.connected) backendDialogOpen.value = true })
+          .catch(() => undefined)
+      }
+    },
+    initializeBackground: async () => {
+      const work: Promise<unknown>[] = [store.initializeBackground(), refreshChangeOrigin()]
+      if (isTauriDesktop() && !isMobileClient.value) work.push(invoke('refresh_startup_integrations'))
+      await Promise.all(work)
+    },
+    onBackendError: (error) => { console.warn('后台连接初始化失败，本地工作区已打开', error) },
+    onBackgroundError: (error) => { console.warn('后台维护未完成，本地工作区可继续使用', error) },
+  })
   if (!isTauriDesktop() && backend.connected && temporaryBrowserPages().length) browserTempOffer.value = true
   syncViewportHeight()
   if (usesMobileShell.value) goMobileHome()
@@ -357,7 +378,7 @@ onMounted(async () => {
 
 watch(
   [
-    () => store.initialized && backend.connected && !backend.loading
+    () => store.initialized && store.backgroundStarted && backend.connected && !backend.loading
       ? `${backend.profile.endpoint}:${backend.profile.user?.id}` : '',
     () => backend.profile.accessToken,
   ],
@@ -511,5 +532,9 @@ onBeforeUnmount(() => {
     <AppUpdateDialog v-if="updateDialogOpen" @close="updateDialogOpen = false" />
     <p v-if="mobileBackHint && usesMobileShell" class="mobile-back-hint" role="status">{{ mobileBackHint }}</p>
   </div>
-  <div v-else class="loading-screen"><AppIcon class="loading-mark" :size="30" /><p>正在打开知识库…</p></div>
+  <div v-else class="loading-screen" role="status">
+    <AppIcon class="loading-mark" :size="30" />
+    <p>正在打开知识库…</p>
+    <p class="loading-stage">{{ store.initializationStage }}</p>
+  </div>
 </template>

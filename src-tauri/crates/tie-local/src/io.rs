@@ -3,7 +3,7 @@ use crate::page::{
     remove_page_assets, write_page_meta,
 };
 use crate::paths::{
-    allocate_page_path, find_page_file, page_asset_dir, repair_utf8_mojibake, revision_dir,
+    allocate_page_path, allocate_page_path_with_current, find_page_file, page_asset_dir, repair_utf8_mojibake, revision_dir,
     sanitize_asset_name,
     workspace_relative,
 };
@@ -62,15 +62,25 @@ pub fn relocate_page_file(root: &std::path::Path, page_id: &str, title: &str) ->
     let Some(current) = find_page_file(root, page_id) else {
         return Ok(());
     };
-    let target = allocate_page_path(root, page_id, title);
-    if paths_equal(&current, &target) {
-        return Ok(());
+    relocate_page_file_from_path(root, page_id, title, &current).map(|_| ())
+}
+
+pub(crate) fn relocate_page_file_from_path(
+    root: &std::path::Path,
+    page_id: &str,
+    title: &str,
+    current: &std::path::Path,
+) -> Result<PathBuf, String> {
+    let target = allocate_page_path_with_current(root, page_id, title, Some(current));
+    if paths_equal(current, &target) {
+        return Ok(target);
     }
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    fs::rename(&current, &target).map_err(|error| format!("无法按标题重命名页面文件：{error}"))?;
-    crate::paths::retarget_page_meta(root, page_id, &workspace_relative(root, &target)?)
+    fs::rename(current, &target).map_err(|error| format!("无法按标题重命名页面文件：{error}"))?;
+    crate::paths::retarget_page_meta(root, page_id, &workspace_relative(root, &target)?)?;
+    Ok(target)
 }
 
 pub fn save_page(

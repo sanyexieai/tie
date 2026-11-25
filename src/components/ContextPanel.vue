@@ -158,7 +158,7 @@ const outgoingFiles = computed(() => {
 
 async function refreshFileResources() {
   const page = store.activePage
-  if (!page) {
+  if (!store.backgroundStarted || tab.value !== 'links' || !page) {
     fileResources.value = []
     return
   }
@@ -176,6 +176,7 @@ async function refreshFileResources() {
   }
   try {
     const lists = await Promise.all(sources.map((source) => listRegisteredFiles(source)))
+    if (tab.value !== 'links' || store.activePage?.id !== page.id) return
     fileResources.value = lists.flat()
     await Promise.all(pathRefs.map(async (ref) => {
       const source = sourceById(store.allSources, ref.sourceId || page.storageSourceId)
@@ -192,7 +193,7 @@ async function refreshFileResources() {
 }
 
 watch(
-  [() => store.activePage?.id, () => store.activePage?.markdown, filesWorkspaceRoot],
+  [() => store.backgroundStarted, tab, () => store.activePage?.id, () => store.activePage?.markdown, filesWorkspaceRoot],
   () => { void refreshFileResources() },
   { immediate: true },
 )
@@ -261,18 +262,21 @@ function quoteStillPresent(quote: string) {
 
 async function loadAuditEvents() {
   const page = store.activePage
-  if (!page || tab.value !== 'audit') {
+  if (!store.backgroundStarted || !page || tab.value !== 'audit') {
     auditEvents.value = []
     reviewEntries.value = []
     return
   }
-  auditEvents.value = await listPageAuditEvents(page.storageSourceId, page.id)
+  const events = await listPageAuditEvents(page.storageSourceId, page.id)
+  if (tab.value !== 'audit' || store.activePage?.id !== page.id) return
+  auditEvents.value = events
   if (!desktopSync()) {
     reviewEntries.value = []
     return
   }
   try {
     const file = await invoke<{ entries?: ReviewEntry[] }>('list_page_reviews', { sourceId: page.storageSourceId, pageId: page.id })
+    if (tab.value !== 'audit' || store.activePage?.id !== page.id) return
     reviewEntries.value = file.entries ?? []
   } catch {
     reviewEntries.value = []
@@ -304,10 +308,12 @@ async function leaveOpinion() {
 watch(tab, (value) => {
   try { localStorage.setItem(CONTEXT_TAB_KEY, value) } catch { /* 写不进去时只保留本次 */ }
   setPheromonePanelOpen(value === 'audit')
-  void loadAuditEvents()
 }, { immediate: true })
-watch(() => store.activePage?.id, () => { void loadAuditEvents() })
-watch(() => store.backendSyncMode, () => { void loadAuditEvents() })
+watch(
+  [() => store.backgroundStarted, tab, () => store.activePage?.id, () => store.backendSyncMode],
+  () => { void loadAuditEvents() },
+  { immediate: true },
+)
 watch(() => pheromoneState.openRequest, () => { tab.value = 'audit' })
 onMounted(() => {
   if (pheromoneState.draft || pheromoneState.openRequest > 0) tab.value = 'audit'

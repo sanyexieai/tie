@@ -49,8 +49,10 @@ watch(() => backend.workspaces.map((workspace) => workspace.id).join('\n'), () =
   if (backend.connected && store.initialized) void store.reloadWorkspace()
 })
 
-watch(() => store.initialized, (ready) => {
-  if (ready && supportsAgentSkills.value && '__TAURI_INTERNALS__' in window) void store.refreshSkills()
+watch(() => store.backgroundStarted, (ready) => {
+  if (ready && supportsAgentSkills.value && '__TAURI_INTERNALS__' in window) {
+    void store.refreshSkills().catch((error) => { console.warn('技能列表加载失败', error) })
+  }
 }, { immediate: true })
 
 async function createTopLevel() { await store.createPage(null) }

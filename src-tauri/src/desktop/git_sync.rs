@@ -276,37 +276,41 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub(crate) fn list_page_audit_events(
+pub(crate) async fn list_page_audit_events(
     app: AppHandle,
     source_id: String,
     page_id: String,
     limit: Option<usize>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let root = source_dir(&app, &source_id)?;
-    let path = root.join(".tie").join("audit").join("events.jsonl");
-    if !path.is_file() {
-        return Ok(Vec::new());
-    }
-    let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    let cap = limit.unwrap_or(40).max(1);
-    let mut events = Vec::new();
-    for line in raw.lines().rev() {
-        if events.len() >= cap {
-            break;
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = source_dir(&app, &source_id)?;
+        let path = root.join(".tie").join("audit").join("events.jsonl");
+        if !path.is_file() {
+            return Ok(Vec::new());
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+        let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        let cap = limit.unwrap_or(40).max(1);
+        let mut events = Vec::new();
+        for line in raw.lines().rev() {
+            if events.len() >= cap {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            if value.get("pageId").and_then(|item| item.as_str()) != Some(page_id.as_str()) {
+                continue;
+            }
+            events.push(value);
         }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
-        if value.get("pageId").and_then(|item| item.as_str()) != Some(page_id.as_str()) {
-            continue;
-        }
-        events.push(value);
-    }
-    Ok(events)
+        Ok(events)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

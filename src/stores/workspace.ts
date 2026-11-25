@@ -4,7 +4,8 @@ import { backendService, isBackendRemoteSourceId, isBackendSourceId } from '@/se
 import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageContentEqual, pageSourceIds, pageWriteEqual, prunePageSources, remapPageSourceIds, withPageSources } from '@/services/page-sources'
 import { reconcileSaveAgainstRemote } from '@/services/save-reconcile'
 import { isLocalWinningConflict } from '@/services/storage/sync-merge'
-import { loadLocalS3Providers, refreshS3Providers, s3StorageSource, takeS3SourceIdRemap, buildS3SourceIdHealingRemap } from '@/services/s3'
+import { loadLocalS3Providers, loadS3ProviderMetadata, refreshS3Providers, s3StorageSource, takeS3SourceIdRemap, buildS3SourceIdHealingRemap } from '@/services/s3'
+import { captureStartupPages, mergeStartupPages, pageChangedSinceStartup } from '@/services/startup-pages'
 import { isCloudStorageSourceId, isLocalStorageSourceId } from '@/services/storage-identity'
 import { dedupeStorageSources, isWorkspaceFileSource, uniqueSourceIds } from '@/services/storage-sources'
 import { sourceStatusStore, syncQueue, storageRegistry } from '@/services/storage'
@@ -74,6 +75,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const saving = ref(false)
   const reloading = ref(false)
   const initialized = ref(false)
+  const initializationStage = ref('正在准备应用…')
+  const backgroundStarted = ref(false)
   const favoritePageIds = ref<PageId[]>([])
   const recentPageIds = ref<PageId[]>([])
   const collapsedPageIds = ref<PageId[]>([])
@@ -84,6 +87,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const syncQueueVersion = ref(0)
   const syncConflicts = ref<Map<PageId, SyncConflict & { sourceId: string }>>(new Map())
   const syncConflictsCount = computed(() => syncConflicts.value.size)
+  let updatingStartupSources = false
   const syncConflictPages = computed(() => [...syncConflicts.value.entries()]
     .map(([pageId, conflict]) => {
       const page = pages.value.find((item) => item.id === pageId)
@@ -274,7 +278,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (storageSourceOrder.value.join('\n') !== previous) persistPreferences()
     // 源列表就绪或变更后清掉异机/已删源留下的幽灵绑定。
     const known = knownStorageSourceIds()
-    if (!known.size || !pages.value.length) return
+    if (updatingStartupSources || !known.size || !pages.value.length) return
     const next = pages.value.map((page) => prunePageSources(page, known))
     if (next.some((page, index) => pageSourceIds(page).join('\0') !== pageSourceIds(pages.value[index]!).join('\0'))) {
       pages.value = next
@@ -292,20 +296,21 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function initialize() {
     try {
-      await refreshS3Providers({ migrateLegacy: true })
+      initializationStage.value = '正在读取存储配置…'
+      const metadataRemap = await loadS3ProviderMetadata()
       const s3Remap = new Map([
         ...buildS3SourceIdHealingRemap([]),
-        ...takeS3SourceIdRemap(),
+        ...metadataRemap,
       ])
+      initializationStage.value = '正在读取知识库文件…'
       const snapshot = await workspaceService.loadLocal()
+      initializationStage.value = '正在恢复页面…'
       // loadLocal 已做过 healing；这里再合并一次 take 的瞬时 remap，避免竞态漏映射。
       const healed = s3Remap.size
         ? snapshot.pages.map((page) => remapPageSourceIds(page, s3Remap))
         : snapshot.pages
       workspace.value = snapshot.workspace
       setPages(healed)
-      void persistLegacyWorkspaceHrefs(healed)
-      void runPendingWorkspaceMigrations()
       const preferences = workspaceService.loadPreferences(snapshot.workspace.id)
       favoritePageIds.value = preferences.favoritePageIds
       recentPageIds.value = preferences.recentPageIds
@@ -322,13 +327,37 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       syncStorageSourceOrder()
       if (s3Remap.size) persistPreferences()
       if (activePageId.value) expandPageAncestors(activePageId.value)
-      void refreshBackendSyncCursor()
     } catch (error) {
       console.error('工作区初始化失败', error)
     } finally {
       initialized.value = true
     }
-    void bootstrapRemoteSync()
+  }
+
+  let backgroundInitialization: Promise<void> | null = null
+  function initializeBackground() {
+    backgroundStarted.value = true
+    if (backgroundInitialization) return backgroundInitialization
+    backgroundInitialization = (async () => {
+      updatingStartupSources = true
+      try {
+        await refreshS3Providers({ migrateLegacy: true })
+        const remap = new Map([...buildS3SourceIdHealingRemap(pages.value), ...takeS3SourceIdRemap()])
+        if (remap.size) {
+          setPages(pages.value.map((page) => remapPageSourceIds(page, remap)))
+          storageSourceOrder.value = storageSourceOrder.value.map((id) => remap.get(id) ?? id)
+          syncStorageSourceOrder()
+          persistPreferences()
+        }
+      } finally {
+        updatingStartupSources = false
+      }
+      await persistLegacyWorkspaceHrefs(captureStartupPages(pages.value))
+      await runPendingWorkspaceMigrations()
+      await refreshBackendSyncCursor()
+      await bootstrapRemoteSync()
+    })()
+    return backgroundInitialization
   }
 
   function applySyncResults(results: SyncResult[]) {
@@ -355,13 +384,16 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function bootstrapRemoteSync() {
     try {
+      const beforeFlush = captureStartupPages(pages.value)
       const flushed = await workspaceService.flushSyncQueue()
       if (flushed.length) {
-        setPages([...pages.value.filter((item) => !flushed.some((page) => page.id === item.id)), ...flushed])
+        setPages(mergeStartupPages(beforeFlush, flushed, pages.value))
       }
-      const { snapshot, syncResults } = await workspaceService.loadWithSync(pages.value)
-      workspace.value = snapshot.workspace
-      setPages([...snapshot.pages, ...pages.value])
+      const before = captureStartupPages(pages.value)
+      const initialWorkspace = workspace.value
+      const { snapshot, syncResults } = await workspaceService.loadWithSync(before)
+      if (workspace.value === initialWorkspace) workspace.value = snapshot.workspace
+      setPages(mergeStartupPages(before, snapshot.pages, pages.value))
       void persistLegacyWorkspaceHrefs(snapshot.pages)
       applySyncResults(syncResults)
       syncStorageSourceOrder()
@@ -371,9 +403,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function applyWorkspaceReload() {
-    const beforeById = new Map(pages.value.map((page) => [page.id, page]))
-    const { snapshot, syncResults } = await workspaceService.loadWithSync(pages.value)
-    workspace.value = snapshot.workspace
+    const before = captureStartupPages(pages.value)
+    const initialWorkspace = workspace.value
+    const beforeById = new Map(before.map((page) => [page.id, page]))
+    const { snapshot, syncResults } = await workspaceService.loadWithSync(before)
+    if (workspace.value === initialWorkspace) workspace.value = snapshot.workspace
     const conflictById = new Map(
       syncResults.flatMap((result) => result.conflicts.map((item) => [item.pageId, item] as const)),
     )
@@ -395,7 +429,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const incomingIds = new Set(incoming.map((page) => page.id))
     // 快照未带回的本机页（同步缺口、仅内存）不能静默丢掉。
     const retained = [...beforeById.values()].filter((page) => !incomingIds.has(page.id))
-    setPages([...incoming, ...retained])
+    setPages(mergeStartupPages(before, [...incoming, ...retained], pages.value))
     void persistLegacyWorkspaceHrefs(incoming)
     applySyncResults(syncResults)
     const availablePageIds = new Set(pages.value.filter((page) => !page.deletedAt).map((page) => page.id))
@@ -1018,7 +1052,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   /** 同一页面的保存串行化，避免自动保存重叠时误用旧 expectedUpdatedAt。 */
   const persistChains = new Map<PageId, Promise<void>>()
 
-  async function persist(page: Page, options?: { force?: boolean; restore?: boolean; sync?: boolean }) {
+  async function persist(page: Page, options?: { force?: boolean; restore?: boolean; sync?: boolean; onlyIfUnchanged?: Page }) {
     const prior = persistChains.get(page.id) ?? Promise.resolve()
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
@@ -1027,6 +1061,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     await prior.catch(() => undefined)
     saving.value = true
     try {
+      if (options?.onlyIfUnchanged) {
+        const current = pages.value.find((item) => item.id === page.id)
+        if (!current || pageChangedSinceStartup(current, options.onlyIfUnchanged)) return
+      }
       await persistUnlocked(page, options)
     } finally {
       saving.value = false
@@ -1037,16 +1075,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function runPendingWorkspaceMigrations() {
     try {
+      const originals = captureStartupPages(pages.value)
+      const before = new Map(originals.map((page) => [page.id, page]))
       await runFileHrefMigrationOnce({
-        pages: pages.value,
+        pages: originals,
         sources: allSources.value,
-        adoptPageMarkdown: (pageId, markdown) => {
-          pages.value = pages.value.map((item) => (
-            item.id === pageId ? { ...item, markdown } : item
-          ))
-        },
         persistPage: async (page) => {
-          await persist(page)
+          const original = before.get(page.id)
+          if (original) await persist(page, { onlyIfUnchanged: original })
         },
       })
     } catch (error) {
@@ -1063,7 +1099,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       const current = pages.value.find((item) => item.id === page.id)
       if (current && current.markdown !== page.markdown && current.markdown !== migrated.markdown) continue
       try {
-        await persist(migrated)
+        await persist(migrated, { onlyIfUnchanged: page })
       } catch (error) {
         console.warn('旧工作区链接写回失败', page.id, error)
       }
@@ -1675,7 +1711,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, pageBackendSync, saving, reloading, initialized, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncBackendNow, scheduleBackendSync, backendSyncMode, backendSyncRunning, backendSyncProgress, backendSyncLastCompletedAt, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, pageBackendSync, saving, reloading, initialized, initializationStage, backgroundStarted, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, initializeBackground, reloadWorkspace, syncBackendSources, syncBackendNow, scheduleBackendSync, backendSyncMode, backendSyncRunning, backendSyncProgress, backendSyncLastCompletedAt, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })
 
 if (import.meta.hot) {

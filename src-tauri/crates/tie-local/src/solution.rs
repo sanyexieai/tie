@@ -5,6 +5,7 @@
 
 use crate::paths::filename_stem;
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tie_common::fs_path::{canonicalize, paths_equal};
@@ -261,8 +262,9 @@ fn allocate_named_tie(
     dir: &Path,
     stem: &str,
     keep: Option<&Path>,
-    reserved: &[PathBuf],
+    reserved: &HashSet<String>,
 ) -> PathBuf {
+    let keep_key = keep.map(solution_path_key);
     for n in 0..10_000 {
         let name = if n == 0 {
             format!("{stem}.{SOLUTION_EXT}")
@@ -270,15 +272,29 @@ fn allocate_named_tie(
             format!("{stem}-{}.{SOLUTION_EXT}", n + 1)
         };
         let candidate = dir.join(name);
-        if reserved.iter().any(|path| paths_equal(path, &candidate)) {
+        let candidate_key = solution_path_key(&candidate);
+        if reserved.contains(&candidate_key) {
             continue;
         }
-        let ours = keep.is_some_and(|path| paths_equal(path, &candidate));
+        let ours = keep_key.as_ref() == Some(&candidate_key);
         if !candidate.exists() || ours {
             return candidate;
         }
     }
     dir.join(format!("workspace.{SOLUTION_EXT}"))
+}
+
+fn solution_path_key(path: &Path) -> String {
+    let path = canonicalize(path);
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        text.replace('/', "\\").to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        text.into_owned()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -319,20 +335,22 @@ pub fn sync_root_tie_files(
         })
         .collect();
 
-    let mut reserved = Vec::new();
+    let mut current_by_page = HashMap::new();
+    for item in &managed {
+        current_by_page.entry(item.1.root_page.as_str()).or_insert(item.0.as_path());
+    }
+    let mut reserved = HashSet::new();
     let mut assigned = Vec::new();
     for page in roots {
         let stem = filename_stem(&page.title, "无标题");
-        let current = managed
-            .iter()
-            .find(|(_, solution)| solution.root_page == page.id);
+        let current = current_by_page.get(page.id.as_str()).copied();
         let path = allocate_named_tie(
             root,
             &stem,
-            current.map(|(path, _)| path.as_path()),
+            current,
             &reserved,
         );
-        if let Some((old, _)) = current {
+        if let Some(old) = current {
             if !paths_equal(old, &path) {
                 fs::rename(old, &path).map_err(|e| format!("无法重命名解决方案：{e}"))?;
             }
@@ -343,12 +361,13 @@ pub fn sync_root_tie_files(
         if fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
             write_solution(&path, &solution)?;
         }
-        reserved.push(path.clone());
+        reserved.insert(solution_path_key(&path));
         assigned.push(path);
     }
 
+    let assigned: HashSet<_> = assigned.iter().map(|path| solution_path_key(path)).collect();
     for (path, _) in managed {
-        if assigned.iter().any(|item| paths_equal(item, path)) {
+        if assigned.contains(&solution_path_key(path)) {
             continue;
         }
         let _ = fs::remove_file(path);
@@ -573,6 +592,79 @@ mod tests {
         assert_eq!(kept.root_page, "pg_b");
         assert!(!dir.join("无标题-2.tie").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_sync_keeps_existing_page_associations_and_unmanaged_solutions() {
+        let dir = env::temp_dir().join(format!("tie-root-associations-{}", crate::new_page_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut old = TieSolution::new("旧根", "src_a");
+        old.root_page = "pg_a".into();
+        write_solution(&dir.join("legacy.tie"), &old).unwrap();
+        let foreign = TieSolution::new("分类", "src_other").to_text();
+        fs::write(dir.join("分类.tie"), &foreign).unwrap();
+        let mut roots = vec![
+            RootTiePage { id: "pg_a".into(), title: "分类".into(), created_at: "1".into(), is_root: true },
+            RootTiePage { id: "pg_b".into(), title: "分类".into(), created_at: "2".into(), is_root: true },
+        ];
+        sync_root_tie_files(&dir, "src_a", &roots).unwrap();
+        assert_eq!(read_solution(&dir.join("分类-2.tie")).unwrap().root_page, "pg_a");
+        assert_eq!(read_solution(&dir.join("分类-3.tie")).unwrap().root_page, "pg_b");
+        assert!(!dir.join("legacy.tie").exists());
+        assert_eq!(fs::read_to_string(dir.join("分类.tie")).unwrap(), foreign);
+
+        roots[0].title = "重命名".into();
+        sync_root_tie_files(&dir, "src_a", &roots).unwrap();
+        assert_eq!(read_solution(&dir.join("重命名.tie")).unwrap().root_page, "pg_a");
+        assert_eq!(read_solution(&dir.join("分类-2.tie")).unwrap().root_page, "pg_b");
+        assert!(!dir.join("分类-3.tie").exists());
+        assert_eq!(fs::read_to_string(dir.join("分类.tie")).unwrap(), foreign);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_sync_reserves_symlink_targets_and_keeps_assigned_aliases_alive() {
+        let base = env::temp_dir().join(format!("tie-root-alias-{}", crate::new_page_id()));
+        let root = base.join("workspace");
+        fs::create_dir_all(&root).unwrap();
+        let alias = base.join("workspace-alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let mut old = TieSolution::new("旧根", "src_a");
+        old.root_page = "pg_a".into();
+        write_solution(&root.join("z-old.tie"), &old).unwrap();
+        std::os::unix::fs::symlink("z-old.tie", root.join("a-old.tie")).unwrap();
+        let roots = vec![
+            RootTiePage { id: "pg_a".into(), title: "Repeat".into(), created_at: "1".into(), is_root: true },
+            RootTiePage { id: "pg_b".into(), title: "Repeat".into(), created_at: "2".into(), is_root: true },
+            RootTiePage { id: "pg_c".into(), title: "z-old".into(), created_at: "3".into(), is_root: true },
+        ];
+        for _ in 0..2 {
+            sync_root_tie_files(&alias, "src_a", &roots).unwrap();
+            assert!(root.join("Repeat.tie").symlink_metadata().unwrap().file_type().is_symlink());
+            assert_eq!(read_solution(&root.join("Repeat.tie")).unwrap().root_page, "pg_a");
+            assert_eq!(read_solution(&root.join("Repeat-2.tie")).unwrap().root_page, "pg_b");
+            assert_eq!(read_solution(&root.join("z-old-2.tie")).unwrap().root_page, "pg_c");
+            assert_eq!(read_solution(&root.join("z-old.tie")).unwrap().root_page, "pg_a");
+        }
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn root_sync_keeps_windows_case_equivalent_current_path() {
+        let dir = env::temp_dir().join(format!("tie-root-case-{}", crate::new_page_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut old = TieSolution::new("MixedCase", "src_a");
+        old.root_page = "pg_a".into();
+        write_solution(&dir.join("MixedCase.tie"), &old).unwrap();
+        sync_root_tie_files(&dir.canonicalize().unwrap(), "src_a", &[
+            RootTiePage { id: "pg_a".into(), title: "mixedcase".into(), created_at: "1".into(), is_root: true },
+        ]).unwrap();
+        assert_eq!(read_solution(&dir.join("mixedcase.tie")).unwrap().root_page, "pg_a");
+        assert!(!dir.join("mixedcase-2.tie").exists());
+        assert_eq!(list_solution_files(&dir).len(), 1);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

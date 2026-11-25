@@ -167,5 +167,3 @@ export function focusPheromone(id: string) {
   pheromoneState.activeId = id
   revealChangesPanel()
 }
-
-void refreshChangeOrigin()

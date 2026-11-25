@@ -124,6 +124,12 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
+      - name: Test Windows workspace loading
+        run: cargo test -p tie-local --manifest-path src-tauri/Cargo.toml workspace::tests -- --nocapture
+
+      - name: Test Windows solution paths
+        run: cargo test -p tie-local --manifest-path src-tauri/Cargo.toml solution::tests -- --nocapture
+
       - name: Build Tauri app (Windows)
         run: npm run tauri:build:windows
         env:

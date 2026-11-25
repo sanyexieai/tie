@@ -51,18 +51,13 @@ pub fn run() {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             {
                 set_desktop_window_icon(_app);
-                let handle = _app.handle().clone();
-                std::thread::spawn(move || {
-                    if let Err(error) = codex_mcp::refresh_mcp_and_skills_on_startup(&handle) {
-                        eprintln!("[tie] MCP/Skill startup sync skipped: {error}");
-                    }
-                });
             }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             update::download_update_file,
             load_mobile_workspace,
+            s3::load_s3_provider_metadata,
             s3::load_s3_providers,
             s3::save_s3_providers,
             s3::upsert_s3_provider,
@@ -170,6 +165,8 @@ pub fn run() {
             ai_cli::ai_cli_status,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             ai_cli::ai_cli_suggest_tags,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            codex_mcp::refresh_startup_integrations,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             codex_mcp::locate_tie_cli,
             codex_mcp::agent_mcp_status,

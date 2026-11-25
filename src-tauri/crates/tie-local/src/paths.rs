@@ -92,11 +92,7 @@ fn read_frontmatter_id(path: &Path) -> Option<String> {
 }
 
 pub fn find_page_file(root: &Path, page_id: &str) -> Option<PathBuf> {
-    let legacy = markdown_path(root, page_id);
-    if legacy.is_file() && read_frontmatter_id(&legacy).as_deref() == Some(page_id) {
-        return Some(legacy);
-    }
-    if let Some(path) = meta_page_file(root, page_id) {
+    if let Some(path) = indexed_page_file(root, page_id) {
         return Some(path);
     }
     let dir = root.join("pages");
@@ -113,10 +109,28 @@ pub fn find_page_file(root: &Path, page_id: &str) -> Option<PathBuf> {
     None
 }
 
+/// Resolve direct legacy names or a sidecar without scanning every page.
+pub(crate) fn indexed_page_file(root: &Path, page_id: &str) -> Option<PathBuf> {
+    let legacy = markdown_path(root, page_id);
+    if legacy.is_file() && read_frontmatter_id(&legacy).as_deref() == Some(page_id) {
+        return Some(legacy);
+    }
+    meta_page_file(root, page_id)
+}
+
 /// `pages/<标题>.md`. A second page with the same title gets `pages/<标题>-2.md`, then `-3`, and so on.
 pub fn allocate_page_path(root: &Path, page_id: &str, title: &str) -> PathBuf {
-    let dir = root.join("pages");
     let current = find_page_file(root, page_id);
+    allocate_page_path_with_current(root, page_id, title, current.as_deref())
+}
+
+pub(crate) fn allocate_page_path_with_current(
+    root: &Path,
+    page_id: &str,
+    title: &str,
+    current: Option<&Path>,
+) -> PathBuf {
+    let dir = root.join("pages");
     let stem = filename_stem(title, "无标题");
     for n in 0..10_000 {
         let name = if n == 0 {
@@ -125,7 +139,7 @@ pub fn allocate_page_path(root: &Path, page_id: &str, title: &str) -> PathBuf {
             format!("{stem}-{}.md", n + 1)
         };
         let candidate = dir.join(&name);
-        let ours = current.as_ref().is_some_and(|path| paths_equal(path, &candidate))
+        let ours = current.is_some_and(|path| paths_equal(path, &candidate))
             || (candidate.is_file() && read_frontmatter_id(&candidate).as_deref() == Some(page_id));
         if !candidate.exists() || ours {
             return candidate;

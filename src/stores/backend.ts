@@ -56,10 +56,10 @@ export const useBackendStore = defineStore('backend', () => {
   async function initialize() {
     if (initialized.value) return
     initialized.value = true
-    profile.value = await backendService.readSession()
-    if (!profile.value.accessToken) return
     loading.value = true
     try {
+      profile.value = await backendService.readSession()
+      if (!profile.value.accessToken) return
       await backendService.refresh(profile.value, false)
       profile.value.user = await backendService.me(profile.value)
       await backendService.publishSession(profile.value)
