@@ -58,6 +58,18 @@ function readMeta(workspaceId, pageId) {
   }
 }
 
+function readMetaByFile(workspaceId) {
+  const byFile = new Map()
+  const dir = path.join(store.workspaceDir(workspaceId), '.tie', 'meta')
+  if (!fs.existsSync(dir)) return byFile
+  for (const name of fs.readdirSync(dir)) {
+    const meta = readMeta(workspaceId, name)
+    // Match readFilePage's first metadata entry when files are duplicated.
+    if (meta && !byFile.has(meta.file)) byFile.set(meta.file, meta)
+  }
+  return byFile
+}
+
 function resolveWorkspaceFile(workspaceId, relative) {
   if (!relative || relative.includes(':')) return null
   const parts = relative.split(/[/\\]/).filter((part) => part && part !== '.')
@@ -93,10 +105,14 @@ function pageFromMeta(meta, markdown) {
   })
 }
 
-function readFilePage(workspaceId, filePath) {
+function readFilePage(workspaceId, filePath, metaByFile) {
   const content = fs.readFileSync(filePath, 'utf8')
   if (isTieDocument(content)) return { page: repairPage(parsePage(content)), legacy: true, filePath }
   const relative = path.relative(store.workspaceDir(workspaceId), filePath).split(path.sep).join('/')
+  if (metaByFile) {
+    const meta = metaByFile.get(relative)
+    return meta ? { page: pageFromMeta(meta, content), legacy: false, filePath } : null
+  }
   const metaDir = path.join(store.workspaceDir(workspaceId), '.tie', 'meta')
   if (!fs.existsSync(metaDir)) return null
   for (const name of fs.readdirSync(metaDir)) {
@@ -116,8 +132,9 @@ function locatePageFile(workspaceId, pageId) {
   if (fs.existsSync(legacy)) return legacy
   const dir = store.workspacePagesDir(workspaceId)
   if (!fs.existsSync(dir)) return null
+  const metaByFile = readMetaByFile(workspaceId)
   for (const filePath of listMarkdownFiles(dir)) {
-    const found = readFilePage(workspaceId, filePath)
+    const found = readFilePage(workspaceId, filePath, metaByFile)
     if (found?.page.id === pageId) return filePath
   }
   return null
@@ -164,8 +181,9 @@ function readAllPages(workspaceId) {
   const dir = store.workspacePagesDir(workspaceId)
   const pages = []
   const seen = new Set()
+  const metaByFile = readMetaByFile(workspaceId)
   for (const filePath of listMarkdownFiles(dir)) {
-    const found = readFilePage(workspaceId, filePath)
+    const found = readFilePage(workspaceId, filePath, metaByFile)
     if (!found || seen.has(found.page.id)) continue
     seen.add(found.page.id)
     pages.push(found)
