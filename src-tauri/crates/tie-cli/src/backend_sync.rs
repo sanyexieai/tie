@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Write,
     path::Path,
@@ -29,6 +29,32 @@ pub struct BackendSyncReport {
     pub pulled: u32,
     pub conflicts: Vec<String>,
     pub user_email: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendSyncStage {
+    Connecting,
+    Pages,
+    Assets,
+    Files,
+    Reviews,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct BackendSyncProgress {
+    pub stage: BackendSyncStage,
+    pub completed: usize,
+    pub total: usize,
+}
+
+pub(crate) fn report_progress(
+    observe: &mut dyn FnMut(BackendSyncProgress),
+    stage: BackendSyncStage,
+    completed: usize,
+    total: usize,
+) {
+    observe(BackendSyncProgress { stage, completed, total });
 }
 
 #[derive(Clone, Debug)]
@@ -151,9 +177,18 @@ fn authenticate(
 }
 
 pub fn sync_workspace(ws: &LocalWorkspace) -> Result<BackendSyncReport, String> {
+    sync_workspace_with_progress(ws, &mut |_| {})
+}
+
+fn sync_workspace_with_progress(
+    ws: &LocalWorkspace,
+    observe: &mut dyn FnMut(BackendSyncProgress),
+) -> Result<BackendSyncReport, String> {
+    report_progress(observe, BackendSyncStage::Connecting, 0, 3);
     let target = read_config(ws.root())?.ok_or("未配置后台。请指定 --backend-url 和 --backend-workspace")?;
     let session = ensure_session(false)?;
-    let result = sync_as_user(&target, &session, ws);
+    report_progress(observe, BackendSyncStage::Connecting, 1, 3);
+    let result = sync_as_user(&target, &session, ws, observe);
     match &result {
         Ok(report) => write_status(ws.root(), report),
         Err(message) => write_status(
@@ -178,13 +213,16 @@ fn sync_as_user(
     target: &BackendTarget,
     session: &tie_local::backend_session::BackendSession,
     ws: &LocalWorkspace,
+    observe: &mut dyn FnMut(BackendSyncProgress),
 ) -> Result<BackendSyncReport, String> {
     if !same_backend_endpoint(&session.endpoint, &target.url) {
         return Err("当前登录的后台和这个工作区配置的后台不是同一台".to_owned());
     }
     let client = http_client()?;
     let me = fetch_me(&client, session)?;
+    report_progress(observe, BackendSyncStage::Connecting, 2, 3);
     let owned = list_owned_workspaces(&client, session)?;
+    report_progress(observe, BackendSyncStage::Connecting, 3, 3);
     if !owned.iter().any(|id| id == &target.workspace_id) {
         return Err(format!(
             "工作区 {} 不属于当前用户 {}",
@@ -196,12 +234,23 @@ fn sync_as_user(
     } else {
         session.name.clone()
     };
-    let mut report = sync_with(target, &session.access_token, ws, &actor)?;
+    let mut report = sync_with_progress(target, &session.access_token, ws, &actor, observe)?;
     report.user_email = me.email;
     Ok(report)
 }
 
+#[cfg(test)]
 fn sync_with(target: &BackendTarget, token: &str, ws: &LocalWorkspace, actor: &str) -> Result<BackendSyncReport, String> {
+    sync_with_progress(target, token, ws, actor, &mut |_| {})
+}
+
+fn sync_with_progress(
+    target: &BackendTarget,
+    token: &str,
+    ws: &LocalWorkspace,
+    actor: &str,
+    observe: &mut dyn FnMut(BackendSyncProgress),
+) -> Result<BackendSyncReport, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .no_proxy()
@@ -217,6 +266,10 @@ fn sync_with(target: &BackendTarget, token: &str, ws: &LocalWorkspace, actor: &s
     let mut pushed = 0u32;
     let mut pulled = 0u32;
     let mut conflicts = Vec::new();
+    let pages_total = local_pages.iter().map(|page| page.id.as_str())
+        .chain(remote_by_id.keys().map(String::as_str)).collect::<HashSet<_>>().len();
+    let mut pages_completed = HashSet::new();
+    report_progress(observe, BackendSyncStage::Pages, 0, pages_total);
 
     for local in &local_pages {
         let remote = remote_by_id.remove(&local.id);
@@ -255,6 +308,9 @@ fn sync_with(target: &BackendTarget, token: &str, ws: &LocalWorkspace, actor: &s
                 }
             }
         }
+        if pages_completed.insert(local.id.clone()) {
+            report_progress(observe, BackendSyncStage::Pages, pages_completed.len(), pages_total);
+        }
     }
 
     let mut purged = Vec::new();
@@ -274,6 +330,9 @@ fn sync_with(target: &BackendTarget, token: &str, ws: &LocalWorkspace, actor: &s
             }
             Action::Push | Action::Conflict => {}
         }
+        if pages_completed.insert(remote.id.clone()) {
+            report_progress(observe, BackendSyncStage::Pages, pages_completed.len(), pages_total);
+        }
     }
 
     if !purged.is_empty() {
@@ -284,7 +343,12 @@ fn sync_with(target: &BackendTarget, token: &str, ws: &LocalWorkspace, actor: &s
         if !response.status().is_success() {
             return Err(format!("永久删除尚未同步：{}", response.status()));
         }
-        for id in &purged { cursor.remove(id); }
+        for id in &purged {
+            cursor.remove(id);
+            if pages_completed.insert(id.clone()) {
+                report_progress(observe, BackendSyncStage::Pages, pages_completed.len(), pages_total);
+            }
+        }
         pushed += purged.len() as u32;
     }
 
@@ -293,10 +357,14 @@ fn sync_with(target: &BackendTarget, token: &str, ws: &LocalWorkspace, actor: &s
         &format!("{}/api/v1/workspaces/{}", target.url.trim_end_matches('/'), target.workspace_id),
         token,
         ws,
+        observe,
     )?;
     write_cursor(ws.root(), &cursor)?;
-    for page_id in review_page_ids(ws.root()) {
+    let review_ids = review_page_ids(ws.root());
+    report_progress(observe, BackendSyncStage::Reviews, 0, review_ids.len());
+    for (index, page_id) in review_ids.iter().enumerate() {
         let _ = exchange_reviews(&client, target, token, ws.root(), &page_id);
+        report_progress(observe, BackendSyncStage::Reviews, index + 1, review_ids.len());
     }
     let mode = if conflicts.is_empty() { "synced" } else { "conflict" };
     let message = if conflicts.is_empty() {
@@ -771,13 +839,23 @@ fn write_cursor(root: &Path, cursor: &HashMap<String, CursorEntry>) -> Result<()
 /// server is kept, so a folder stays on the workspace it already aligned with.
 /// Otherwise the folder binds to the account workspace the caller picked.
 pub fn align(ws: &LocalWorkspace, url: &str, workspace_id: &str) -> Result<BackendSyncReport, String> {
+    align_with_progress(ws, url, workspace_id, |_| {})
+}
+
+pub fn align_with_progress(
+    ws: &LocalWorkspace,
+    url: &str,
+    workspace_id: &str,
+    mut observe: impl FnMut(BackendSyncProgress),
+) -> Result<BackendSyncReport, String> {
     let url = normalize_endpoint(url)?;
     if let Some(target) = read_config(ws.root())? {
         if normalize_endpoint(&target.url)? == url {
-            return sync_workspace(ws);
+            return sync_workspace_with_progress(ws, &mut observe);
         }
     }
-    enable(ws, &url, workspace_id.trim())
+    write_config(ws.root(), &url, workspace_id.trim())?;
+    sync_workspace_with_progress(ws, &mut observe)
 }
 
 /// Keep one side of a page both clients changed, then record a fresh cursor.
@@ -1309,6 +1387,92 @@ mod tests {
         assert_eq!(next.pushed, 0);
         assert_eq!(next.pulled, 0);
         assert!(local.resolve("pg_purged").unwrap().is_none());
+        drop(server);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn alignment_reports_actual_stage_totals_and_completion() {
+        let dir = std::env::temp_dir().join(format!("tie-sync-progress-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let local = LocalWorkspace::init(&dir.join("local"), "src_test").unwrap();
+        let remote = LocalWorkspace::init(&dir.join("remote"), "src_test").unwrap();
+        let stamp = "2026-01-02T00:00:00.000Z";
+        for id in ["pg_local", "pg_shared"] {
+            save_page_to_root(local.root(), page(id, id, stamp), None).unwrap();
+        }
+        for id in ["pg_remote", "pg_shared"] {
+            save_page_to_root(remote.root(), page(id, id, stamp), None).unwrap();
+        }
+        for id in ["file_local", "file_shared", "file_remote"] {
+            let meta = json!({ "id": id, "title": id, "kind": "file", "mode": "link",
+                "sourcePath": "/fixture/reference.txt", "updatedAt": stamp });
+            if id != "file_remote" { local.files().upsert_metadata(&meta).unwrap(); }
+            if id != "file_local" { remote.files().upsert_metadata(&meta).unwrap(); }
+        }
+        add_opinion(local.root(), "pg_local", "op_local", "test", "note", "", "local record").unwrap();
+        add_opinion(remote.root(), "pg_remote", "op_remote", "test", "note", "", "remote record").unwrap();
+        let root = remote.root().to_owned();
+        let server = crate::test_http::Server::start(move |request, body| {
+            if request.starts_with("GET /api/v1/me ") {
+                return (200, br#"{"email":"test@example.com"}"#.to_vec());
+            }
+            if request.starts_with("GET /api/v1/workspaces ") {
+                return (200, br#"[{"id":"ws_test"}]"#.to_vec());
+            }
+            let request = request.replace("/api/v1/workspaces/ws_test", "");
+            let parts: Vec<_> = request.split_whitespace().collect();
+            let path: Vec<_> = parts[1].trim_start_matches('/').split('/').collect();
+            let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
+            match path.as_slice() {
+                ["pages"] => (200, serde_json::to_vec(&ws.load_all(true).unwrap()).unwrap()),
+                ["pages", _id] if parts[0] == "PUT" => {
+                    let saved = save_page_to_root(&root, serde_json::from_slice(body).unwrap(), None).unwrap();
+                    (200, serde_json::to_vec(&saved).unwrap())
+                }
+                ["pages", id, "reviews"] => {
+                    if parts[0] == "PUT" {
+                        write_reviews(&root, id, &serde_json::from_slice(body).unwrap()).unwrap();
+                    }
+                    (200, serde_json::to_vec(&read_review_file(&root, id)).unwrap())
+                }
+                _ => crate::resources_sync::tests::respond(&root, &request, body),
+            }
+        });
+        let session_dir = dir.join("session");
+        tie_local::backend_session::write_session_at(&session_dir, &tie_local::backend_session::BackendSession {
+            endpoint: server.url.clone(), access_token: String::new(), refresh_token: String::new(),
+            access_expires_at: String::new(), user_id: "test-user".into(),
+            email: "test@example.com".into(), name: "test".into(),
+        }).unwrap();
+        let previous = std::env::var_os("TIE_APP_DATA");
+        std::env::set_var("TIE_APP_DATA", &session_dir);
+        let mut progress = Vec::new();
+        let result = align_with_progress(&local, &server.url, "ws_test", |step| progress.push(step));
+        if let Some(previous) = previous {
+            std::env::set_var("TIE_APP_DATA", previous);
+        } else {
+            std::env::remove_var("TIE_APP_DATA");
+        }
+        let report = result.unwrap();
+        assert_eq!((report.pushed, report.pulled), (1, 1));
+        let expected = [
+            (BackendSyncStage::Connecting, 3), (BackendSyncStage::Pages, 3),
+            (BackendSyncStage::Assets, 3), (BackendSyncStage::Files, 3),
+            (BackendSyncStage::Reviews, 2),
+        ];
+        let mut stages: Vec<_> = progress.iter().map(|step| step.stage).collect();
+        stages.dedup();
+        assert_eq!(stages, expected.map(|(stage, _)| stage));
+        for (stage, total) in expected {
+            let actual: Vec<_> = progress.iter().copied().filter(|step| step.stage == stage).collect();
+            let expected: Vec<_> = (0..=total).map(|completed| BackendSyncProgress { stage, completed, total }).collect();
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(serde_json::to_value(progress[0]).unwrap(), json!({ "stage": "connecting", "completed": 0, "total": 3 }));
+        assert_eq!(local.load_all(true).unwrap().len(), 3);
+        assert_eq!(local.files().all_metadata().len(), 3);
+        assert_eq!(remote.files().all_metadata().len(), 3);
         drop(server);
         fs::remove_dir_all(dir).unwrap();
     }

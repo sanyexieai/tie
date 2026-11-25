@@ -1,22 +1,27 @@
 use reqwest::blocking::{Client, Response};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
 use tie_local::{page_asset_dir, LocalWorkspace};
+use crate::backend_sync::{report_progress, BackendSyncProgress, BackendSyncStage};
 
 pub(crate) fn sync_resources(
     client: &Client,
     base: &str,
     token: &str,
     ws: &LocalWorkspace,
+    observe: &mut dyn FnMut(BackendSyncProgress),
 ) -> Result<(), String> {
-    for page in ws.load_all(true)? {
+    let pages = ws.load_all(true)?;
+    report_progress(observe, BackendSyncStage::Assets, 0, pages.len());
+    for (index, page) in pages.iter().enumerate() {
         sync_assets(client, base, token, ws.root(), &page.id)?;
+        report_progress(observe, BackendSyncStage::Assets, index + 1, pages.len());
     }
-    sync_files(client, base, token, ws)
+    sync_files(client, base, token, ws, observe)
 }
 
 fn checked(response: Result<Response, reqwest::Error>) -> Result<Response, String> {
@@ -185,7 +190,13 @@ fn download_file(
     ws.files().upsert_metadata(&meta)
 }
 
-fn sync_files(client: &Client, base: &str, token: &str, ws: &LocalWorkspace) -> Result<(), String> {
+fn sync_files(
+    client: &Client,
+    base: &str,
+    token: &str,
+    ws: &LocalWorkspace,
+    observe: &mut dyn FnMut(BackendSyncProgress),
+) -> Result<(), String> {
     let response: Value = checked(
         client
             .get(format!("{base}/files"))
@@ -202,30 +213,41 @@ fn sync_files(client: &Client, base: &str, token: &str, ws: &LocalWorkspace) -> 
     for meta in files {
         remote.insert(check_file(meta)?.to_owned(), meta);
     }
-    for local in ws.files().all_metadata() {
+    let local_files = ws.files().all_metadata();
+    let total = local_files.iter().map(|meta| field(meta, "id"))
+        .chain(remote.keys().map(String::as_str)).collect::<HashSet<_>>().len();
+    let mut completed = HashSet::new();
+    report_progress(observe, BackendSyncStage::Files, 0, total);
+    for local in local_files {
         let id = check_file(&local)?;
-        let Some(other) = remote.remove(id) else {
-            upload_file(client, base, token, ws.root(), &local)?;
-            continue;
-        };
-        let local_stamp = field(&local, "updatedAt");
-        let remote_stamp = field(other, "updatedAt");
-        if local_stamp > remote_stamp {
-            upload_file(client, base, token, ws.root(), &local)?;
-        } else if local_stamp < remote_stamp {
-            download_file(client, base, token, ws, other)?;
-        } else if field(&local, "mode") == "copy" {
-            if copy_path(ws.root(), &local)?.is_file() {
-                if other.get("exists").and_then(Value::as_bool) == Some(false) {
-                    upload_file(client, base, token, ws.root(), &local)?;
-                }
-            } else {
+        if let Some(other) = remote.remove(id) {
+            let local_stamp = field(&local, "updatedAt");
+            let remote_stamp = field(other, "updatedAt");
+            if local_stamp > remote_stamp {
+                upload_file(client, base, token, ws.root(), &local)?;
+            } else if local_stamp < remote_stamp {
                 download_file(client, base, token, ws, other)?;
+            } else if field(&local, "mode") == "copy" {
+                if copy_path(ws.root(), &local)?.is_file() {
+                    if other.get("exists").and_then(Value::as_bool) == Some(false) {
+                        upload_file(client, base, token, ws.root(), &local)?;
+                    }
+                } else {
+                    download_file(client, base, token, ws, other)?;
+                }
             }
+        } else {
+            upload_file(client, base, token, ws.root(), &local)?;
+        }
+        if completed.insert(id.to_owned()) {
+            report_progress(observe, BackendSyncStage::Files, completed.len(), total);
         }
     }
     for other in remote.into_values() {
         download_file(client, base, token, ws, other)?;
+        if completed.insert(field(other, "id").to_owned()) {
+            report_progress(observe, BackendSyncStage::Files, completed.len(), total);
+        }
     }
     Ok(())
 }
@@ -325,7 +347,7 @@ pub(crate) mod tests {
             respond(&remote_root, request, body)
         });
         let client = Client::builder().no_proxy().build().unwrap();
-        sync_resources(&client, &server.url, "", &local).unwrap();
+        sync_resources(&client, &server.url, "", &local, &mut |_| {}).unwrap();
         assert_eq!(
             fs::read(local_assets.join("download.png")).unwrap(),
             b"download"
@@ -353,7 +375,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         local.files().upsert_metadata(&local_file).unwrap();
-        sync_resources(&client, &server.url, "", &local).unwrap();
+        sync_resources(&client, &server.url, "", &local, &mut |_| {}).unwrap();
         assert_eq!(
             fs::read(copy_path(remote.root(), &local_file).unwrap()).unwrap(),
             b"replacement"
@@ -366,7 +388,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         remote.files().upsert_metadata(&changed_remote).unwrap();
-        sync_resources(&client, &server.url, "", &local).unwrap();
+        sync_resources(&client, &server.url, "", &local, &mut |_| {}).unwrap();
         assert_eq!(
             fs::read(copy_path(local.root(), &changed_remote).unwrap()).unwrap(),
             b"remote replacement"
@@ -375,7 +397,7 @@ pub(crate) mod tests {
         fs::create_dir_all(&folder).unwrap();
         fs::write(folder.join("keep.txt"), b"keep").unwrap();
         let directory = local.files().ingest("copy", &folder, None).unwrap();
-        assert!(sync_resources(&client, &server.url, "", &local)
+        assert!(sync_resources(&client, &server.url, "", &local, &mut |_| {})
             .unwrap_err()
             .contains("目录副本尚未同步"));
         assert!(local

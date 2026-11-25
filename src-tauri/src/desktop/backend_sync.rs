@@ -1,4 +1,5 @@
-use tauri::AppHandle;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
 use tie_cli::backend_sync::{self, BackendSyncReport};
 
 use super::source_root;
@@ -23,7 +24,22 @@ pub(crate) async fn sync_backend_workspace(
 ) -> Result<BackendSyncReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let ws = open_workspace(&app, &source_id)?;
-        backend_sync::align(&ws, &url, &workspace_id)
+        let mut last_emit = None;
+        backend_sync::align_with_progress(&ws, &url, &workspace_id, |progress| {
+            let emit = progress.completed == 0 || progress.completed == progress.total
+                || last_emit.is_none_or(|(stage, time): (_, Instant)| {
+                    stage != progress.stage || time.elapsed() >= Duration::from_millis(100)
+                });
+            if emit {
+                let _ = app.emit("backend-sync-progress", serde_json::json!({
+                    "sourceId": source_id,
+                    "stage": progress.stage,
+                    "completed": progress.completed,
+                    "total": progress.total,
+                }));
+                last_emit = Some((progress.stage, Instant::now()));
+            }
+        })
     })
     .await
     .map_err(|error| error.to_string())?

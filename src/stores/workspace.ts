@@ -23,6 +23,14 @@ import {
 } from '@/services/codex-mcp'
 import type { Page, PageId, PageLink, PageRevision, PageTreeNode, SearchResult, StorageKind, StorageSource, TagSummary, Workspace } from '@/types'
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+
+interface BackendSyncProgress {
+  sourceId: string
+  stage: 'connecting' | 'pages' | 'assets' | 'files' | 'reviews'
+  completed: number
+  total: number
+}
 
 function sortSourcesByOrder(sources: StorageSource[], order: string[]) {
   const index = new Map(order.map((id, position) => [id, position]))
@@ -418,6 +426,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   const backendSyncMode = ref<'idle' | 'synced' | 'conflict' | 'error'>('idle')
+  const backendSyncRunning = ref(false)
+  const backendSyncProgress = ref<BackendSyncProgress | null>(null)
+  const backendSyncLastCompletedAt = ref<string | null>(null)
   const backendSyncCursor = ref<Record<string, { local: string; remote: string }>>({})
   let backendSyncWorkspaceId = ''
   let backendSyncFlight: Promise<{ pushed: number; pulled: number; conflicts: string[] }> | null = null
@@ -466,50 +477,71 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function runBackendSync() {
     const empty = { pushed: 0, pulled: 0, conflicts: [] as string[] }
-    if (!backend.connected || !backend.profile.accessToken || !desktopCanSync()) {
+    if (!backend.connected || !backend.profile.accessToken || !desktopCanSync() || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
       backendSyncMode.value = 'idle'
       return empty
     }
-    const workspaces = await backendService.listWorkspaces(backend.profile)
-    backend.workspaces = workspaces
-    const target = pickAccountWorkspace(workspaces)
-    if (!target) return empty
-    backendSyncWorkspaceId = target.id
-    const sources = (workspace.value?.sources ?? []).filter((source) => source.kind === 'local' || source.kind === 'smb')
-    let pushed = 0
-    let pulled = 0
-    const conflicts: string[] = []
-    for (const source of sources) {
-      const report = await invoke<{ pushed: number; pulled: number; conflicts: string[] }>('sync_backend_workspace', {
-        sourceId: source.id,
-        url: backend.profile.endpoint,
-        workspaceId: target.id,
+    let activeSourceId = ''
+    let unlisten: UnlistenFn | undefined
+    backendSyncRunning.value = true
+    backendSyncProgress.value = null
+    try {
+      const workspaces = await backendService.listWorkspaces(backend.profile)
+      backend.workspaces = workspaces
+      const target = pickAccountWorkspace(workspaces)
+      if (!target) return empty
+      backendSyncWorkspaceId = target.id
+      const sources = (workspace.value?.sources ?? []).filter((source) => source.kind === 'local' || source.kind === 'smb')
+      let pushed = 0
+      let pulled = 0
+      const conflicts: string[] = []
+      unlisten = await listen<BackendSyncProgress>('backend-sync-progress', ({ payload }) => {
+        if (payload.sourceId === activeSourceId) backendSyncProgress.value = payload
       })
-      pushed += report.pushed
-      pulled += report.pulled
-      conflicts.push(...report.conflicts)
+      for (const source of sources) {
+        activeSourceId = source.id
+        backendSyncProgress.value = null
+        const report = await invoke<{ pushed: number; pulled: number; conflicts: string[] }>('sync_backend_workspace', {
+          sourceId: source.id,
+          url: backend.profile.endpoint,
+          workspaceId: target.id,
+        })
+        pushed += report.pushed
+        pulled += report.pulled
+        conflicts.push(...report.conflicts)
+      }
+      if (pulled > 0) await reloadWorkspace()
+      const next = new Map(syncConflicts.value)
+      for (const id of backendConflictIds) {
+        if (!conflicts.includes(id)) next.delete(id)
+      }
+      backendConflictIds.clear()
+      for (const id of conflicts) {
+        const page = pages.value.find((item) => item.id === id)
+        next.set(id, {
+          pageId: id,
+          sourceId: page?.storageSourceId ?? sources[0]?.id ?? '',
+          localUpdatedAt: page?.updatedAt ?? '',
+          remoteUpdatedAt: page?.updatedAt ?? '',
+        })
+        backendConflictIds.add(id)
+      }
+      syncConflicts.value = next
+      backendSyncMode.value = conflicts.length ? 'conflict' : 'synced'
+      backend.error = conflicts.length ? '有页面在本地和后台都改过，未覆盖' : ''
+      await refreshBackendSyncCursor()
+      backendSyncLastCompletedAt.value = new Date().toISOString()
+      return { pushed, pulled, conflicts }
+    } catch (reason) {
+      backendSyncMode.value = 'error'
+      backend.error = reason instanceof Error ? reason.message : typeof reason === 'string' ? reason : '同步失败'
+      throw reason
+    } finally {
+      activeSourceId = ''
+      unlisten?.()
+      backendSyncProgress.value = null
+      backendSyncRunning.value = false
     }
-    if (pulled > 0) await reloadWorkspace()
-    const next = new Map(syncConflicts.value)
-    for (const id of backendConflictIds) {
-      if (!conflicts.includes(id)) next.delete(id)
-    }
-    backendConflictIds.clear()
-    for (const id of conflicts) {
-      const page = pages.value.find((item) => item.id === id)
-      next.set(id, {
-        pageId: id,
-        sourceId: page?.storageSourceId ?? sources[0]?.id ?? '',
-        localUpdatedAt: page?.updatedAt ?? '',
-        remoteUpdatedAt: page?.updatedAt ?? '',
-      })
-      backendConflictIds.add(id)
-    }
-    syncConflicts.value = next
-    backendSyncMode.value = conflicts.length ? 'conflict' : 'synced'
-    backend.error = conflicts.length ? '有页面在本地和后台都改过，未覆盖' : ''
-    await refreshBackendSyncCursor()
-    return { pushed, pulled, conflicts }
   }
 
   async function resolveBackendConflict(sourceId: string, pageId: string, keepLocal: boolean) {
@@ -1643,7 +1675,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, pageBackendSync, saving, reloading, initialized, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncBackendNow, scheduleBackendSync, backendSyncMode, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, pageBackendSync, saving, reloading, initialized, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, reloadWorkspace, syncBackendSources, syncBackendNow, scheduleBackendSync, backendSyncMode, backendSyncRunning, backendSyncProgress, backendSyncLastCompletedAt, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })
 
 if (import.meta.hot) {

@@ -18,6 +18,30 @@ const activePageCount = computed(() => store.pages.filter((page) => !page.delete
 const trashCount = computed(() => store.trashedPages.length)
 const defaultSourceName = computed(() => store.allSources.find((source) => source.id === store.defaultStorageSourceId)?.name ?? '未设置')
 const connectionLabel = computed(() => backend.connected ? '本地 + 服务器' : '本地')
+const syncDetail = computed(() => {
+  if (!backend.connected) return defaultSourceName.value
+  if (store.backendSyncRunning) {
+    const progress = store.backendSyncProgress
+    if (!progress) return '正在同步…'
+    if (progress.stage === 'connecting') return '连接服务器…'
+    const labels = { pages: '校对文档', assets: '检查附件', files: '同步文件', reviews: '同步批注' }
+    const unit = progress.stage === 'assets' || progress.stage === 'reviews' ? ' 页' : ''
+    return `${labels[progress.stage]} ${progress.completed}/${progress.total}${unit}`
+  }
+  if (store.backendSyncMode === 'error') return '同步失败'
+  if (store.syncConflictsCount) return `${store.syncConflictsCount} 个同步冲突`
+  return defaultSourceName.value
+})
+const connectionTitle = computed(() => {
+  const details = ['打开设置：工作区与服务器', `${connectionLabel.value} · ${syncDetail.value}`]
+  if (!backend.connected) return details.join('\n')
+  const progress = store.backendSyncProgress
+  const source = progress && store.allSources.find((item) => item.id === progress.sourceId)
+  if (source) details.push(`工作区：${source.name}`)
+  if (store.backendSyncMode === 'error' && backend.error) details.push(backend.error)
+  if (store.backendSyncLastCompletedAt) details.push(`最近同步：${new Date(store.backendSyncLastCompletedAt).toLocaleString()}`)
+  return details.join('\n')
+})
 
 watch(() => backend.connected, (connected) => {
   if (connected) void backend.refreshWorkspaces()
@@ -194,9 +218,9 @@ async function exportTiez() {
       </button>
     </div>
 
-    <button class="sidebar-storage-trigger" type="button" title="打开设置：工作区与服务器" @click="emit('open-storage-settings')">
+    <button class="sidebar-storage-trigger" type="button" :title="connectionTitle" @click="emit('open-storage-settings')">
       <span>⚙ 设置<span v-if="store.syncConflictsCount > 0" class="sidebar-sync-conflicts">{{ store.syncConflictsCount }}</span></span>
-      <small>{{ store.syncConflictsCount > 0 ? `${store.syncConflictsCount} 个同步冲突 · ` : '' }}{{ connectionLabel }} · {{ defaultSourceName }}</small>
+      <small>{{ connectionLabel }} · {{ syncDetail }}</small>
     </button>
   </aside>
 </template>
