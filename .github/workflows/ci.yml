@@ -92,6 +92,9 @@ jobs:
       - name: Check Tauri backend
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
+      - name: Test desktop backend
+        run: cargo test --manifest-path src-tauri/Cargo.toml -p tie --lib
+
   build-linux:
     runs-on: ubuntu-22.04
     needs: check
