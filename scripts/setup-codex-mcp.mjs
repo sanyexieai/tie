@@ -2,8 +2,8 @@
 /**
  * 把 Tie 接入 Codex / Cursor / Claude Code。
  *
- * 有后台 MCP 地址时写入该 HTTP URL。没有地址时去掉旧的 node 启动项，
- * Agent 直接调用本机 tie CLI。
+ * 始终写入本机 tie mcp。进程会先试后台 HTTP，不通再用本地工作区。
+ * --url 只作说明，不会把配置改成只剩 HTTP。
  *
  * 用法:
  *   npm run mcp:setup -- --workspace /path/to/workspace
@@ -70,7 +70,7 @@ function printHelp() {
 
 Options:
   -w, --workspace <path>     Tie 工作区根目录（含 pages/）；也可设 TIE_WORKSPACE
-      --url <mcp-url>        后台 MCP 地址，例如 http://主机:8787/mcp；也可设 TIE_MCP_URL
+      --url <mcp-url>        可选。只打印后台地址，配置仍写本机 tie mcp
       --clients <list>       逗号分隔：codex,cursor,claude（默认全部）
       --name <id>            MCP server 名，默认 tie
       --dry-run              只预览，不改文件
@@ -117,15 +117,7 @@ function normalizeMcpUrl(raw) {
   return url
 }
 
-function buildMcpBlock({ name, url, command, workspace }) {
-  if (url) {
-    return [
-      `[mcp_servers.${name}]`,
-      `url = ${escapeTomlString(url)}`,
-      'enabled = true',
-      '',
-    ].join('\n')
-  }
+function buildMcpBlock({ name, command, workspace }) {
   return [
     `[mcp_servers.${name}]`,
     `command = ${escapeTomlString(command)}`,
@@ -138,12 +130,7 @@ function buildMcpBlock({ name, url, command, workspace }) {
   ].join('\n')
 }
 
-function buildMcpJsonEntry({ url, command, workspace, withType }) {
-  if (url) {
-    const entry = { url }
-    if (withType) entry.type = 'http'
-    return entry
-  }
+function buildMcpJsonEntry({ command, workspace, withType }) {
   const entry = {
     command,
     args: ['mcp'],
@@ -310,10 +297,11 @@ function main() {
   const url = normalizeMcpUrl(opts.url)
   const tieCli = resolveBundledTieCli()
   console.log(`工作区: ${workspace}`)
-  console.log(url ? `后台 MCP: ${url}` : `本地 MCP: ${tieCli || '未找到'} mcp`)
+  console.log(`本机 MCP: ${tieCli || '未找到'} mcp`)
+  if (url) console.log(`后台 HTTP ${url} 由 tie mcp 在运行时先试，配置里不写 url`)
   console.log(`客户端: ${opts.clients.join(', ')}`)
-  if (!url && !tieCli && !opts.dryRun) {
-    console.error('没有后台地址，也没有 tie CLI。请传入 --url，或先构建 tie / 设置 TIE_CLI。')
+  if (!tieCli && !opts.dryRun) {
+    console.error('没有 tie CLI。请先构建 tie，或设置 TIE_CLI。')
     process.exit(1)
   }
 
@@ -351,11 +339,7 @@ function main() {
     for (const rootDir of skills.mirrors) console.log(`已同步 Skill 根: ${rootDir}`)
   }
 
-  if (url) {
-    console.log('\n完成。客户端已写入后台 MCP 地址。请新开对话，再试 tie_doctor。')
-  } else {
-    console.log('\n完成。客户端会启动本机 tie mcp。请新开对话后使用 tie_* 工具。')
-  }
+  console.log('\n完成。客户端会启动本机 tie mcp。后台 HTTP 通的时候先走后台，不通再用本地工作区。请新开对话后使用 tie_* 工具。')
 }
 
 try {

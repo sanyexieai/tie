@@ -38,9 +38,7 @@
       "binaries/tie"
     ],
     "resources": {
-      "../packages/tie-mcp/src": "tie-mcp/src",
       "../packages/tie-mcp/package.json": "tie-mcp/package.json",
-      "../packages/tie-mcp/package-lock.json": "tie-mcp/package-lock.json",
       "../packages/tie-mcp/SKILL.md": "tie-mcp/SKILL.md",
       "../packages/tie-mcp/skills": "tie-mcp/skills"
     },

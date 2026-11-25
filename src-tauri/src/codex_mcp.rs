@@ -61,22 +61,10 @@ pub struct AgentClientStatus {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentMcpStatus {
-    pub node_available: bool,
     pub mcp_ready: bool,
     pub server_path: Option<String>,
     pub mcp_error: Option<String>,
     pub clients: Vec<AgentClientStatus>,
-}
-
-/// Backward-compatible shape used by older frontend callers.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CodexMcpStatus {
-    pub configured: bool,
-    pub workspace_path: Option<String>,
-    pub server_path: Option<String>,
-    pub config_path: String,
-    pub node_available: bool,
 }
 
 fn home_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -226,290 +214,8 @@ fn command_path_env() -> String {
     parts.join(&sep.to_string())
 }
 
-fn binary_name_variants(name: &str) -> Vec<String> {
-    #[cfg(windows)]
-    {
-        // node 优先 .exe（Codex CreateProcess 对 .cmd 不稳定）；npm 仍优先 .cmd
-        if name.eq_ignore_ascii_case("node") {
-            return vec![
-                format!("{name}.exe"),
-                name.to_owned(),
-                format!("{name}.cmd"),
-                format!("{name}.bat"),
-            ];
-        }
-        // Windows 上 npm 通常是 npm.cmd；CreateProcess 对 .cmd 需走 cmd 或完整路径
-        vec![
-            format!("{name}.cmd"),
-            format!("{name}.exe"),
-            format!("{name}.bat"),
-            name.to_owned(),
-        ]
-    }
-    #[cfg(not(windows))]
-    {
-        vec![name.to_owned()]
-    }
-}
-
-fn looks_like_executable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(windows)]
-    {
-        match path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("exe") | Some("cmd") | Some("bat") | Some("com") => true,
-            _ => false,
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        true
-    }
-}
-
-fn resolve_binary(name: &str) -> Option<PathBuf> {
-    let variants = binary_name_variants(name);
-
-    #[cfg(windows)]
-    let hardcoded: Vec<PathBuf> = {
-        let mut list = Vec::new();
-        for base in [
-            PathBuf::from(r"C:\Program Files\nodejs"),
-            PathBuf::from(r"C:\Program Files (x86)\nodejs"),
-        ] {
-            for variant in &variants {
-                list.push(base.join(variant));
-            }
-        }
-        if let Ok(profile) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-            for base in [
-                format!(r"{profile}\AppData\Roaming\npm"),
-                format!(r"{profile}\scoop\shims"),
-                format!(r"{profile}\.volta\bin"),
-                format!(r"{profile}\AppData\Local\Programs\node"),
-            ] {
-                for variant in &variants {
-                    list.push(PathBuf::from(&base).join(variant));
-                }
-            }
-            if let Ok(nvm_symlink) = std::env::var("NVM_SYMLINK") {
-                for variant in &variants {
-                    list.push(PathBuf::from(&nvm_symlink).join(variant));
-                }
-            }
-        }
-        if let Ok(program_files) = std::env::var("ProgramFiles") {
-            for variant in &variants {
-                list.push(PathBuf::from(&program_files).join("nodejs").join(variant));
-            }
-        }
-        list
-    };
-
-    #[cfg(not(windows))]
-    let hardcoded: Vec<PathBuf> = {
-        let mut list = Vec::new();
-        for base in [
-            "/usr/bin",
-            "/usr/local/bin",
-            "/bin",
-            "/snap/bin",
-            "/opt/homebrew/bin",
-        ] {
-            list.push(PathBuf::from(base).join(name));
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            for base in [
-                format!("{home}/.local/bin"),
-                format!("{home}/.nvm/current/bin"),
-                format!("{home}/.fnm/current/bin"),
-                format!("{home}/.volta/bin"),
-                format!("{home}/.asdf/shims"),
-            ] {
-                list.push(PathBuf::from(base).join(name));
-            }
-        }
-        list
-    };
-
-    for path in hardcoded {
-        if looks_like_executable(&path) {
-            return Some(path);
-        }
-    }
-
-    // 在增强 PATH 中逐项查找
-    for dir in command_path_env().split(path_separator()) {
-        if dir.is_empty() {
-            continue;
-        }
-        for variant in &variants {
-            let path = PathBuf::from(dir).join(variant);
-            if looks_like_executable(&path) {
-                return Some(path);
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        let script = format!(
-            "where.exe {name} 2>NUL & where.exe {name}.cmd 2>NUL & where.exe {name}.exe 2>NUL"
-        );
-        let output = Command::new("cmd")
-            .args(["/C", &script])
-            .env("PATH", command_path_env())
-            .output()
-            .ok()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let path = PathBuf::from(line.trim());
-            if looks_like_executable(&path) {
-                return Some(path);
-            }
-        }
-        None
-    }
-
-    #[cfg(not(windows))]
-    {
-        let output = Command::new("sh")
-            .args(["-lc", &format!("command -v {name}")])
-            .env("PATH", command_path_env())
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if path.is_empty() {
-            return None;
-        }
-        let path = PathBuf::from(path);
-        looks_like_executable(&path).then_some(path)
-    }
-}
-
-fn node_bin() -> Option<PathBuf> {
-    resolve_binary("node")
-}
-
-fn npm_bin() -> Option<PathBuf> {
-    resolve_binary("npm")
-}
-
-fn configure_command_path(command: &mut Command) {
-    command.env("PATH", command_path_env());
-}
-
-fn node_available() -> bool {
-    let Some(node) = node_bin() else {
-        return false;
-    };
-    let mut command = Command::new(node);
-    configure_command_path(&mut command);
-    command
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn copy_node_modules(from: &Path, to: &Path) -> Result<(), String> {
-    let source = from.join("node_modules");
-    if !source.is_dir() {
-        return Err("源包没有 node_modules".into());
-    }
-    let target = to.join("node_modules");
-    if target.exists() {
-        fs::remove_dir_all(&target).map_err(|error| error.to_string())?;
-    }
-    copy_dir_recursive_including_node_modules(&source, &target)
-}
-
-fn copy_dir_recursive_including_node_modules(from: &Path, to: &Path) -> Result<(), String> {
-    fs::create_dir_all(to).map_err(|error| error.to_string())?;
-    for entry in fs::read_dir(from).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let source = entry.path();
-        let target = to.join(entry.file_name());
-        if source.is_dir() {
-            copy_dir_recursive_including_node_modules(&source, &target)?;
-        } else {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-            }
-            fs::copy(&source, &target).map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(())
-}
-
-fn ensure_mcp_dependencies(source: &Path, target: &Path) -> Result<(), String> {
-    let node_modules = target.join("node_modules");
-    if node_modules.is_dir() {
-        return Ok(());
-    }
-
-    // 优先复用源包已安装依赖，避免 GUI 环境下 npm PATH / 网络问题
-    if source.join("node_modules").is_dir() {
-        copy_node_modules(source, target)?;
-        if node_modules.is_dir() {
-            return Ok(());
-        }
-    }
-
-    let Some(npm) = npm_bin() else {
-        return Err(
-            "未找到 npm。请安装 Node.js（含 npm），或从终端启动 Tie 后再接入；也可手动选择已含 node_modules 的 tie-mcp 目录。"
-                .into(),
-        );
-    };
-
-    let output = {
-        let mut command = Command::new(&npm);
-        configure_command_path(&mut command);
-        // Windows 上 npm.cmd 需要可解析的工作目录与 PATH
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
-        command
-            .args(["install", "--omit=dev"])
-            .current_dir(target)
-            .output()
-            .map_err(|error| {
-                format!(
-                    "无法执行 npm install（{}）：{error}。请确认已安装 Node.js（含 npm），或手动选择已含 node_modules 的 tie-mcp 目录。",
-                    npm.display()
-                )
-            })?
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("退出码 {}", output.status.code().unwrap_or(-1))
-        };
-        return Err(format!("npm install 失败：{detail}"));
-    }
-    if !node_modules.is_dir() {
-        return Err("npm install 完成但未生成 node_modules。".into());
-    }
-    Ok(())
+fn mcp_package_marker(dir: &Path) -> PathBuf {
+    dir.join("SKILL.md")
 }
 
 fn escape_toml_string(value: &str) -> String {
@@ -700,22 +406,6 @@ fn strip_mcp_server_block(config: &str) -> String {
     text.trim().to_owned()
 }
 
-fn normalize_mcp_url(raw: &str) -> Result<String, String> {
-    let url = raw.trim();
-    if url.starts_with("http://") || url.starts_with("https://") {
-        Ok(url.to_owned())
-    } else {
-        Err("MCP 地址需要以 http:// 或 https:// 开头".into())
-    }
-}
-
-fn http_mcp_block(url: &str) -> String {
-    format!(
-        "[mcp_servers.tie]\nurl = {}\nenabled = true\n",
-        escape_toml_string(url)
-    )
-}
-
 fn change_actor_label(agent: &str) -> String {
     let host = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
@@ -885,15 +575,6 @@ fn resolve_tie_cli_binary(app: Option<&AppHandle>) -> Option<PathBuf> {
         .find(|path| path.is_file() && binary_serves_mcp(path))
 }
 
-fn http_mcp_json(url: &str, with_type: bool) -> Value {
-    let mut entry = Map::new();
-    if with_type {
-        entry.insert("type".into(), json!("http"));
-    }
-    entry.insert("url".into(), json!(url));
-    Value::Object(entry)
-}
-
 fn backup_file(path: &Path) -> Result<(), String> {
     if !path.is_file() {
         return Ok(());
@@ -909,7 +590,6 @@ fn backup_file(path: &Path) -> Result<(), String> {
 }
 
 enum TieMcpLaunch<'a> {
-    Http(&'a str),
     Local {
         command: &'a str,
         workspace: &'a Path,
@@ -929,10 +609,8 @@ fn write_codex_config(app: &AppHandle, launch: TieMcpLaunch<'_>) -> Result<(), S
     };
     backup_file(&config_path)?;
     let cleaned = strip_mcp_server_block(&existing);
-    let block = match launch {
-        TieMcpLaunch::Http(url) => http_mcp_block(url),
-        TieMcpLaunch::Local { command, workspace, actor } => local_mcp_block(command, workspace, actor),
-    };
+    let TieMcpLaunch::Local { command, workspace, actor } = launch;
+    let block = local_mcp_block(command, workspace, actor);
     let next = if cleaned.is_empty() {
         block
     } else {
@@ -982,10 +660,8 @@ fn upsert_json_mcp_config(
     }
 
     let servers = servers.as_object_mut().unwrap();
-    let entry = match launch {
-        TieMcpLaunch::Http(url) => http_mcp_json(url, with_type),
-        TieMcpLaunch::Local { command, workspace, actor } => local_mcp_json(command, workspace, actor, with_type),
-    };
+    let TieMcpLaunch::Local { command, workspace, actor } = launch;
+    let entry = local_mcp_json(command, workspace, actor, with_type);
     servers.insert(SERVER_NAME.to_owned(), entry);
 
     let pretty = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
@@ -1074,50 +750,24 @@ fn mcp_runtime_stamp_path(target: &Path) -> PathBuf {
     target.join(".tie-mcp-runtime-stamp")
 }
 
-fn package_lock_fingerprint(source: &Path) -> String {
-    hash_file(&source.join("package-lock.json"))
-        .map(|hash| format!("{hash:016x}"))
-        .unwrap_or_default()
-}
-
 fn ensure_mcp_runtime(app: &AppHandle) -> Result<PathBuf, String> {
-    if !node_available() {
-        return Err(
-            "未检测到 Node.js。接入 Agent MCP 需要本机已安装 node，并在 PATH 中可用。".into(),
-        );
-    }
     let source = resolve_mcp_package_source(app)?;
     let target = installed_mcp_dir(app)?;
-    let target_server = target.join("src").join("server.js");
+    let marker = mcp_package_marker(&target);
     let fingerprint = mcp_runtime_fingerprint(&source);
     let stamp_path = mcp_runtime_stamp_path(&target);
     let previous_stamp = fs::read_to_string(&stamp_path).unwrap_or_default();
-    let previous_lock = previous_stamp
-        .split('|')
-        .find_map(|part| part.strip_prefix("package-lock.json:"))
-        .unwrap_or("")
-        .to_owned();
-    let current_lock = package_lock_fingerprint(&source);
-    let needs_copy = !target_server.is_file() || previous_stamp.trim() != fingerprint;
+    let needs_copy = !marker.is_file() || previous_stamp.trim() != fingerprint;
 
     if needs_copy {
         copy_dir_recursive(&source, &target)?;
-        // 依赖锁定变更时强制重装，避免沿用旧 node_modules
-        if !current_lock.is_empty() && current_lock != previous_lock {
-            let node_modules = target.join("node_modules");
-            if node_modules.is_dir() {
-                let _ = fs::remove_dir_all(&node_modules);
-            }
-        }
     }
 
-    ensure_mcp_dependencies(&source, &target)?;
-
-    if !target_server.is_file() {
-        return Err(format!("MCP 入口不存在：{}", target_server.display()));
+    if !marker.is_file() {
+        return Err(format!("MCP 技能包不存在：{}", marker.display()));
     }
     fs::write(&stamp_path, &fingerprint).map_err(|error| error.to_string())?;
-    Ok(path_for_external_config(&target_server))
+    Ok(path_for_external_config(&marker))
 }
 
 /// Best-effort：启动时把安装包内更新后的 tie-mcp 同步到应用数据目录。
@@ -1132,10 +782,7 @@ pub fn refresh_installed_mcp_runtime(app: &AppHandle) -> Result<bool, String> {
     let fingerprint = mcp_runtime_fingerprint(&source);
     let previous = fs::read_to_string(&stamp_path).unwrap_or_default();
     // 从未接入过也预热一份运行时，方便下次接入更快
-    if previous.trim() == fingerprint && target.join("src").join("server.js").is_file() {
-        return Ok(false);
-    }
-    if !node_available() {
+    if previous.trim() == fingerprint && mcp_package_marker(&target).is_file() {
         return Ok(false);
     }
     ensure_mcp_runtime(app)?;
@@ -1215,7 +862,7 @@ fn mcp_source_override_path(app: &AppHandle) -> Option<PathBuf> {
     if file.is_file() {
         let content = fs::read_to_string(&file).ok()?;
         let path = PathBuf::from(content.trim());
-        if path.join("src").join("server.js").is_file() {
+        if mcp_package_marker(&path).is_file() {
             return Some(path);
         }
     }
@@ -1237,7 +884,7 @@ fn ancestors_scan(start: &Path) -> Vec<PathBuf> {
     let mut dir = start.to_path_buf();
     for _ in 0..10 {
         let candidate = dir.join("packages").join("tie-mcp");
-        if candidate.join("src").join("server.js").is_file() {
+        if mcp_package_marker(&candidate).is_file() {
             results.push(candidate);
             break;
         }
@@ -1285,14 +932,12 @@ fn resolve_mcp_package_source(app: &AppHandle) -> Result<PathBuf, String> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for candidate in &candidates {
         // override already handled; skip duplicates that are the override path
-        let server = candidate.join("src").join("server.js");
-        if !server.is_file() {
+        let marker = mcp_package_marker(candidate);
+        if !marker.is_file() {
             continue;
         }
         let stamp = [
-            candidate.join("src").join("server.js"),
-            candidate.join("src").join("files.js"),
-            candidate.join("SKILL.md"),
+            marker,
             candidate.join("package.json"),
         ]
         .into_iter()
@@ -1375,14 +1020,12 @@ fn client_status(app: &AppHandle, client: AgentClient) -> Result<AgentClientStat
 }
 
 fn status_for(app: &AppHandle) -> Result<AgentMcpStatus, String> {
-    let node = node_available();
-    let server = installed_mcp_dir(app)
-        .ok()
-        .map(|dir| dir.join("src").join("server.js"))
-        .filter(|path| path.is_file());
     let cli = resolve_tie_cli_binary(Some(app));
     let mcp_ready = cli.is_some();
-    let mcp_error = if cli.is_some() {
+    let server = cli
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    let mcp_error = if mcp_ready {
         None
     } else {
         Some("未找到 tie CLI".into())
@@ -1394,25 +1037,11 @@ fn status_for(app: &AppHandle) -> Result<AgentMcpStatus, String> {
     }
 
     Ok(AgentMcpStatus {
-        node_available: node,
         mcp_ready,
-        server_path: server.map(|path| path.to_string_lossy().into_owned()),
+        server_path: server,
         mcp_error,
         clients,
     })
-}
-
-fn to_codex_status(status: AgentMcpStatus) -> CodexMcpStatus {
-    let codex = status.clients.iter().find(|item| item.id == "codex");
-    CodexMcpStatus {
-        configured: codex.map(|item| item.configured).unwrap_or(false),
-        workspace_path: codex.and_then(|item| item.workspace_path.clone()),
-        server_path: status.server_path,
-        config_path: codex
-            .map(|item| item.config_path.clone())
-            .unwrap_or_default(),
-        node_available: status.node_available,
-    }
 }
 
 fn parse_clients(clients: &[String]) -> Result<Vec<AgentClient>, String> {
@@ -1632,26 +1261,16 @@ fn configure_for_clients(
 ) -> Result<AgentMcpStatus, String> {
     let selected = parse_clients(clients)?;
     let workspace = validate_workspace(Path::new(workspace_path.trim()))?;
-    let mcp_url = match mcp_url.map(str::trim).filter(|url| !url.is_empty()) {
-        Some(url) => Some(normalize_mcp_url(url)?),
-        None => None,
-    };
-    let cli_command = if mcp_url.is_none() {
-        let cli = resolve_tie_cli_binary(Some(app)).ok_or_else(|| "未找到 tie CLI，无法提供本地 MCP".to_owned())?;
-        Some(path_for_external_config(&cli).to_string_lossy().into_owned())
-    } else {
-        None
-    };
+    let _ = mcp_url;
+    let cli = resolve_tie_cli_binary(Some(app)).ok_or_else(|| "未找到 tie CLI，无法提供本地 MCP".to_owned())?;
+    let cli_command = path_for_external_config(&cli).to_string_lossy().into_owned();
 
     for client in &selected {
         let actor = change_actor_label(client.label());
-        let launch = match mcp_url.as_deref() {
-            Some(url) => TieMcpLaunch::Http(url),
-            None => TieMcpLaunch::Local {
-                command: cli_command.as_deref().unwrap_or(""),
-                workspace: &workspace,
-                actor: &actor,
-            },
+        let launch = TieMcpLaunch::Local {
+            command: &cli_command,
+            workspace: &workspace,
+            actor: &actor,
         };
         match client {
             AgentClient::Codex => write_codex_config(app, launch)?,
@@ -1686,29 +1305,11 @@ pub fn configure_agent_mcp(
 }
 
 #[tauri::command]
-pub fn codex_mcp_status(app: AppHandle) -> Result<CodexMcpStatus, String> {
-    Ok(to_codex_status(status_for(&app)?))
-}
-
-#[tauri::command]
-pub fn configure_codex_mcp(
-    app: AppHandle,
-    workspace_path: String,
-) -> Result<CodexMcpStatus, String> {
-    Ok(to_codex_status(configure_for_clients(
-        &app,
-        &workspace_path,
-        &["codex".to_owned()],
-        None,
-    )?))
-}
-
-#[tauri::command]
 pub fn set_mcp_source_path(app: AppHandle, path: String) -> Result<AgentMcpStatus, String> {
     let p = PathBuf::from(path.trim());
-    if !p.join("src").join("server.js").is_file() {
+    if !mcp_package_marker(&p).is_file() {
         return Err(format!(
-            "所选路径无效：未找到 {}/src/server.js",
+            "所选路径无效：未找到 {}/SKILL.md",
             p.display()
         ));
     }

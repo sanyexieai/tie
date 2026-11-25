@@ -35,6 +35,19 @@ function normalizePageSources(page) {
   }
 }
 
+export function isTieDocument(content) {
+  const normalized = String(content ?? '').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n')
+  if (!normalized.startsWith('---\n')) return false
+  const end = normalized.indexOf('\n---\n', 4)
+  if (end === -1) return false
+  return normalized.slice(4, end).split('\n').some((line) => {
+    const split = line.trim().split(':')
+    const key = split.shift()?.trim()
+    const value = split.join(':').trim()
+    return (key === 'tie_version' && value) || (key === 'id' && value.startsWith('pg_'))
+  })
+}
+
 export function parsePage(content) {
   // Accept CRLF checkouts / editors on Windows; writers still emit LF.
   const normalized = String(content ?? '').replace(/\r\n/g, '\n')

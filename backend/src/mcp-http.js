@@ -1,56 +1,24 @@
 import { spawn } from 'node:child_process'
-import http from 'node:http'
-import fs from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-const state = {
-  enabled: false,
-  running: false,
-  error: null,
-  port: 3927,
-}
-
-export function mcpEnabledFromEnv(env = process.env) {
-  const raw = String(env.TIE_MCP_HTTP || '').trim().toLowerCase()
-  return raw === '1' || raw === 'true' || raw === 'yes'
-}
-
-export function defaultMcpServerPath() {
-  return fileURLToPath(new URL('../../packages/tie-mcp/src/http-server.js', import.meta.url))
-}
-
-export function resolveMcpLaunch(env = process.env) {
-  const workspace = String(env.TIE_WORKSPACE || '').trim()
-  const cli = String(env.TIE_CLI || '').trim()
-  const server = String(env.TIE_MCP_SERVER || '').trim() || defaultMcpServerPath()
-  const port = Number(env.TIE_MCP_PORT || 3927)
-  if (!workspace || !fs.existsSync(path.join(workspace, 'pages'))) {
-    return { ok: false, error: '未设置有效的 TIE_WORKSPACE（目录里需要有 pages/）', port, server, workspace, cli }
-  }
-  if (!cli || !fs.existsSync(cli)) {
-    return { ok: false, error: '未设置有效的 TIE_CLI', port, server, workspace, cli }
-  }
-  if (!fs.existsSync(server)) {
-    return { ok: false, error: '找不到 tie-mcp HTTP 入口', port, server, workspace, cli }
-  }
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    return { ok: false, error: 'TIE_MCP_PORT 无效', port, server, workspace, cli }
-  }
-  return { ok: true, error: null, port, server, workspace, cli }
-}
+import jwt from 'jsonwebtoken'
+import { detectCli, loadSettings } from './settings.js'
+import { findMcpToken, touchMcpToken } from './mcp-tokens.js'
+import { store } from './store.js'
 
 export function mcpStatus() {
+  const settings = loadSettings()
+  const cli = detectCli(settings.mcp.cliPath)
   return {
-    enabled: state.enabled,
-    running: state.running,
-    error: state.error,
-    port: state.port,
+    enabled: settings.mcp.enabled,
+    running: settings.mcp.enabled && cli.ok,
+    error: settings.mcp.enabled && !cli.ok ? cli.error : null,
+    transport: 'tie-cli',
+    cli: cli.path,
   }
 }
 
 export function mcpUrlForRequest(req) {
-  if (!state.running) return null
+  const status = mcpStatus()
+  if (!status.enabled) return null
   const forwarded = req.headers?.['x-forwarded-proto']
   const proto = (Array.isArray(forwarded) ? forwarded[0] : forwarded) || req.protocol || 'http'
   const hostHeader = req.headers?.['x-forwarded-host'] || req.headers?.host
@@ -59,61 +27,132 @@ export function mcpUrlForRequest(req) {
   return `${proto}://${host}/mcp`
 }
 
-export function startMcpHttp(env = process.env) {
-  state.enabled = true
-  const launch = resolveMcpLaunch(env)
-  state.port = launch.port
-  if (!launch.ok) {
-    state.running = false
-    state.error = launch.error
-    return mcpStatus()
-  }
-  if (state.running && childAlive()) return mcpStatus()
-  const child = spawn(process.execPath, [launch.server], {
-    env: {
-      ...env,
-      TIE_WORKSPACE: launch.workspace,
-      TIE_CLI: launch.cli,
-      TIE_MCP_HOST: '127.0.0.1',
-      TIE_MCP_PORT: String(launch.port),
-    },
-    stdio: 'inherit',
-  })
-  state.child = child
-  state.running = true
-  state.error = null
-  child.on('exit', () => {
-    if (state.child === child) {
-      state.running = false
-      state.child = null
-      if (!state.error) state.error = 'MCP HTTP 进程已退出'
+export function exchangeWithTie(executable, args, message, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    const script = executable.toLowerCase().endsWith('.cmd') || executable.toLowerCase().endsWith('.bat')
+    const child = script
+      ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', executable, ...args], { stdio: ['pipe', 'pipe', 'pipe'], env: mcpChildEnv() })
+      : spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'], env: mcpChildEnv() })
+    let out = ''
+    let err = ''
+    let settled = false
+    const finish = (fn, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fn(value)
     }
+    const timer = setTimeout(() => {
+      child.kill()
+      finish(reject, new Error('tie mcp 超时'))
+    }, timeoutMs)
+    child.stdout.on('data', (chunk) => { out += chunk.toString('utf8') })
+    child.stderr.on('data', (chunk) => { err += chunk.toString('utf8') })
+    child.on('error', (error) => finish(reject, error))
+    child.on('close', () => {
+      const line = out.split(/\r?\n/).map((item) => item.trim()).find((item) => item.startsWith('{'))
+      if (!line) {
+        finish(reject, new Error(err.trim() || 'tie mcp 没有返回'))
+        return
+      }
+      try {
+        finish(resolve, JSON.parse(line))
+      } catch (error) {
+        finish(reject, error)
+      }
+    })
+    child.stdin.write(`${JSON.stringify(message)}\n`)
+    child.stdin.end()
   })
-  return mcpStatus()
 }
 
-function childAlive() {
-  return Boolean(state.child && state.child.exitCode == null && !state.child.killed)
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    req.on('data', (chunk) => chunks.push(chunk))
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    req.on('error', reject)
+  })
 }
 
-export function proxyMcpRequest(req, res) {
-  if (!state.running) {
-    res.status(503).json({ message: state.error || 'MCP HTTP 未启动' })
+function bearer(req) {
+  const header = req.headers?.authorization ?? ''
+  return header.startsWith('Bearer ') ? header.slice(7).trim() : ''
+}
+
+function mcpChildEnv() {
+  return { ...process.env, TIE_MCP_VIA: 'http' }
+}
+
+function headerValue(req, name) {
+  const value = req.headers?.[name]
+  return String(Array.isArray(value) ? value[0] : value ?? '').trim()
+}
+
+function resolveCaller(req, jwtSecret) {
+  const rawToken = bearer(req)
+  if (!rawToken) return { error: 401, message: '需要登录会话或 MCP 令牌' }
+  const token = findMcpToken(rawToken)
+  if (token) {
+    const workspace = store.loadWorkspaces().find((item) => item.id === token.workspaceId && item.ownerId === token.userId)
+    if (!workspace) return { error: 404, message: '这个令牌绑定的工作区已经不存在' }
+    const user = store.loadUsers().find((item) => item.id === token.userId)
+    if (!user || user.disabled) return { error: 403, message: '账号已停用' }
+    return { workspace, touch: token.id }
+  }
+  let payload
+  try {
+    payload = jwt.verify(rawToken, jwtSecret)
+  } catch {
+    return { error: 401, message: '登录已失效' }
+  }
+  const user = store.loadUsers().find((item) => item.id === payload.sub)
+  if (!user) return { error: 401, message: '用户不存在' }
+  if (user.disabled) return { error: 403, message: '账号已停用' }
+  const workspaceId = headerValue(req, 'x-tie-workspace')
+  if (!workspaceId) return { error: 400, message: '缺少工作区' }
+  const workspace = store.loadWorkspaces().find((item) => item.id === workspaceId && item.ownerId === user.id)
+  if (!workspace) return { error: 404, message: '工作区不存在' }
+  return { workspace, touch: null }
+}
+
+export async function handleMcpRequest(req, res, jwtSecret) {
+  const status = mcpStatus()
+  if (!status.enabled) {
+    res.status(503).json({ message: 'MCP 未开启。请管理员在服务设置里打开。' })
     return
   }
-  const headers = { ...req.headers, host: `127.0.0.1:${state.port}` }
-  const proxy = http.request({
-    hostname: '127.0.0.1',
-    port: state.port,
-    path: req.originalUrl || req.url,
-    method: req.method,
-    headers,
-  }, (upstream) => {
-    res.writeHead(upstream.statusCode || 502, upstream.headers)
-    upstream.pipe(res)
-  })
-  proxy.on('error', () => {
-    if (!res.headersSent) res.status(502).json({ message: 'MCP HTTP 转发失败' })
-  })
-  req.pipe(proxy)
+  if (!status.running || !status.cli) {
+    res.status(503).json({ message: status.error || '未找到 tie-cli' })
+    return
+  }
+  if (req.method !== 'POST') {
+    res.status(405).json({ message: 'MCP 使用 POST，正文是一条 JSON-RPC 消息' })
+    return
+  }
+  const caller = resolveCaller(req, jwtSecret)
+  if (caller.error) {
+    res.status(caller.error).json({ message: caller.message })
+    return
+  }
+  const workspace = caller.workspace
+  let message
+  try {
+    message = JSON.parse(await readBody(req) || 'null')
+  } catch {
+    res.status(400).json({ message: 'MCP 正文不是 JSON' })
+    return
+  }
+  if (!message || typeof message !== 'object' || Array.isArray(message)) {
+    res.status(400).json({ message: 'MCP 每次只接收一条 JSON-RPC 消息' })
+    return
+  }
+  const workspaceDir = store.workspaceDir(workspace.id)
+  try {
+    const response = await exchangeWithTie(status.cli, ['--workspace', workspaceDir, 'mcp'], message)
+    if (caller.touch) touchMcpToken(caller.touch)
+    res.json(response)
+  } catch (error) {
+    res.status(502).json({ message: error instanceof Error ? error.message : 'tie mcp 调用失败' })
+  }
 }

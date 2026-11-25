@@ -13,6 +13,7 @@ export interface BackendWorkspace {
   name: string
   ownerId: string
   createdAt: string
+  default?: boolean
   storageProviderId?: string | null
 }
 
@@ -31,6 +32,7 @@ export interface BackendMcpStatus {
   running: boolean
   url: string | null
   error: string | null
+  transport?: string
 }
 
 export interface BackendHealth {
@@ -42,6 +44,8 @@ export interface BackendHealth {
 export interface BackendProfile {
   endpoint: string
   accessToken: string | null
+  refreshToken: string | null
+  accessExpiresAt: string | null
   user: BackendUser | null
 }
 export interface BackendServer {
@@ -52,6 +56,8 @@ export interface BackendServer {
 
 interface AuthResponse {
   accessToken: string
+  refreshToken?: string
+  accessExpiresAt?: string
   tokenType: string
   user: BackendUser
 }
@@ -119,13 +125,19 @@ const serversKey = 'tie-backend-servers-v1'
 const workspaceMappingsKey = 'tie-backend-workspace-mappings-v1'
 const defaultPromptDismissedKey = 'tie-backend-default-prompt-dismissed-v1'
 export const defaultBackendEndpoint = 'https://3ye.co:32043'
-const legacyDefaultBackendEndpoint = 'http://127.0.0.1:8787'
+export const localBackendEndpoint = 'http://127.0.0.1:8787'
+const defaultEndpointMigratedKey = 'tie-backend-default-endpoint-migrated-v1'
 
-// Keep existing installations pointed at the published default server when
-// they still contain the old built-in localhost value. Custom endpoints are
-// left untouched.
-function migrateDefaultEndpoint(endpoint: string) {
-  return endpoint.replace(/\/+$/, '') === legacyDefaultBackendEndpoint ? defaultBackendEndpoint : endpoint
+// 只把内置的 default-local 从旧的本机地址迁到已发布服务器，而且只迁一次。
+// 之后用户再选本机后台，或已经登录在本机，都保持原地址。
+function migrateBuiltInDefault(servers: BackendServer[]) {
+  if (localStorage.getItem(defaultEndpointMigratedKey) === '1') return servers
+  localStorage.setItem(defaultEndpointMigratedKey, '1')
+  return servers.map((server) => {
+    if (server.id !== 'default-local') return server
+    if (server.endpoint.replace(/\/+$/, '') !== localBackendEndpoint) return server
+    return { ...server, endpoint: defaultBackendEndpoint, defaultPrompt: true }
+  })
 }
 
 function normalizeEndpoint(value: string) {
@@ -135,7 +147,11 @@ function normalizeEndpoint(value: string) {
   return url.toString().replace(/\/$/, '')
 }
 
-async function request<T>(profile: BackendProfile, path: string, options: RequestInit = {}) {
+async function refreshProfile(profile: BackendProfile, force: boolean) {
+  return backendService.refresh(profile, force)
+}
+
+async function request<T>(profile: BackendProfile, path: string, options: RequestInit = {}, allowRefresh = true): Promise<T> {
   const headers = new Headers(options.headers)
   headers.set('accept', 'application/json')
   if (options.body) headers.set('content-type', 'application/json')
@@ -144,13 +160,17 @@ async function request<T>(profile: BackendProfile, path: string, options: Reques
   try {
     response = await fetch(`${normalizeEndpoint(profile.endpoint)}${path}`, { ...options, headers })
   } catch {
-    throw new Error('无法连接后台，请检查地址和服务是否已启动')
+    throw new BackendRequestError('无法连接后台，请检查地址和服务是否已启动', 0)
   }
   const body = await response.json().catch(() => null) as { message?: string; error?: string } | T | null
+  if (response.status === 401 && allowRefresh && profile.refreshToken && path !== '/api/v1/auth/refresh') {
+    await refreshProfile(profile, true)
+    return request<T>(profile, path, options, false)
+  }
   if (!response.ok) {
     const error = body as { message?: string; error?: string } | null
-    if (response.status === 409) throw new Error('页面已在其他设备更新，请重新载入后再保存')
-    throw new Error(error?.message ?? error?.error ?? `后台请求失败（${response.status}）`)
+    if (response.status === 409) throw new BackendRequestError('页面已在其他设备更新，请重新载入后再保存', 409)
+    throw new BackendRequestError(error?.message ?? error?.error ?? `后台请求失败（${response.status}）`, response.status)
   }
   if (response.status === 204 || body === null) return null as T
   return body as T
@@ -193,7 +213,60 @@ async function readBinary(profile: BackendProfile, path: string) {
 }
 
 function initialProfile(): BackendProfile {
-  return { endpoint: defaultBackendEndpoint, accessToken: null, user: null }
+  return { endpoint: defaultBackendEndpoint, accessToken: null, refreshToken: null, accessExpiresAt: null, user: null }
+}
+
+function isDesktop() {
+  return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
+}
+
+export class BackendRequestError extends Error {
+  status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
+}
+
+function readBrowserProfile(): BackendProfile {
+  try {
+    const saved = JSON.parse(localStorage.getItem(storageKey) ?? '') as Partial<BackendProfile>
+    return {
+      endpoint: normalizeEndpoint(typeof saved.endpoint === 'string' ? saved.endpoint : defaultBackendEndpoint),
+      accessToken: typeof saved.accessToken === 'string' ? saved.accessToken : null,
+      refreshToken: typeof saved.refreshToken === 'string' ? saved.refreshToken : null,
+      accessExpiresAt: typeof saved.accessExpiresAt === 'string' ? saved.accessExpiresAt : null,
+      user: saved.user && typeof saved.user.id === 'string' ? saved.user as BackendUser : null,
+    }
+  } catch { return initialProfile() }
+}
+
+function dueForRefresh(profile: BackendProfile) {
+  if (!profile.refreshToken || !profile.accessExpiresAt) return false
+  return Date.parse(profile.accessExpiresAt) - Date.now() <= 120_000
+}
+
+interface StoredSession {
+  endpoint?: string
+  accessToken?: string
+  refreshToken?: string
+  accessExpiresAt?: string
+  userId?: string
+  email?: string
+  name?: string
+}
+
+function profileFromSession(session: StoredSession, fallbackEndpoint: string): BackendProfile {
+  const user = session.userId
+    ? { id: session.userId, email: session.email || '', name: session.name || '', createdAt: '' }
+    : null
+  return {
+    endpoint: normalizeEndpoint(session.endpoint || fallbackEndpoint),
+    accessToken: session.accessToken || null,
+    refreshToken: session.refreshToken || null,
+    accessExpiresAt: session.accessExpiresAt || null,
+    user,
+  }
 }
 
 export const backendService = {
@@ -219,12 +292,8 @@ export const backendService = {
       const list = JSON.parse(localStorage.getItem(serversKey) ?? '[]') as BackendServer[]
       const servers = Array.isArray(list) ? list.filter((s) => s && typeof s.id === 'string' && typeof s.endpoint === 'string') : []
       if (servers.length) {
-        const migrated = servers.map((server) => {
-          const endpoint = migrateDefaultEndpoint(server.endpoint)
-          const wasLegacyDefault = endpoint !== server.endpoint && server.id === 'default-local'
-          return { ...server, endpoint, defaultPrompt: wasLegacyDefault ? true : server.defaultPrompt }
-        })
-        if (migrated.some((server, index) => server.endpoint !== servers[index]?.endpoint)) this.saveServers(migrated)
+        const migrated = migrateBuiltInDefault(servers)
+        if (migrated.some((server, index) => server.endpoint !== servers[index]?.endpoint || server.defaultPrompt !== servers[index]?.defaultPrompt)) this.saveServers(migrated)
         return migrated
       }
       const profile = JSON.parse(localStorage.getItem(storageKey) ?? 'null') as Partial<BackendProfile> | null
@@ -254,21 +323,96 @@ export const backendService = {
   dismissDefaultPrompt() { localStorage.setItem(defaultPromptDismissedKey, '1') },
   clearDefaultPromptDismissal() { localStorage.removeItem(defaultPromptDismissedKey) },
   loadProfile(): BackendProfile {
-    try {
-      const saved = JSON.parse(localStorage.getItem(storageKey) ?? '') as Partial<BackendProfile>
-      return {
-        endpoint: normalizeEndpoint(migrateDefaultEndpoint(typeof saved.endpoint === 'string' ? saved.endpoint : defaultBackendEndpoint)),
-        accessToken: typeof saved.accessToken === 'string' ? saved.accessToken : null,
-        user: saved.user && typeof saved.user.id === 'string' ? saved.user as BackendUser : null,
-      }
-    } catch { return initialProfile() }
+    if (isDesktop()) return initialProfile()
+    return readBrowserProfile()
   },
   saveProfile(profile: BackendProfile) {
+    if (isDesktop()) {
+      localStorage.removeItem(storageKey)
+      return
+    }
     localStorage.setItem(storageKey, JSON.stringify({ ...profile, endpoint: normalizeEndpoint(profile.endpoint) }))
   },
-  clearProfile(endpoint = defaultBackendEndpoint) {
-    const profile = { endpoint: normalizeEndpoint(endpoint), accessToken: null, user: null }
+  async readSession(): Promise<BackendProfile> {
+    const browser = readBrowserProfile()
+    if (!isDesktop()) return browser
+    const { invoke } = await import('@tauri-apps/api/core')
+    const session = await invoke<StoredSession | null>('load_backend_session')
+    if (session?.accessToken) {
+      localStorage.removeItem(storageKey)
+      return profileFromSession(session, browser.endpoint)
+    }
+    if (browser.accessToken && browser.user) {
+      await this.publishSession(browser)
+      localStorage.removeItem(storageKey)
+      return browser
+    }
+    return { ...initialProfile(), endpoint: browser.endpoint }
+  },
+  async publishSession(profile: BackendProfile) {
+    if (!isDesktop()) {
+      this.saveProfile(profile)
+      return
+    }
+    const { invoke } = await import('@tauri-apps/api/core')
+    localStorage.removeItem(storageKey)
+    if (!profile.accessToken || !profile.user) {
+      await invoke('clear_backend_session')
+      return
+    }
+    await invoke('save_backend_session', {
+      endpoint: normalizeEndpoint(profile.endpoint),
+      accessToken: profile.accessToken,
+      refreshToken: profile.refreshToken,
+      accessExpiresAt: profile.accessExpiresAt,
+      userId: profile.user.id,
+      email: profile.user.email,
+      name: profile.user.name,
+    })
+  },
+  async refresh(profile: BackendProfile, force = false) {
+    if (!force && !dueForRefresh(profile)) return profile
+    if (isDesktop()) {
+      const { invoke } = await import('@tauri-apps/api/core')
+      try {
+        const session = await invoke<StoredSession>('refresh_backend_session', { force })
+        const next = profileFromSession(session, profile.endpoint)
+        profile.endpoint = next.endpoint
+        profile.accessToken = next.accessToken
+        profile.refreshToken = next.refreshToken
+        profile.accessExpiresAt = next.accessExpiresAt
+        if (next.user) profile.user = { ...profile.user, ...next.user, createdAt: profile.user?.createdAt || '' }
+        return profile
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '登录已失效，请重新登录'
+        if (message.includes('登录已失效') || message.includes('尚未登录')) {
+          throw new BackendRequestError(message, 401)
+        }
+        return profile
+      }
+    }
+    if (!profile.refreshToken) return profile
+    const response = await fetch(`${normalizeEndpoint(profile.endpoint)}/api/v1/auth/refresh`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ refreshToken: profile.refreshToken }),
+    })
+    if (response.status === 401 || response.status === 403) {
+      throw new BackendRequestError('登录已失效，请重新登录', response.status)
+    }
+    if (!response.ok) return profile
+    const body = await response.json() as AuthResponse
+    profile.accessToken = body.accessToken
+    profile.refreshToken = body.refreshToken || profile.refreshToken
+    profile.accessExpiresAt = body.accessExpiresAt || profile.accessExpiresAt
+    if (body.user) profile.user = body.user
     this.saveProfile(profile)
+    return profile
+  },
+  clearProfile(endpoint = defaultBackendEndpoint) {
+    const profile = { ...initialProfile(), endpoint: normalizeEndpoint(endpoint) }
+    if (!isDesktop()) this.saveProfile(profile)
+    else localStorage.removeItem(storageKey)
     return profile
   },
   async health(endpoint: string): Promise<BackendHealth> {
@@ -290,15 +434,6 @@ export const backendService = {
   async listWorkspaces(profile: BackendProfile) { return request<BackendWorkspace[]>(profile, '/api/v1/workspaces') },
   async createWorkspace(profile: BackendProfile, name: string) {
     return request<BackendWorkspace>(profile, '/api/v1/workspaces', { method: 'POST', body: JSON.stringify({ name }) })
-  },
-  async ensureWorkspaceForLocalSource(profile: BackendProfile, localSourceId: string, name: string, workspaces?: BackendWorkspace[]) {
-    const existingId = this.workspaceMapping(localSourceId)
-    const known = workspaces ?? await this.listWorkspaces(profile)
-    const existing = existingId ? known.find((workspace) => workspace.id === existingId) : undefined
-    if (existing) return existing
-    const workspace = await this.createWorkspace(profile, name)
-    this.mapWorkspace(localSourceId, workspace.id)
-    return workspace
   },
   async renameWorkspace(profile: BackendProfile, workspaceId: string, name: string) {
     return request<BackendWorkspace>(profile, `/api/v1/workspaces/${workspaceId}`, { method: 'PATCH', body: JSON.stringify({ name }) })

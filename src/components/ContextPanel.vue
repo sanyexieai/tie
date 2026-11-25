@@ -21,6 +21,7 @@ import { isCrossSourceLink, rebindLinkedResource, sourceChipLabel } from '@/serv
 import { openLocalLink } from '@/services/local-links'
 import { auditActorLabel, CHANGE_AGENTS } from '@/services/change-origin'
 import { listPageAuditEvents, type AuditEvent } from '@/services/audit'
+import { invoke } from '@tauri-apps/api/core'
 import { cancelPheromoneDraft, commitPheromoneDraft, focusPheromone, PHEROMONE_KIND_LABEL, pheromoneActorLabel, pheromoneState, pheromonesFor, removePheromone, setPheromonePanelOpen } from '@/services/pheromone'
 
 const store = useWorkspaceStore()
@@ -40,6 +41,36 @@ const tab = ref<ContextTab>(loadContextTab())
 const emit = defineEmits<{ close: [] }>()
 const pheromones = computed(() => store.activePage ? pheromonesFor(store.activePage.id) : [])
 const auditEvents = ref<AuditEvent[]>([])
+interface ReviewEntry {
+  id: string
+  at: string
+  actor: string
+  kind: string
+  status: string
+  markdown?: string
+  quote?: string
+  body?: string
+  opinionKind?: string
+}
+const reviewEntries = ref<ReviewEntry[]>([])
+const reviewVersions = computed(() => reviewEntries.value.filter((item) => item.kind === 'version'))
+const finalVersion = computed(() => reviewVersions.value.find((item) => item.status === 'final') ?? null)
+const syncedOpinions = computed(() => {
+  const known = new Set(pheromones.value.map((item) => item.id))
+  return reviewEntries.value.filter((item) => item.kind === 'opinion' && !known.has(item.id))
+})
+const visibleAuditEvents = computed(() => auditEvents.value.filter((event) => event.type !== 'opinion'))
+function reviewExcerpt(markdown: string | undefined) {
+  const text = (markdown ?? '').replace(/\s+/g, ' ').trim()
+  return text.length > 80 ? `${text.slice(0, 80)}…` : text || '（空）'
+}
+function opinionLabel(kind: string | undefined) {
+  if (kind === 'correction' || kind === 'support' || kind === 'objection') return PHEROMONE_KIND_LABEL[kind]
+  return '意见'
+}
+function desktopSync() {
+  return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
+}
 const pheromoneDraft = computed(() => {
   const draft = pheromoneState.draft
   return draft && draft.pageId === store.activePage?.id ? draft : null
@@ -232,9 +263,42 @@ async function loadAuditEvents() {
   const page = store.activePage
   if (!page || tab.value !== 'audit') {
     auditEvents.value = []
+    reviewEntries.value = []
     return
   }
   auditEvents.value = await listPageAuditEvents(page.storageSourceId, page.id)
+  if (!desktopSync()) {
+    reviewEntries.value = []
+    return
+  }
+  try {
+    const file = await invoke<{ entries?: ReviewEntry[] }>('list_page_reviews', { sourceId: page.storageSourceId, pageId: page.id })
+    reviewEntries.value = file.entries ?? []
+  } catch {
+    reviewEntries.value = []
+  }
+}
+
+async function leaveOpinion() {
+  const draft = pheromoneState.draft
+  const page = store.activePage
+  if (!draft || !page) return
+  commitPheromoneDraft()
+  const item = pheromonesFor(draft.pageId)[0]
+  if (!item || !desktopSync()) return
+  try {
+    await invoke('add_page_opinion', {
+      sourceId: page.storageSourceId,
+      pageId: item.pageId,
+      id: item.id,
+      actor: item.actor,
+      opinionKind: item.kind,
+      quote: item.quote,
+      body: item.body,
+    })
+    await store.syncBackendNow()
+  } catch { /* 意见已留在本机，下次对齐再送出 */ }
+  await loadAuditEvents()
 }
 
 watch(tab, (value) => {
@@ -243,6 +307,7 @@ watch(tab, (value) => {
   void loadAuditEvents()
 }, { immediate: true })
 watch(() => store.activePage?.id, () => { void loadAuditEvents() })
+watch(() => store.backendSyncMode, () => { void loadAuditEvents() })
 watch(() => pheromoneState.openRequest, () => { tab.value = 'audit' })
 onMounted(() => {
   if (pheromoneState.draft || pheromoneState.openRequest > 0) tab.value = 'audit'
@@ -333,7 +398,19 @@ onBeforeUnmount(() => setPheromonePanelOpen(false))
       <p v-else class="muted">打开页面后显示局部图谱。</p>
     </div>
     <div v-else class="context-content audit-panel">
-      <form v-if="pheromoneDraft" class="pheromone-draft" @submit.prevent="commitPheromoneDraft">
+      <section v-if="reviewVersions.length">
+        <h3>最终版本</h3>
+        <p class="muted">{{ finalVersion ? `正文已采用较新的修改（${finalVersion.actor}）。另一份留在下面。` : '两边都改过时，较新的修改会写入正文，另一份留在这里。' }}</p>
+        <article v-for="item in reviewVersions" :key="item.id" class="audit-event">
+          <header>
+            <strong>{{ item.status === 'final' ? '最终版本' : (item.status === 'dropped' ? '未采用' : '待选') }}</strong>
+            <span>{{ item.actor || '另一端' }}</span>
+            <time>{{ item.at.slice(0, 16).replace('T', ' ') }}</time>
+          </header>
+          <p>{{ reviewExcerpt(item.markdown) }}</p>
+        </article>
+      </section>
+      <form v-if="pheromoneDraft" class="pheromone-draft" @submit.prevent="leaveOpinion">
         <header><em :class="pheromoneDraft.kind">{{ PHEROMONE_KIND_LABEL[pheromoneDraft.kind] }}</em><span>针对这段原文</span></header>
         <blockquote>{{ pheromoneDraft.quote }}</blockquote>
         <div class="pheromone-origin">
@@ -369,7 +446,16 @@ onBeforeUnmount(() => setPheromonePanelOpen(false))
         <small v-if="!quoteStillPresent(item.quote)">原文已不在页面中</small>
         <button type="button" @click.stop="store.activePage && removePheromone(store.activePage.id, item.id)">撤回</button>
       </article>
-      <article v-for="(event, index) in auditEvents" :key="`${event.at}-${index}`" class="audit-event">
+      <article v-for="item in syncedOpinions" :key="item.id" class="pheromone-card" :class="item.opinionKind || 'objection'">
+        <header>
+          <em>{{ opinionLabel(item.opinionKind) }}</em>
+          <strong>{{ item.actor || '另一端' }}</strong>
+          <time>{{ item.at.slice(0, 16).replace('T', ' ') }}</time>
+        </header>
+        <p v-if="item.quote" class="pheromone-quote">{{ item.quote }}</p>
+        <p class="pheromone-body">{{ item.body }}</p>
+      </article>
+      <article v-for="(event, index) in visibleAuditEvents" :key="`${event.at}-${index}`" class="audit-event">
         <header>
           <strong :title="auditActorLabel(event.actor)">{{ auditActorLabel(event.actor) }}</strong>
           <time>{{ event.at.slice(0, 16).replace('T', ' ') }}</time>

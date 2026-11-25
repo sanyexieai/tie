@@ -19,13 +19,7 @@ export function pageLocalSourceIds(page: Pick<Page, 'storageSourceId' | 'storage
   return pageSourceIds(page).filter((id) => isLocalStorageSourceId(id))
 }
 
-/** 备份镜像源（不含协作主源）。 */
-export function pageMirrorSourceIds(page: Pick<Page, 'storageSourceId' | 'storageSourceIds'>): string[] {
-  const primary = page.storageSourceId.trim()
-  return pageSourceIds(page).filter((id) => id !== primary)
-}
-
-/** 协作主源候选：有云端绑定时只能是云端；纯本机页才允许本机 id。 */
+/** 读旧页面时，有云端绑定就以云端 id 为主源。 */
 export function resolveCollaborationPrimary(
   sourceIds: string[],
   preferred?: string | null,

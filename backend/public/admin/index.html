@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tie 管理后台</title>
+  <link rel="stylesheet" href="./admin.css">
+</head>
+<body>
+  <div id="login" class="login-wrap">
+    <form class="login-card" id="login-form">
+      <h1>Tie 管理后台</h1>
+      <p id="gate-lead">管理这台服务器上的用户和工作区。普通用户账号不能进入。</p>
+      <label id="name-field" hidden>名称<input name="name" autocomplete="name"></label>
+      <label id="account-field"><span>用户名或邮箱</span><input name="email" type="text" autocomplete="username" required placeholder="用户名或 name@example.com"></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+      <button class="primary" type="submit" id="gate-submit">登录</button>
+      <p class="error" id="login-error"></p>
+      <p class="hint">还没有用户时，第一个注册的人成为管理员。普通用户请用 <a href="/me/">我的账号</a>。</p>
+      <button class="ghost" type="button" id="gate-switch">没有账号？注册</button>
+    </form>
+  </div>
+
+  <div id="shell" class="shell">
+    <aside class="side">
+      <div class="brand">
+        <strong>Tie 后台</strong>
+        <span>多租户管理</span>
+      </div>
+      <nav class="nav">
+        <button type="button" data-view="overview">概览</button>
+        <button type="button" data-view="users">用户</button>
+        <button type="button" data-view="workspaces">数据</button>
+        <button type="button" data-view="settings">服务</button>
+      </nav>
+      <div class="who">
+        <div id="who"></div>
+        <button class="ghost" type="button" id="logout">退出</button>
+      </div>
+    </aside>
+    <main class="main" id="main"></main>
+  </div>
+
+  <dialog id="confirm">
+    <form method="dialog">
+      <h3>请确认</h3>
+      <p id="confirm-message"></p>
+      <menu>
+        <button class="ghost" value="cancel">取消</button>
+        <button class="danger" value="ok">确认</button>
+      </menu>
+    </form>
+  </dialog>
+  <dialog id="editor">
+    <form id="editor-form">
+      <h3 id="editor-title"></h3>
+      <div id="editor-fields"></div>
+      <p class="error" id="editor-error"></p>
+      <menu>
+        <button class="ghost" type="button" id="editor-cancel">取消</button>
+        <button class="primary" type="submit" id="editor-save">保存</button>
+      </menu>
+    </form>
+  </dialog>
+  <script src="./app.js"></script>
+</body>
+</html>

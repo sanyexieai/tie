@@ -47,9 +47,6 @@ jobs:
       - name: Run backend API tests
         run: npm run test:backend
 
-      - name: Install local Tie MCP deps
-        run: npm ci --prefix packages/tie-mcp || npm install --prefix packages/tie-mcp
-
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install Linux Tauri dependencies
@@ -81,7 +78,6 @@ jobs:
           cargo test -p tie-local --manifest-path src-tauri/Cargo.toml
           cargo build -p tie-cli --manifest-path src-tauri/Cargo.toml
           test -x src-tauri/target/debug/tie
-          TIE_CLI="$PWD/src-tauri/target/debug/tie" npm run test:mcp
 
       - name: Check Tauri backend
         run: cargo check --manifest-path src-tauri/Cargo.toml

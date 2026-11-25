@@ -4923,6 +4923,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "tie-cli",
  "tie-storage",
  "tokio",
 ]
@@ -4932,6 +4933,7 @@ name = "tie-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tie-local",

@@ -4,6 +4,7 @@ import type { PageTreeNode, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { pageSourceIds, sourceShortLabel } from '@/services/page-sources'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { useBackendStore } from '@/stores/backend'
 import { pageTreeDragKey } from '@/composables/pageTreeDrag'
 import { mobilePageSwipeKey } from '@/composables/mobilePageSwipe'
 const props = defineProps<{
@@ -24,6 +25,7 @@ const emit = defineEmits<{
   reorder: [pageId: string, targetId: string, position: 'before' | 'after']
 }>()
 const store = useWorkspaceStore()
+const backend = useBackendStore()
 const dragCtx = inject(pageTreeDragKey, null)
 const swipeCtx = inject(mobilePageSwipeKey, null)
 const usesTouchReorder = computed(() => props.touchReorder || Boolean(dragCtx))
@@ -42,6 +44,16 @@ const homeWorkspace = computed(() => {
     ?? null
 })
 const hasSyncConflict = computed(() => store.syncConflicts.has(props.node.id))
+const backendSync = computed(() => {
+  void backend.connected
+  return store.pageBackendSync(props.node.id)
+})
+const backendSyncTitle = computed(() => {
+  if (backendSync.value === 'synced') return '已同步到后台'
+  if (backendSync.value === 'pending') return '还没同步到后台'
+  if (backendSync.value === 'conflict') return '两边都改过，较新的一份在正文里'
+  return ''
+})
 const dropPosition = ref<'before' | 'inside' | 'after' | null>(null)
 const effectiveDropPosition = computed(() => {
   if (!dragCtx || dragCtx.dropTargetId.value !== props.node.id) return dropPosition.value
@@ -366,7 +378,15 @@ onBeforeUnmount(() => {
         </button>
         <span class="page-glyph">{{ DEFAULT_PAGE_ICON }}</span>
         <span class="tree-title">{{ node.title || '无标题' }}</span>
-        <span v-if="hasSyncConflict" class="page-sync-conflict-badge" title="同步冲突，打开页面后可查看差异">!</span>
+        <span
+          v-if="backendSync"
+          class="page-sync-state"
+          :class="backendSync"
+          role="img"
+          :title="backendSyncTitle"
+          :aria-label="backendSyncTitle"
+        ></span>
+        <span v-if="hasSyncConflict && !backendSync" class="page-sync-conflict-badge" title="同步冲突，打开页面后可查看差异">!</span>
         <span v-if="homeWorkspace" class="page-source-badge" :title="homeWorkspace.path">{{ sourceShortLabel(homeWorkspace.name) }}</span>
         <span v-if="!compact" ref="actionsRoot" class="tree-actions" :class="{ open: actionsOpen }" @click.stop>
           <button ref="moreButton" class="tree-more-button" :aria-expanded="actionsOpen" aria-haspopup="menu" aria-label="页面操作" @click="toggleActions">⋯</button>

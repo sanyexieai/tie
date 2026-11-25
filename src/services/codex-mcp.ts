@@ -13,20 +13,10 @@ export interface AgentClientStatus {
 }
 
 export interface AgentMcpStatus {
-  nodeAvailable: boolean
   mcpReady: boolean
   serverPath: string | null
   mcpError: string | null
   clients: AgentClientStatus[]
-}
-
-/** @deprecated Prefer AgentMcpStatus */
-export interface CodexMcpStatus {
-  configured: boolean
-  workspacePath: string | null
-  serverPath: string | null
-  configPath: string
-  nodeAvailable: boolean
 }
 
 export interface SkillConnection {
@@ -109,17 +99,6 @@ export async function configureAgentMcp(workspacePath: string, clients: AgentCli
 
 export async function setMcpSourcePath(path: string): Promise<AgentMcpStatus> {
   return invoke<AgentMcpStatus>('set_mcp_source_path', { path })
-}
-
-/** @deprecated Prefer fetchAgentMcpStatus */
-export async function fetchCodexMcpStatus(): Promise<CodexMcpStatus | null> {
-  if (!('__TAURI_INTERNALS__' in window)) return null
-  return invoke<CodexMcpStatus>('codex_mcp_status')
-}
-
-/** @deprecated Prefer configureAgentMcp */
-export async function configureCodexMcp(workspacePath: string): Promise<CodexMcpStatus> {
-  return invoke<CodexMcpStatus>('configure_codex_mcp', { workspacePath })
 }
 
 export async function listSkillConnections(): Promise<SkillConnection[]> {

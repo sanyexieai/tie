@@ -1,10 +1,10 @@
 # @tie/mcp
 
-Tie 的 MCP 协议壳。页面和文件登记只走 Rust `tie` CLI（无 JS 回退）。缺 `TIE_CLI` 时进程退出。诊断用 `tie_doctor`。页面格式见 [`docs/page-format.md`](../../docs/page-format.md)。
+这里只放 Agent Skill 模板。MCP 工具由 Rust `tie mcp` 实现。后台打开 HTTP MCP 时，也是把请求交给 `tie-cli mcp`，不在这个目录里跑 Node。页面格式见 [`docs/page-format.md`](../../docs/page-format.md)。
 
 Agent 怎么接：
 
-- 绑定了后台，且后台用 `TIE_MCP_HTTP=1` 拉起了 MCP：客户端配置写 `/health` 里的 `mcp.url`
+- 绑定了后台，且管理员已在「服务」里打开 MCP：客户端配置写 `/health` 里的 `mcp.url`，并使用用户自己的 MCP 令牌。后台把请求交给 Rust `tie-cli mcp`
 - 没绑后台：不写 URL，也不要用 `node` 启动 `server.js`。直接调用本机 `tie`
 
 桌面端负责按协议渲染并打开本地链接。Skill 在设置里接入时同步到工作区 `.agents/skills/`，以及 `~/.agents/skills`、`~/.claude/skills`、`~/.cursor/skills`。
@@ -42,16 +42,6 @@ Skill `tie-mcp-connect`：后台 `/health` 给出 `mcp.url` 时用该 HTTP 地�
 
 文件资源落在工作区 `.tie/files/`（与页面图片附件 `.tie/assets/` 分开）。**区外**登记写 `tie://file/…`；**区内**（含 copy）写 `tie://path/…`。不要写 `file:///`。新写入的 `url` 会带上 `sourceId`：优先环境变量 `TIE_SOURCE_ID` / `TIE_STORAGE_SOURCE_ID`，否则从工作区页面的 `storage_source_id` 推断。
 
-## 准备
-
-```bash
-# 在仓库根目录
-npm install --prefix packages/tie-mcp
-npm run test:mcp
-```
-
-工作区路径需指向含 `pages/` 的目录（桌面端「本地目录」存储源，或应用数据里的 workspace）。
-
 ## 桌面端设置
 
 Tie 桌面端 → **存储设置** → **Agent 知识库**：
@@ -70,21 +60,15 @@ npm run mcp:setup -- --workspace /绝对路径/你的工作区 --url http://后�
 npm run mcp:setup -- --workspace /绝对路径/你的工作区 --dry-run
 ```
 
-`--url` 写入所选客户端的 `tie` 项。不传 `--url` 时删除这项里旧的 `command` / `args`，并打印 `tie --workspace ...`。
+配置始终写入本机 `tie mcp`。`--url` 只说明后台地址，不会把客户端改成只连 HTTP。
 
-## 手动配置（仅后台 HTTP）
+## 手动配置
 
-Codex `~/.codex/config.toml`：
+本地 Agent 始终写本机 `tie mcp`。这个进程先试后台 HTTP，不通再用本地工作区。不要把配置改成只留 `url`。
 
-```toml
-[mcp_servers.tie]
-url = "http://后台主机:8787/mcp"
-enabled = true
-```
+Cursor `~/.cursor/mcp.json` 的 `mcpServers.tie` 写 `command` 和 `args: ["mcp"]`，环境变量 `TIE_WORKSPACE` 指向工作区。Codex、Claude Code 同样写这个命令，不要改成只留 HTTP 地址。
 
-Cursor `~/.cursor/mcp.json` 的 `mcpServers.tie` 只写 `url`。Claude Code 的 `mcpServers.tie` 写 `type: "http"` 和 `url`。不要写 `command` 或 `args`。
-
-没绑后台时不要写这段。用：
+直接查本地页面可以用：
 
 ```bash
 tie --workspace /绝对路径/你的工作区 recent

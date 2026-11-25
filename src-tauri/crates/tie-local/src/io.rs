@@ -3,7 +3,8 @@ use crate::page::{
     remove_page_assets, write_page_meta,
 };
 use crate::paths::{
-    allocate_page_path, find_page_file, page_asset_dir, revision_dir, sanitize_asset_name,
+    allocate_page_path, find_page_file, page_asset_dir, repair_utf8_mojibake, revision_dir,
+    sanitize_asset_name,
     workspace_relative,
 };
 use tie_common::fs_path::paths_equal;
@@ -24,7 +25,9 @@ pub fn save_page_to_root(
     page: Page,
     expected_updated_at: Option<&str>,
 ) -> Result<Page, String> {
-    let page = normalize_page_sources(page);
+    let mut page = normalize_page_sources(page);
+    page.title = repair_utf8_mojibake(&page.title);
+    page.markdown = repair_utf8_mojibake(&page.markdown);
     fs::create_dir_all(root.join("pages")).map_err(|error| error.to_string())?;
     let previous_path = find_page_file(root, &page.id);
     if let Some(path) = &previous_path {

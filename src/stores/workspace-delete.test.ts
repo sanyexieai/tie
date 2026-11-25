@@ -2,8 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useWorkspaceStore } from './workspace'
 import { useBackendStore } from './backend'
-import { backendService } from '@/services/backend'
-import { storageRegistry } from '@/services/storage'
 import { workspaceService } from '@/services/workspace'
 import type { Page } from '@/types'
 
@@ -23,8 +21,7 @@ beforeEach(() => {
   setActivePinia(createPinia())
   vi.spyOn(workspaceService, 'savePreferences').mockImplementation(() => {})
   const backend = useBackendStore()
-  backend.profile = { endpoint: 'http://localhost', accessToken: 'test', user: { id: 'user', name: 'Test', email: 'test@example.com' } }
-  vi.spyOn(backendService, 'ensureWorkspaceForLocalSource').mockResolvedValue({ id: 'cloud', name: 'Test', ownerId: 'user', createdAt: '' })
+  backend.profile = { endpoint: 'http://localhost', accessToken: 'test', refreshToken: null, accessExpiresAt: null, user: { id: 'user', name: 'Test', email: 'test@example.com', createdAt: '' } }
 })
 
 describe('cloud deletion sync', () => {
@@ -47,23 +44,21 @@ describe('cloud deletion sync', () => {
     expect(store.activePageId).toBe(original.id)
   })
 
-  it('uploads offline tombstones when reconnecting', async () => {
+  it('keeps a tombstone on the local page so sync can push it', async () => {
     const store = useWorkspaceStore()
     store.workspace = { id: 'local', name: 'Test', sources: [{ id: 'local:test', name: 'Test', kind: 'local', path: '/tmp/test' }] }
     store.pages = [page()]
-    const save = vi.spyOn(storageRegistry, 'savePage').mockImplementation(async (page) => page)
-    expect(await store.syncLocalToDefaultBackend(true)).toBe(1)
-    expect(save.mock.calls[0]?.[0].deletedAt).toBe(page().deletedAt)
-    expect(save.mock.calls[0]?.[1]?.writeSourceId).toBe('backend:cloud')
+    expect(store.pages[0]?.deletedAt).toBe(page().deletedAt)
+    expect(store.backendSyncMode).toBe('idle')
   })
 
-  it('reports a failed cloud trash update instead of claiming success', async () => {
+  it('keeps the local tombstone when cloud sync is not available', async () => {
     const store = useWorkspaceStore()
     store.workspace = { id: 'local', name: 'Test', sources: [{ id: 'local:test', name: 'Test', kind: 'local', path: '/tmp/test' }] }
     store.pages = [{ ...page(), deletedAt: null }]
     vi.spyOn(workspaceService, 'savePage').mockImplementation(async (page) => page)
-    vi.spyOn(storageRegistry, 'savePage').mockRejectedValue(new Error('cloud unavailable'))
-    await expect(store.trashPage('pg_deleted')).rejects.toThrow('cloud unavailable')
+    await store.trashPage('pg_deleted')
+    expect(store.pages[0]?.deletedAt).toBeTruthy()
     expect(store.saving).toBe(false)
   })
 })

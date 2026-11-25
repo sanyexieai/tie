@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Page } from '@/types'
-import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageCloudSourceIds, pageContentEqual, pageForStorageWrite, pageMirrorSourceIds, pageSourceIds, pageSourceRoleLabel, pageWriteEqual, prunePageSources, remapPageSourceIds, resolveCollaborationPrimary, sourceShortLabel, withPageSources } from '@/services/page-sources'
+import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageCloudSourceIds, pageContentEqual, pageForStorageWrite, pageSourceIds, pageSourceRoleLabel, pageWriteEqual, prunePageSources, remapPageSourceIds, resolveCollaborationPrimary, sourceShortLabel, withPageSources } from '@/services/page-sources'
 
 function page(partial: Partial<Page> & Pick<Page, 'id' | 'storageSourceId'>): Page {
   return {
@@ -34,11 +34,6 @@ describe('page-sources', () => {
     expect(merged[0]?.storageSourceId).toBe('s1')
     expect(pageSourceIds(merged[0]!).sort()).toEqual(['s1', 's2'])
     expect(pageBoundToSource(merged[0]!, 's1')).toBe(true)
-  })
-
-  it('pageMirrorSourceIds excludes primary', () => {
-    const next = withPageSources(page({ id: 'a', storageSourceId: 's1' }), 's1', ['s1', 's2'])
-    expect(pageMirrorSourceIds(next)).toEqual(['s2'])
   })
 
   it('withPageSources keeps primary first among ids', () => {

@@ -24,7 +24,6 @@ const bodyMarkdown = ref('')
 const headingInFile = ref(false)
 const tags = ref<string[]>([])
 const tagDraft = ref('')
-const manualSaveNotice = ref(false)
 const copiedLinkNotice = ref(false)
 const exportedNotice = ref(false)
 const refreshedNotice = ref(false)
@@ -50,7 +49,6 @@ const tagSuggestLoading = ref(false)
 const documentRoot = ref<HTMLElement | null>(null)
 const sourceEditor = ref<HTMLTextAreaElement | null>(null)
 const richEditor = ref<{ undo: () => void; redo: () => void; findText: (query: string, direction?: number) => { count: number; index: number }; focusBlank?: (event: MouseEvent) => boolean } | null>(null)
-let manualSaveTimer: number | undefined
 let copiedLinkTimer: number | undefined
 let exportedTimer: number | undefined
 let refreshedTimer: number | undefined
@@ -61,36 +59,36 @@ let autoSavePending = false
 let autoSaveFlushDone: Promise<void> = Promise.resolve()
 let resolveAutoSaveFlushDone: (() => void) | null = null
 
+const pageSync = computed(() => store.pageBackendSync(store.activePage?.id))
+const syncedToBackend = computed(() => pageSync.value === 'synced')
+const awaitingBackendSync = computed(() => pageSync.value === 'pending' || pageSync.value === 'conflict')
 const status = computed(() => {
-  const kind = activeSource.value?.kind
-  const savedLabel = kind === 'backend'
-    ? '已保存到后台'
-    : kind === 's3'
-      ? '已保存到云端'
-      : '已保存到本地'
-  const awaitingWrite = Boolean(
-    store.activePage
-    && (store.pageHasPendingRemoteSave(store.activePage.id) || store.syncConflicts.has(store.activePage.id)),
-  )
-  return store.saving
-    ? '正在保存…'
-    : refreshing.value
-      ? '刷新中…'
-      : saveError.value
-        ? '保存失败'
-        : awaitingWrite
-          ? '尚未同步到其他设备'
-          : hasUnsavedChanges.value
-            ? '未保存'
-            : refreshedNotice.value
-              ? '已从存储刷新'
-              : exportedNotice.value
-                ? '已导出'
-                : copiedLinkNotice.value
-                  ? '已复制页面链接'
-                  : manualSaveNotice.value
-                    ? '已保存'
-                    : savedLabel
+  if (store.saving) return '保存中'
+  if (refreshing.value) return '刷新中'
+  if (saveError.value) return '失败'
+  if (hasUnsavedChanges.value) return '未保存'
+  if (refreshedNotice.value) return '已刷新'
+  if (exportedNotice.value) return '已导出'
+  if (copiedLinkNotice.value) return '已复制'
+  if (pageSync.value === 'conflict') return '冲突'
+  if (awaitingBackendSync.value) return '未同步'
+  if (syncedToBackend.value) return '已同步'
+  return activeSource.value?.kind === 's3' ? '云端' : '本地'
+})
+const statusTitle = computed(() => {
+  if (saveError.value) return saveError.value
+  if (store.activePage && store.syncConflicts.has(store.activePage.id)) return '本地和后台都改过，较新的一份在正文里'
+  switch (status.value) {
+    case '已同步': return '已保存，并同步到后台'
+    case '冲突': return '本地和后台都改过，较新的一份在正文里'
+    case '本地': return '只保存在本地'
+    case '云端': return '已保存到云端'
+    case '未同步': return '已保存在本地，还没同步到后台'
+    case '保存中': return '正在保存'
+    case '未保存': return '有未保存的修改'
+    case '失败': return '保存失败'
+    default: return status.value
+  }
 })
 const isFavorite = computed(() => Boolean(store.activePage && store.favoritePageIds.includes(store.activePage.id)))
 const rawActiveSource = computed(() => store.allSources.find((source) => source.id === store.activePage?.storageSourceId) ?? null)
@@ -409,9 +407,6 @@ async function saveNow() {
     await store.persist(page)
     hasUnsavedChanges.value = false
     saveError.value = null
-    manualSaveNotice.value = true
-    if (manualSaveTimer) window.clearTimeout(manualSaveTimer)
-    manualSaveTimer = window.setTimeout(() => { manualSaveNotice.value = false }, 2400)
     return true
   } catch (reason) {
     saveError.value = saveFailureMessage(reason)
@@ -426,12 +421,7 @@ async function reloadRemotePage() {
   if (!conflictConfirm(`将重新载入${remoteConflictLabel.value}版本，当前未保存的本地修改会丢失。是否继续？`)) return
   cancelAutoSave()
   try {
-    const current = store.pages.find((item) => item.id === pageId)
-    if (conflictRemotePage.value?.id === pageId && current) {
-      store.adoptRemotePage(conflictRemotePage.value, current)
-    } else {
-      await store.resolveConflictLoadRemote(pageId)
-    }
+    await store.resolveConflictLoadRemote(pageId)
     loadActivePage()
     saveError.value = null
     conflictRemotePage.value = null
@@ -450,9 +440,6 @@ async function forceOverwriteRemote() {
     hasUnsavedChanges.value = false
     saveError.value = null
     conflictRemotePage.value = null
-    manualSaveNotice.value = true
-    if (manualSaveTimer) window.clearTimeout(manualSaveTimer)
-    manualSaveTimer = window.setTimeout(() => { manualSaveNotice.value = false }, 2400)
   } catch (reason) {
     saveError.value = saveFailureMessage(reason)
   }
@@ -646,9 +633,6 @@ async function restoreRevision(revision: PageRevision) {
   loadActivePage()
   showingHistory.value = false
   selectedRevisionId.value = null
-  manualSaveNotice.value = true
-  if (manualSaveTimer) window.clearTimeout(manualSaveTimer)
-  manualSaveTimer = window.setTimeout(() => { manualSaveNotice.value = false }, 2400)
 }
 
 function onBodyChange(markdown: string) {
@@ -848,7 +832,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('tie:open-page-history', onWorkspaceCommand)
   window.removeEventListener('tie:refresh-page', onWorkspaceCommand)
   window.removeEventListener('tie:mobile-back', onMobileBack)
-  if (manualSaveTimer) window.clearTimeout(manualSaveTimer)
   if (copiedLinkTimer) window.clearTimeout(copiedLinkTimer)
   if (exportedTimer) window.clearTimeout(exportedTimer)
   if (refreshedTimer) window.clearTimeout(refreshedTimer)
@@ -892,7 +875,7 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
       >←</button>
       <nav v-if="!props.mobileLayout" class="breadcrumbs" aria-label="页面层级"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><template v-for="(page, index) in breadcrumbs" :key="page.id"><span>›</span><button :class="{ current: index === breadcrumbs.length - 1 }" :title="page.title" @click="store.openPage(page.id)">{{ page.title }}</button></template></nav>
       <h1 v-else class="mobile-editor-title">{{ store.activePage.title }}</h1>
-      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span class="source-select-trigger is-label" :title="workspaceBadgeTitle">{{ sourceShortLabel(activeSource.name) }}</span></div><span class="save-dot" :class="{ saving: store.saving, error: Boolean(saveError) }"></span><span :title="saveError ?? undefined">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" :title="saveError || '重新尝试保存当前页面'" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从工作区刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button v-if="!isDesktop" class="copy-link-button" title="导入 .tiez" @click="store.importTiezBrowser()">导入</button><button v-if="!isDesktop" class="copy-link-button" title="导出当前工作区为 .tiez" @click="store.exportTiezBrowser()">.tiez</button><button class="copy-link-button" title="导出 .tie，以当前页面为根" @click="exportTie">⇩</button><button v-if="isDesktop" class="copy-link-button" title="导出此页及引用（闭包）" @click="exportPageClosure">⇪</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
+      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span class="source-select-trigger is-label" :title="workspaceBadgeTitle">{{ sourceShortLabel(activeSource.name) }}</span></div><span class="save-dot" :class="{ saving: store.saving, pending: status === '未同步', synced: status === '已同步', conflict: status === '冲突', local: status === '本地' || status === '云端', error: Boolean(saveError) }" :title="statusTitle"></span><span v-if="status !== '已同步' && status !== '未同步' && status !== '冲突'" :title="statusTitle">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" :title="saveError || '重新尝试保存当前页面'" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从工作区刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button v-if="!isDesktop" class="copy-link-button" title="导入 .tiez" @click="store.importTiezBrowser()">导入</button><button v-if="!isDesktop" class="copy-link-button" title="导出当前工作区为 .tiez" @click="store.exportTiezBrowser()">.tiez</button><button class="copy-link-button" title="导出 .tie，以当前页面为根" @click="exportTie">⇩</button><button v-if="isDesktop" class="copy-link-button" title="导出此页及引用（闭包）" @click="exportPageClosure">⇪</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
     </header>
     <aside v-if="showingHistory" class="history-popover">
       <div class="history-popover-heading"><strong>页面历史</strong><button aria-label="关闭页面历史" @click="showingHistory = false">×</button></div>

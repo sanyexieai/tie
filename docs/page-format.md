@@ -137,7 +137,7 @@ deleted_at:
 |------|------|
 | `src-tauri/crates/tie-local` | **规范实现**（Rust） |
 | `tie` CLI | 本地读写入口 |
-| `packages/tie-mcp` / `backend` | 过渡期镜像；应收敛到 CLI/core |
+| `backend` | 账号和 HTTP API。页面字节以 `tie-local` 为准。后台 MCP 调用 `tie-cli mcp`，不在这里再写一套页面规则 |
 
 Golden fixtures：`src-tauri/crates/tie-local/testdata/page-format/`。
 
@@ -185,7 +185,7 @@ tie --workspace "$OTHER_WORKSPACE" import ./pack --strategy skip
 
 页面读写只走 `tie` CLI（无 JS 回退）。缺二进制时用 Skill `tie-upgrade-cli` 或 `tie_doctor`。Agent 只在绑定了已开启 MCP HTTP 的后台时使用 HTTP 地址；否则直接调用本机 `tie`。不要用 `node` 启动 `server.js`。
 
-输出默认为 JSON。`write` 会自动补 frontmatter，更新前写入 `.tie/history/`。
+输出默认为 JSON。`write` 把元数据写入 `.tie/meta/`，更新前把旧内容放入 `.tie/history/`。旧的 Tie 头仍能读，下次保存时去掉。
 
 ## 页面闭包导出 / 导入（`tie export` / `tie import`）
 

@@ -1,13 +1,13 @@
 # Tie 仓库指引（Codex）
 
-- 桌面端 / 本地优先知识库；可选 MCP：`packages/tie-mcp`
+- 桌面端 / 本地优先知识库。Agent 的本机 MCP 是 `tie mcp`。后台 HTTP MCP 也调用这个 Rust CLI。`packages/tie-mcp` 只留 Skill 模板
 - **连接状态**：只有「本地」和「本地 + 服务器」。本地是工作区，可绑定多个；服务器只绑定一台，绑定后云同步。S3 是服务器存储能力，不是用户可见源。同步见 `docs/sync.md`（用户只感知保存）
 - **无 UI 本地读写**：Rust CLI `tie`（`src-tauri/crates/tie-cli`，`npm run tie -- …`）；页面格式见 `docs/page-format.md`；核心 API 在 `tie-local`。工作区入口为文本 **`.tie` 解决方案**；整树携带为 **`.tiez`**（`tie pack` / `tie unpack`）
-- **MCP**：页面读写只经 Rust `tie` CLI（无 JS 回退）。绑了后台且开启 MCP HTTP 时，Agent 用后台 `/mcp`；没绑后台时客户端启动 `tie mcp`（stdio）。不要在本机再起 HTTP，也不要用 `node` 启动 `server.js`。缺 CLI 时用 Skill `tie-upgrade-cli` + `tie_doctor`
+- **MCP**：页面读写只经 Rust `tie` CLI（无 JS 回退）。Cursor 等本地 Agent 始终拉起 `tie mcp`（stdio）。该进程先用登录会话请求后台 `/mcp`，不通再读写本地工作区。不要把配置改成只留 url。不要在本机再起 HTTP，也不要用 `node` 启动 `server.js`。缺 CLI 时用 Skill `tie-upgrade-cli` + `tie_doctor`
 - **格式校验**：`tie format check` / MCP `tie_doctor`
 - **文件登记**：桌面与 CLI/MCP 共用 `tie-local::FileRegistry`；Android `content://` 仍走 SAF
-- **Git**：安装包不自带；桌面按需下载到应用数据目录或使用系统 `git`（`TIE_GIT` 可覆盖）。逻辑在 `desktop/git_sync.rs`
-- **后台 MCP HTTP**：随 Tie 后台启动（`TIE_MCP_HTTP=1`，需 `TIE_WORKSPACE` 与 `TIE_CLI`），客户端从 `/health` 读取 `mcp.url`
+- **Git**：安装包不自带；桌面按需下载到应用数据目录或使用系统 `git`（`TIE_GIT` 可覆盖）。逻辑在 `desktop/git_sync.rs`。同步进程 `tie sync` 对接的是后台 API，不是 Git remote
+- **后台 MCP HTTP**：在管理后台「服务」里打开，并填写 `tie-cli` 路径。用户在 `/me/` 签发自己的令牌。客户端从 `/health` 读取 `mcp.url`
 - **导出闭包**：`tie export` / `tie import`；MCP `tie_export` / `tie_import`
 - **同步语义**：`docs/sync.md`（用户只感知保存）
 - **Android 精简版**：本地目录（应用内 / 自选文件夹）、自定义后台（含后台托管 S3）；直连 S3 源废弃中。存储分层见 `src-tauri/crates/`（`tie-common`、`tie-local`、`tie-s3`、`tie-storage`）；Tauri 薄壳在 `local/`、`s3/`、`mobile.rs`；桌面专用在 `desktop/`；无 `keyring`、MCP/Skills

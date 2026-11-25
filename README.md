@@ -58,8 +58,7 @@ Typora 风格编辑区、侧栏页面树，以及右侧大纲 / 链接 / 局部�
 - 局部图谱中标题页节点可打开页面，标签节点可直接进入对应标签视图，正文内容抽象节点可定位到对应标题。
 - 全局知识图谱：从左侧“图谱”进入，汇总全工作区的标题页、标签、内容抽象及其关系。
 - 浏览器开发模式使用 `localStorage` 演示持久化；Tauri 桌面模式将页面保存为真实 Markdown 文件。
-- 桌面端存储源（目标模型）：**本地目录 / SMB 工作副本**，以及 **自定义后台**（服务端可选磁盘或 S3 落盘）。独立直连 S3 源已废弃添加入口。同步语义见 [`docs/sync.md`](docs/sync.md)：**用户只感知保存**，配置了对端后由系统自动对齐（本机/SMB 经 Git；后台经 API）。安装包不自带 Git，缺省时可按需下载运行时或使用系统 Git。
-- 过渡期仍可能看到旧的协作主源 / 备份镜像 / `storage_source_id(s)` 行为；新功能按「工作副本 + 无感同步」演进，勿再扩大按页镜像扇出。
+- 桌面端存储：**本地目录 / SMB 工作副本**，以及至多一台 **自定义后台**（服务端可选磁盘或 S3 落盘）。独立直连 S3 不再提供添加入口，存量只读。同步语义见 [`docs/sync.md`](docs/sync.md)：**用户只感知保存**。和后台对齐由已登录用户的同步进程 `tie sync` 完成。本机或 SMB 上的多份目录仍可由桌面端用 Git 对齐，那不是同步进程的对端。安装包不自带 Git。
 - 页面迁移到其他存储源时，会将其整个子页面树、Markdown 文件及每页历史版本一并迁移；稳定页面 ID 与跨来源链接保持不变。
 - 存储源可设置显示名称，方便区分多个同名目录；名称只保存在 Tie 配置中，不会修改实际文件路径或 SMB 共享名称。
 - 侧栏存储源会分别显示正常页面与回收站页面数量；只要回收站仍有页面，该来源仍会受到安全断开保护。
@@ -81,14 +80,13 @@ Typora 风格编辑区、侧栏页面树，以及右侧大纲 / 链接 / 局部�
 
 | 类型 | 说明 |
 |------|------|
-| 本地目录 / SMB | 工作副本：真实 Markdown + `.tie/`；多设备对齐用 Git（按需下载运行时，不装进安装包） |
-| 自定义后台 | 云端工作区；服务端磁盘或托管 S3；客户端不直连桶 |
-| 独立 S3（废弃） | 旧版客户端直连；不再提供添加；请迁到后台 |
+| 本地目录 / SMB | 工作副本：真实 Markdown + `.tie/`。多份本地目录之间用 Git（按需下载运行时，不装进安装包） |
+| 自定义后台 | 当前登录用户的云端工作区；服务端磁盘或托管 S3；由 `tie sync` 对齐 |
+| 独立 S3（废弃） | 旧版客户端直连；不再提供添加；存量只读 |
 
-- **保存无感同步**：落盘成功即保存成功；对端对齐在后台进行，失败不撤销本机保存。
+- **保存**：落盘成功即保存成功。已登录并配好后台工作区时，再由同步进程对齐。失败不撤销本机保存。
 - **离线队列**：保存失败时入队，可在存储设置中重试。
 - **页面附件**：本地/SMB 在 `.tie/assets/<页面ID>/`；经后台时由服务端布局决定；Markdown 引用 `tie://asset/<页面ID>/<文件名>`。
-- **过渡期**：旧备份镜像 / 直连 S3 增量同步仍可能存在于代码路径，正在收口。
 
 ### 启动自定义后台
 
@@ -96,9 +94,9 @@ Typora 风格编辑区、侧栏页面树，以及右侧大纲 / 链接 / 局部�
 npm run backend:dev
 ```
 
-默认地址 `http://127.0.0.1:8787`。开发模式允许使用默认 JWT 密钥；**生产环境**必须配置强随机 `TIE_JWT_SECRET` 并绑定 `127.0.0.1`（见 `backend/.env.example`）。
+默认地址 `http://127.0.0.1:8787`。管理界面在 `http://127.0.0.1:8787/admin/`，普通用户在 `http://127.0.0.1:8787/me/`。还没有用户时，第一个注册的人成为管理员。开发模式允许使用默认 JWT 密钥；**生产环境**必须配置强随机 `TIE_JWT_SECRET` 并绑定 `127.0.0.1`（见 `backend/.env.example`）。
 
-可选环境变量（见 `backend/.env.example`）：`OPENAI_API_KEY` 等用于后台 AI 标签建议。
+MCP 开关、`tie-cli` 路径和标签建议的接口写在管理后台「服务」里。用户在「我的账号」里选择自己的工作区、存储连接，并签发 MCP 令牌。HTTP MCP 调用 Rust `tie-cli mcp`。
 
 ### AI 标签
 
@@ -163,13 +161,13 @@ Tie 内的页面 ID 与跨源链接写在 Markdown Frontmatter 中；迁移目�
 
 ## 已知限制（1.0）
 
-- 无多用户协作、共享权限或实时协同编辑
+- 后台有注册登录，工作区按用户隔离；没有共享权限，也没有实时协同编辑
 - 不支持后台工作区 ↔ backend-s3 Provider 互迁，也不支持两个 backend-s3 Provider 互迁
 - 涉及后台源的页面迁移**不保留**历史版本（file ↔ S3 迁移会保留）
 - 浏览器模式不支持 `tie://asset/` 真实附件存储
 - Linux AppImage 安装包尚未提供（当前 Release 为 deb/rpm；Windows 为 msi/nsis）
 - 桌面版支持应用内自动更新（默认 PackHub，GitHub 为回退；需 Release 已签名）；浏览器演示模式与 Android 精简版不支持
-- Codex / Agent 外接知识库为可选本地包 `@tie/mcp`（`packages/tie-mcp`），不依赖自定义后台
+- Agent 知识库：本地 Agent 始终拉起 `tie mcp`。进程先试后台 HTTP，不通再用本地工作区。`packages/tie-mcp` 只放 Skill 模板
 
 ## 运行
 
@@ -327,7 +325,7 @@ npm run tauri:android:build
 
 推送 `v*` tag 时，GitHub Actions（`release.yml`）会自动构建并上传 `tie-<版本>-android-universal.apk` 到 Release；需在仓库 Secrets 配置 `ANDROID_KEY_*` 才会产出可安装的已签名 APK（见 [`RELEASE.md`](RELEASE.md)）。
 
-在应用「设置 → 添加存储源」中配置 S3 或登录后台，然后点「同步并载入」拉取页面。
+在应用里登录自定义后台。页面先写在本地工作副本，再由 `tie sync` 对齐到该用户在后台上的工作区。
 
 ### 可选：Agent 知识库（Codex / Cursor / Claude Code）
 
@@ -363,7 +361,6 @@ S3 客户端使用 `minio` + **rustls**（`default-features = false, features = 
 npm run check
 npm test
 npm run test:backend
-npm run test:mcp
 npm run build && npm run test:e2e
 cargo check --manifest-path src-tauri/Cargo.toml
 npm run tauri:build

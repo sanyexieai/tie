@@ -87,8 +87,6 @@ const gitSourceId = ref('')
 const gitRemoteUrl = ref('')
 const gitNotice = ref('')
 const gitBusy = ref(false)
-const syncingDefaultBackend = ref(false)
-const defaultBackendSyncNotice = ref('')
 const isDesktop = isTauriDesktop()
 const storageListEl = ref<HTMLElement | null>(null)
 const draggingSourceId = ref<string | null>(null)
@@ -130,9 +128,9 @@ const remoteMcpUrl = computed(() => (
 ))
 const mcpStatusText = computed(() => {
   if (backend.connected) {
-    if (remoteMcpUrl.value) return `后台 MCP HTTP · 运行中 · ${remoteMcpUrl.value}`
-    if (backend.mcp?.enabled) return `后台 MCP HTTP · 未启动${backend.mcp.error ? ` · ${backend.mcp.error}` : ''}`
-    return '后台 MCP HTTP · 未开启。启动后台时设置 TIE_MCP_HTTP=1'
+    if (remoteMcpUrl.value) return `本机 tie mcp · 先试后台 HTTP · ${remoteMcpUrl.value}`
+    if (backend.mcp?.enabled) return `后台 HTTP 未启动${backend.mcp.error ? ` · ${backend.mcp.error}` : ''}`
+    return '后台 MCP HTTP · 未开启。请管理员在后台「服务」里打开'
   }
   return tieCliPath.value ? `本地 MCP · tie mcp · ${tieCliPath.value}` : '本地 MCP · 未找到 tie CLI'
 })
@@ -296,7 +294,7 @@ const codexSourceOptions = computed(() => {
 })
 const codexStatusSummary = computed(() => {
   if (!isDesktop) return '仅桌面端可用'
-  if (remoteMcpUrl.value) return `后台 MCP HTTP · ${remoteMcpUrl.value}`
+  if (remoteMcpUrl.value) return `本机 tie mcp · 先试后台 HTTP · ${remoteMcpUrl.value}`
   const stale = agentMcpStatus.value?.clients.find((item) => item.error)
   if (stale?.error) return stale.error
   if (tieCliPath.value) return '本地 MCP · tie mcp'
@@ -358,7 +356,7 @@ function mcpHandoffText() {
     configPath: known.find((status) => status.id === item.id)?.configPath,
   }))
   return buildMcpHandoffPrompt({
-    mode: remoteMcpUrl.value ? 'http' : 'local',
+    mode: 'local',
     workspaceName: source.name,
     workspacePath: source.path,
     mcpUrl: remoteMcpUrl.value,
@@ -432,9 +430,7 @@ async function applyCodexMcp() {
     const labels = selectedClients.value
       .map((id) => AGENT_CLIENT_OPTIONS.find((item) => item.id === id)?.label ?? id)
       .join('、')
-    codexNotice.value = remoteMcpUrl.value
-      ? `已为 ${labels} 写入后台地址 ${remoteMcpUrl.value}。请新开一个对话。`
-      : `已为 ${labels} 写入本机 tie MCP（tie mcp）。请新开一个对话。`
+    codexNotice.value = `已为 ${labels} 写入本机 tie mcp。后台 HTTP 通的时候会先走后台，不通再用本地工作区。请新开一个对话。`
     window.setTimeout(() => { codexNotice.value = '' }, 8000)
   } catch (error) {
     codexError.value = error instanceof Error ? error.message : String(error)
@@ -648,24 +644,6 @@ async function syncAndReload() {
     /* store / backend 会保留错误 */
   } finally {
     syncingRemote.value = false
-  }
-}
-
-async function syncToDefaultBackend() {
-  if (!backend.connected) {
-    emit('connect-backend')
-    return
-  }
-  syncingDefaultBackend.value = true
-  defaultBackendSyncNotice.value = ''
-  try {
-    const count = await store.syncLocalToDefaultBackend()
-    defaultBackendSyncNotice.value = `已同步 ${count} 个本地页面和文件资源到默认服务端`
-    window.setTimeout(() => { defaultBackendSyncNotice.value = '' }, 2600)
-  } catch (error) {
-    defaultBackendSyncNotice.value = error instanceof Error ? error.message : '同步到默认服务端失败'
-  } finally {
-    syncingDefaultBackend.value = false
   }
 }
 
@@ -1095,34 +1073,6 @@ function restoreDefaultUpdateEndpoints() {
 
       <div class="storage-settings-toolbar">
         <button
-          v-if="backend.connected"
-          type="button"
-          title="修改已绑定的服务器"
-          @click="emit('connect-backend')"
-        >服务器设置</button>
-        <button
-          v-if="backend.connected"
-          type="button"
-          :disabled="syncingDefaultBackend || syncingRemote || store.reloading"
-          title="把各个工作区同步到已绑定的服务器"
-          @click="syncToDefaultBackend"
-        >
-          {{ syncingDefaultBackend ? '同步到默认服务端…' : '↑ 同步到默认服务端' }}
-        </button>
-        <button
-          :disabled="syncingRemote || store.reloading"
-          :title="store.pendingSyncCount > 0
-            ? `含 ${store.pendingSyncCount} 条待推送的离线变更`
-            : (backend.connected ? '同步到服务器并重新载入工作区' : '重新载入各个工作区')"
-          @click="syncAndReload"
-        >
-          {{ syncingRemote || store.reloading
-            ? '同步中…'
-            : (store.pendingSyncCount > 0
-              ? `↻ 同步并载入 (${store.pendingSyncCount})`
-              : '↻ 同步并载入') }}
-        </button>
-        <button
           v-if="!usesMobileUi"
           type="button"
           :class="{ active: aiFormOpen }"
@@ -1141,8 +1091,6 @@ function restoreDefaultUpdateEndpoints() {
         <button v-if="store.syncConflictsCount > 0" class="storage-conflict-notice" type="button" disabled>{{ store.syncConflictsCount }} 个同步冲突 · 见下方列表</button>
         <button :class="{ active: storageMenuOpen }" @click="storageMenuOpen = !storageMenuOpen">+ 添加工作区</button>
       </div>
-      <p v-if="defaultBackendSyncNotice" class="backend-notice">{{ defaultBackendSyncNotice }}</p>
-
       <div v-if="store.syncConflictPages.length" class="storage-conflict-list">
         <strong>同步冲突</strong>
         <small>内容不一致时请打开页面对照处理。日常保存成功即已写入本机；对端对齐失败不会撤销保存。</small>
@@ -1274,7 +1222,7 @@ function restoreDefaultUpdateEndpoints() {
           <label>服务地址<input v-model="aiConfig.endpoint" :placeholder="aiConfig.mode === 'openai' ? 'https://api.openai.com/v1' : defaultBackendEndpoint" /></label>
           <label v-if="aiConfig.mode === 'openai'">模型<input v-model="aiConfig.model" placeholder="gpt-4o-mini" /></label>
           <label>API Key（可选）<input v-model="aiConfig.apiKey" type="password" autocomplete="off" :placeholder="aiConfig.mode === 'tie' ? '留空则尝试使用后台登录 token' : 'OpenAI 模式必填'" /></label>
-          <small v-if="aiConfig.mode === 'tie'">后台服务可通过环境变量 OPENAI_API_KEY 启用真实 LLM；未配置时使用启发式提取。</small>
+          <small v-if="aiConfig.mode === 'tie'">没填密钥时使用启发式提取。</small>
         </template>
 
         <div>
@@ -1287,7 +1235,7 @@ function restoreDefaultUpdateEndpoints() {
 
       <form v-if="supportsAgentSkills && codexFormOpen" class="minio-config-form codex-mcp-form" @submit.prevent="applyCodexMcp">
         <strong>Agent 知识库</strong>
-        <small>{{ codexStatusSummary }}。有后台地址时写入 HTTP；否则写入本机 `tie mcp`，让客户端拉起 MCP。Skill 仍会同步。</small>
+        <small>{{ codexStatusSummary }}。写入的始终是本机 `tie mcp`。这个进程先试后台 HTTP，不通再用本地工作区。Skill 仍会同步。</small>
         <label>
           <span>工作区</span>
           <TieSelect
@@ -1321,16 +1269,16 @@ function restoreDefaultUpdateEndpoints() {
         <div class="mcp-handoff">
           <div>
             <strong>给 Agent 的接入提示词</strong>
-            <small>{{ mcpStatusText }}。有后台地址时提示词写 HTTP；否则写本机 `tie mcp`。</small>
+            <small>{{ mcpStatusText }}。提示词只写本机 `tie mcp`，由它决定先走后台还是本地。</small>
           </div>
           <button type="button" :disabled="!selectedMcpSource" @click="copyMcpHandoff">{{ mcpHandoffCopied ? '已复制' : '复制提示词' }}</button>
         </div>
-        <small v-if="!remoteMcpUrl && !tieCliPath" class="backend-error">未找到 tie CLI，本地模式无法交给 Agent。可先构建 tie，或绑定已开启 MCP HTTP 的后台。</small>
+        <small v-if="!tieCliPath" class="backend-error">未找到 tie CLI，无法交给 Agent。请先构建 tie。</small>
         <p v-if="codexError" class="backend-error">{{ codexError }}</p>
         <div>
           <button type="button" :disabled="codexBusy" @click="codexFormOpen = false">取消</button>
           <button type="button" :disabled="!selectedMcpSource" @click="openSkillsWorkspace">管理 Skills</button>
-          <button type="submit" :disabled="codexBusy || !selectedMcpSource || !selectedClients.length || (!remoteMcpUrl && !tieCliPath)">
+          <button type="submit" :disabled="codexBusy || !selectedMcpSource || !selectedClients.length || !tieCliPath">
             {{ codexBusy ? '正在接入…' : (anySelectedConfigured ? '更新接入' : '接入所选客户端') }}
           </button>
         </div>

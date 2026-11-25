@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { localBackendEndpoint } from '@/services/backend'
 import { useBackendStore } from '@/stores/backend'
 import { useWorkspaceStore } from '@/stores/workspace'
 
@@ -25,6 +26,24 @@ const serviceEndpoint = ref(backend.profile.endpoint)
 const accountName = computed(() => backend.profile.user?.name || backend.profile.user?.email || '')
 const selectedServer = computed(() => backend.servers.find((item) => item.id === selectedServerId.value) ?? null)
 function addServer() { if (!newServerEndpoint.value.trim()) return; const server = backend.addServer(newServerEndpoint.value); selectedServerId.value = server.id; endpoint.value = server.endpoint; newServerEndpoint.value = '' }
+function useLocalServer() {
+  const server = backend.addServer(localBackendEndpoint)
+  if (server.endpoint !== localBackendEndpoint) {
+    notice.value = ''
+    backend.error = '没能切换到本机后台'
+    return
+  }
+  selectServer(server.id)
+  notice.value = `已选择 ${server.endpoint}`
+}
+onMounted(() => {
+  if (!import.meta.env.DEV || backend.connected) return
+  void fetch(`${localBackendEndpoint}/health`).then((response) => {
+    if (!response.ok) return
+    const server = backend.addServer(localBackendEndpoint)
+    selectServer(server.id)
+  }).catch(() => { /* 本机后台没开时仍用当前地址 */ })
+})
 function selectServer(id: string) { selectedServerId.value = id; endpoint.value = backend.servers.find((item) => item.id === id)?.endpoint ?? '' }
 function toggleDefaultPrompt(serverId: string, enabled: boolean) { backend.setDefaultPrompt(serverId, enabled) }
 function onDefaultPromptChange(serverId: string, event: Event) { toggleDefaultPrompt(serverId, (event.target as HTMLInputElement).checked) }
@@ -55,7 +74,7 @@ async function submit() {
     if (!selectedServer.value) throw new Error('请先选择一台服务器')
     await backend.authenticate(mode.value, selectedServer.value.endpoint, email.value.trim(), password.value, name.value.trim())
     password.value = ''
-    await store.syncLocalToDefaultBackend()
+    await store.syncBackendNow()
     await syncWorkspacePages()
     notice.value = '已绑定服务器，云同步已开启。'
   } catch { /* store exposes message */ }
@@ -73,6 +92,8 @@ async function logout() {
 
       <template v-if="!backend.connected">
         <div class="backend-mode-tabs"><button :class="{ selected: mode === 'login' }" @click="mode = 'login'">登录</button><button :class="{ selected: mode === 'register' }" @click="mode = 'register'">注册</button></div>
+        <button type="button" class="backend-link-button" @click="useLocalServer">使用本机后台</button>
+        <p class="backend-notice">当前将登录 {{ selectedServer?.endpoint || '未选择服务器' }}</p>
         <button type="button" class="backend-link-button" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级选项' : '高级选项' }}</button>
         <div v-if="advancedOpen" class="backend-advanced-settings">
           <div class="backend-server-list"><strong>服务器地址（同时只绑定一台）</strong><div v-for="server in backend.servers" :key="server.id" class="backend-server-row"><button :class="{ selected: selectedServerId === server.id }" @click="selectServer(server.id)">{{ server.endpoint }}<small v-if="server.id === 'default-local'">默认地址</small></button><label><input type="checkbox" :checked="server.defaultPrompt" @change="onDefaultPromptChange(server.id, $event)"> 启动时询问</label></div><p v-if="!backend.servers.length" class="backend-empty">请先填写服务器地址。</p></div>

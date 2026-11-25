@@ -41,9 +41,11 @@ function parseModelTags(raw) {
 }
 
 export async function suggestTags(input) {
-  const apiKey = process.env.OPENAI_API_KEY?.trim()
-  const baseUrl = (process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1').replace(/\/+$/, '')
-  const model = process.env.OPENAI_MODEL ?? 'gpt-4o-mini'
+  const { loadSettings } = await import('./settings.js')
+  const ai = loadSettings().ai
+  const apiKey = ai.apiKey.trim()
+  const baseUrl = ai.baseUrl.replace(/\/+$/, '')
+  const model = ai.model
   if (!apiKey) return { tags: heuristicTags(input) }
 
   const prompt = [

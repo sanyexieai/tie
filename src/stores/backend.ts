@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { backendService, type BackendHealth, type BackendMcpStatus, type BackendProfile, type BackendServer, type BackendStorageSource, type BackendWorkspace } from '@/services/backend'
+import { backendService, BackendRequestError, type BackendHealth, type BackendMcpStatus, type BackendProfile, type BackendServer, type BackendStorageSource, type BackendWorkspace } from '@/services/backend'
 
 export const useBackendStore = defineStore('backend', () => {
   const profile = ref<BackendProfile>(backendService.loadProfile())
@@ -20,8 +20,15 @@ export const useBackendStore = defineStore('backend', () => {
     mcp.value = health.mcp ?? null
   }
 
-  function saveProfile() { backendService.saveProfile(profile.value) }
-  function addServer(endpoint: string) { const server = backendService.addServer(endpoint); servers.value = backendService.loadServers(); return server }
+  function saveProfile() {
+    backendService.saveProfile(profile.value)
+    if (profile.value.accessToken && profile.value.user) void backendService.publishSession(profile.value)
+  }
+  function addServer(endpoint: string) {
+    const created = backendService.addServer(endpoint)
+    servers.value = backendService.loadServers()
+    return servers.value.find((item) => item.id === created.id) ?? servers.value.find((item) => item.endpoint === created.endpoint) ?? created
+  }
   async function updateServerEndpoint(id: string, endpoint: string) {
     loading.value = true
     error.value = ''
@@ -49,17 +56,25 @@ export const useBackendStore = defineStore('backend', () => {
   async function initialize() {
     if (initialized.value) return
     initialized.value = true
+    profile.value = await backendService.readSession()
     if (!profile.value.accessToken) return
     loading.value = true
     try {
+      await backendService.refresh(profile.value, false)
       profile.value.user = await backendService.me(profile.value)
-      saveProfile()
+      await backendService.publishSession(profile.value)
       applyHealth(await backendService.health(profile.value.endpoint))
       await refreshWorkspaces()
       lastSyncedAt.value = new Date().toISOString()
-    } catch {
-      profile.value = backendService.clearProfile(profile.value.endpoint)
-      workspaces.value = []; providers.value = []; providerAvailability.value = {}
+      armRefresh()
+    } catch (reason) {
+      if (reason instanceof BackendRequestError && (reason.status === 401 || reason.status === 403)) {
+        profile.value = backendService.clearProfile(profile.value.endpoint)
+        await backendService.publishSession(profile.value)
+        workspaces.value = []; providers.value = []; providerAvailability.value = {}
+      } else {
+        error.value = '暂时无法确认登录，将自动重试'
+      }
     } finally { loading.value = false }
   }
   async function authenticate(mode: 'login' | 'register', endpoint: string, email: string, password: string, name = '') {
@@ -69,10 +84,17 @@ export const useBackendStore = defineStore('backend', () => {
       const result = mode === 'login'
         ? await backendService.login(endpoint, email, password)
         : await backendService.register(endpoint, email, password, name)
-      profile.value = { endpoint, accessToken: result.accessToken, user: result.user }
-      saveProfile()
+      profile.value = {
+        endpoint,
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken ?? null,
+        accessExpiresAt: result.accessExpiresAt ?? null,
+        user: result.user,
+      }
+      await backendService.publishSession(profile.value)
       applyHealth(await backendService.health(endpoint))
       await refreshWorkspaces()
+      armRefresh()
     } catch (reason) {
       error.value = reason instanceof Error ? reason.message : '后台登录失败'
       throw reason
@@ -177,10 +199,34 @@ export const useBackendStore = defineStore('backend', () => {
     catch { mcp.value = null }
   }
   function logout() {
-    profile.value = backendService.clearProfile(profile.value.endpoint)
+    const endpoint = profile.value.endpoint
+    const refreshToken = profile.value.refreshToken
+    if (refreshToken) {
+      void fetch(`${endpoint.replace(/\/$/, '')}/api/v1/auth/logout`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ refreshToken }),
+      }).catch(() => undefined)
+    }
+    profile.value = backendService.clearProfile(endpoint)
+    void backendService.publishSession(profile.value)
+    if (refreshTimer) window.clearTimeout(refreshTimer)
     workspaces.value = []; providers.value = []; providerAvailability.value = {}
     mcp.value = null
     error.value = ''
+  }
+
+  let refreshTimer = 0
+  function armRefresh() {
+    if (refreshTimer) window.clearTimeout(refreshTimer)
+    const at = profile.value.accessExpiresAt
+    if (!at || !profile.value.refreshToken) return
+    const delay = Math.max(Date.parse(at) - Date.now() - 120_000, 1_000)
+    refreshTimer = window.setTimeout(() => {
+      void backendService.refresh(profile.value, false).then(() => armRefresh()).catch((reason) => {
+        if (reason instanceof BackendRequestError && reason.status === 401) logout()
+      })
+    }, delay)
   }
 
   return { profile, servers, workspaces, providers, providerAvailability, loading, error, initialized, syncing, lastSyncedAt, mcp, connected, initialize, addServer, updateServerEndpoint, removeServer, setDefaultPrompt, dismissDefaultPrompt, authenticate, checkHealth, refreshMcp, refreshWorkspaces, createWorkspace, renameWorkspace, deleteWorkspace, createProvider, renameProvider, deleteProvider, sync, logout }

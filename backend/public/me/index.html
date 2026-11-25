@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tie 我的账号</title>
+  <link rel="stylesheet" href="../admin/admin.css">
+</head>
+<body>
+  <div id="login" class="login-wrap">
+    <form class="login-card" id="login-form">
+      <h1>我的账号</h1>
+      <p id="gate-lead">登录后管理自己的工作区、存储连接和 MCP 令牌。</p>
+      <label id="name-field" hidden>名称<input name="name" autocomplete="name"></label>
+      <label id="account-field"><span>用户名或邮箱</span><input name="email" type="text" autocomplete="username" required placeholder="用户名或 name@example.com"></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+      <button class="primary" type="submit" id="gate-submit">登录</button>
+      <p class="error" id="login-error"></p>
+      <p class="hint">还没有用户时，第一个注册的人成为管理员。管理员入口在 <a href="/admin/">管理后台</a>。</p>
+      <button class="ghost" type="button" id="gate-switch">没有账号？注册</button>
+    </form>
+  </div>
+  <div id="shell" class="shell">
+    <aside class="side">
+      <div class="brand">
+        <strong>Tie</strong>
+        <span>我的账号</span>
+      </div>
+      <div class="who">
+        <div id="who"></div>
+        <a id="admin-link" href="/admin/" hidden>管理后台</a>
+        <button class="ghost" type="button" id="logout">退出</button>
+      </div>
+    </aside>
+    <main class="main" id="main"></main>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>

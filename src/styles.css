@@ -408,6 +408,9 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .swipe-action:active { filter: brightness(0.96); }
 .swipe-action.danger { color: #fff; background: var(--danger, #a65d54); }
 .page-sync-conflict-badge { flex: 0 0 auto; width: 14px; height: 14px; border-radius: 999px; color: #fff; background: #a65d54; font-size: 10px; font-weight: 700; line-height: 14px; text-align: center; }
+.page-sync-state { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 999px; background: #3d8b6e; }
+.page-sync-state.pending { background: #d5a759; }
+.page-sync-state.conflict { background: #a65d54; }
 .tree-actions { position: relative; display: none; flex-shrink: 0; margin-right: 14px; }
 .tree-row:hover .tree-actions, .tree-actions.open { display: flex; align-items: center; }
 .tree-more-button { width: 19px; height: 19px; border: 0; border-radius: 4px; padding: 0; color: var(--text-subtle); background: transparent; line-height: 15px; }
@@ -1184,9 +1187,10 @@ body.storage-source-reordering * { cursor: grabbing !important; user-select: non
   overflow: auto;
   overscroll-behavior: contain;
 }
-.save-dot { width: 6px; height: 6px; border-radius: 50%; background: #69a77e; }
-.save-dot.saving { background: #d5a759; }
-.save-dot.error { background: #c4776d; }
+.save-dot { width: 8px; height: 8px; border-radius: 50%; background: #b7b1a8; }
+.save-dot.synced { background: #3d8b6e; }
+.save-dot.saving, .save-dot.pending { background: #d5a759; }
+.save-dot.conflict, .save-dot.error { background: #a65d54; }
 .save-state:has(.save-dot:not(.saving)) { transition: color .15s ease; }
 .document {
   display: flex;

@@ -4,6 +4,7 @@ use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 mod mcp;
+mod sync;
 
 use tie_local::{
     pack_tiez, unpack_tiez, ExportOptions, ImportStrategy, LocalWorkspace, WritePageInput,
@@ -200,6 +201,40 @@ enum Commands {
     },
     /// Speak MCP on stdin/stdout. Agents launch: tie mcp
     Mcp,
+    /// Align this local workspace with the bound Tie backend.
+    Sync {
+        /// Keep running and align with the backend on an interval
+        #[arg(long, default_value_t = false)]
+        watch: bool,
+        /// Print the last alignment status and exit
+        #[arg(long, default_value_t = false)]
+        status: bool,
+        /// Backend origin, for example http://127.0.0.1:8787
+        #[arg(long)]
+        backend_url: Option<String>,
+        /// Backend workspace id to align with
+        #[arg(long)]
+        backend_workspace: Option<String>,
+        /// Log in with an existing account. Password is not stored.
+        #[arg(long, default_value_t = false)]
+        login: bool,
+        /// Register an account, then stay logged in
+        #[arg(long, default_value_t = false)]
+        register: bool,
+        /// Clear the saved backend login
+        #[arg(long, default_value_t = false)]
+        logout: bool,
+        /// Username or email
+        #[arg(long)]
+        email: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        /// Seconds between alignments when --watch is set
+        #[arg(long, default_value_t = 2)]
+        interval_secs: u64,
+    },
     /// Create or update a page (auto frontmatter + history)
     Write {
         #[arg(long)]
@@ -273,6 +308,16 @@ fn run() -> Result<(), String> {
             }))
         }
         Commands::Unpack { archive, out } => print_json(&unpack_tiez(&archive, &out)?),
+        Commands::Sync {
+            login,
+            register,
+            logout,
+            email,
+            password,
+            name,
+            backend_url,
+            ..
+        } if login || register || logout => sync::account(login, register, logout, backend_url.as_deref(), email.as_deref(), password.as_deref(), name.as_deref()),
         other => {
             let root = workspace_flag
                 .ok_or("请通过 --workspace 或 TIE_WORKSPACE 指定工作区根目录或 .tie 解决方案")?;
@@ -398,6 +443,43 @@ fn run() -> Result<(), String> {
                 Commands::Mcp => {
                     mcp::serve(&ws)?;
                     Ok(())
+                }
+                Commands::Sync {
+                    watch,
+                    status,
+                    backend_url,
+                    backend_workspace,
+                    login,
+                    register,
+                    logout,
+                    interval_secs,
+                    ..
+                } => {
+                    if login || register || logout {
+                        return Err("登录命令不应进入工作区同步".into());
+                    }
+                    if status && (watch || backend_url.is_some() || backend_workspace.is_some()) {
+                        return Err("sync --status 不能与 --watch 或后台配置一起用".into());
+                    }
+                    match (backend_url.as_deref(), backend_workspace.as_deref()) {
+                        (Some(_), None) | (None, Some(_)) => {
+                            return Err("配置后台同步需要同时给出 --backend-url 和 --backend-workspace".into());
+                        }
+                        (Some(url), Some(workspace_id)) => {
+                            let report = sync::enable(&ws, url, workspace_id)?;
+                            if !watch {
+                                return sync::print_report(&report);
+                            }
+                        }
+                        (None, None) => {}
+                    }
+                    if status {
+                        return sync::print_status(&sync::status(ws.root())?);
+                    }
+                    if watch {
+                        return sync::watch(&ws, interval_secs);
+                    }
+                    sync::print_report(&sync::once(&ws)?)
                 }
                 Commands::Write {
                     title,

@@ -12,8 +12,30 @@ const RESERVED_STEMS: &[&str] = &[
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
+/// UTF-8 bytes were once stored as Latin-1 code points (`测试` → `æµè¯`).
+/// Recover that text. Mixed strings that already contain real non-Latin characters stay as they are.
+pub fn repair_utf8_mojibake(text: &str) -> String {
+    if !text.chars().any(|ch| ('\u{80}'..='\u{FF}').contains(&ch)) {
+        return text.to_owned();
+    }
+    if text.chars().any(|ch| (ch as u32) > 0xFF) {
+        return text.to_owned();
+    }
+    let bytes: Vec<u8> = text.chars().map(|ch| ch as u8).collect();
+    let Ok(decoded) = String::from_utf8(bytes) else {
+        return text.to_owned();
+    };
+    if decoded != text && decoded.chars().any(|ch| ('\u{4E00}'..='\u{9FFF}').contains(&ch)) {
+        decoded
+    } else {
+        text.to_owned()
+    }
+}
+
 /// Turn a title into a single path segment. Empty or illegal names fall back to `fallback`.
 pub fn filename_stem(raw: &str, fallback: &str) -> String {
+    let repaired = repair_utf8_mojibake(raw);
+    let raw = repaired.as_str();
     let mut stem = String::new();
     let mut spaced = false;
     for ch in raw.chars() {
@@ -219,6 +241,19 @@ pub fn sanitize_asset_name(file_name: &str) -> Result<String, String> {
         return Err("附件名称无效".to_owned());
     }
     Ok(base.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repairs_utf8_misread_as_latin1_before_naming() {
+        let broken = "\u{00e6}\u{00b5}\u{008b}\u{00e8}\u{00af}\u{0095}MCP";
+        assert_eq!(repair_utf8_mojibake(broken), "测试MCP");
+        assert_eq!(filename_stem(broken, "无标题"), "测试MCP");
+        assert_eq!(filename_stem("欢迎使用 Tie", "无标题"), "欢迎使用 Tie");
+    }
 }
 
 pub fn settings_file(data_dir: &Path) -> PathBuf {

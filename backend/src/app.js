@@ -4,27 +4,12 @@ import express from 'express'
 import jwt from 'jsonwebtoken'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
-import { parsePage } from './page-format.js'
+import path from 'node:path'
 import { store } from './store.js'
-import {
-  archiveProviderRevision,
-  createS3Client,
-  deleteProviderPages,
-  getProviderAsset,
-  getProviderPage,
-  getProviderRevision,
-  listProviderPageIds,
-  listProviderRevisions,
-  listProviderAssetNames,
-  listProviderFiles,
-  getProviderFile,
-  upsertProviderFileMeta,
-  putProviderFileBlob,
-  getProviderFileBlob,
-  putProviderAsset,
-  putProviderPage,
-} from './s3.js'
+import { watchWorkspace } from './live.js'
 import * as workspaceStorage from './workspace-storage.js'
+import { ensureWorkspaceSolution } from './workspace-pages.js'
+import { readReviews, saveMergedReviews } from './reviews.js'
 import {
   listWorkspaceFiles,
   getWorkspaceFile,
@@ -32,21 +17,29 @@ import {
   saveWorkspaceFileBlob,
   readWorkspaceFileBlob,
 } from './workspace-files.js'
-import { assertAssetPayload, mimeFromAssetName, sanitizeAssetName } from './assets.js'
+import { mimeFromAssetName } from './assets.js'
 import { suggestTags } from './ai.js'
 import { assertProductionReady, createCorsMiddleware, resolveJwtSecret } from './config.js'
-import { mcpStatus, mcpUrlForRequest, proxyMcpRequest } from './mcp-http.js'
+import { handleMcpRequest, mcpStatus, mcpUrlForRequest } from './mcp-http.js'
+import { applySettingsPatch, detectCli, loadSettings, publicSettings } from './settings.js'
+import { createMcpToken, deleteMcpToken, deleteMcpTokensForWorkspace, listMcpTokens } from './mcp-tokens.js'
+import { findUserByLogin, publicUser, roleForNewUser, userRole } from './accounts.js'
+import { issueSession, revokeSession, rotateSession } from './sessions.js'
+import { mountAdmin } from './admin.js'
+import { fileURLToPath } from 'node:url'
 
 export function createApp(options = {}) {
   const jwtSecret = resolveJwtSecret(options)
   assertProductionReady({ jwtSecret })
   const app = express()
+  const adminDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'admin')
+  const meDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'me')
 
   app.use(createCorsMiddleware())
   app.use((req, res, next) => {
     const path = req.originalUrl || req.url || ''
     if (path === '/mcp' || path.startsWith('/mcp/') || path.startsWith('/mcp?')) {
-      proxyMcpRequest(req, res)
+      handleMcpRequest(req, res, jwtSecret)
       return
     }
     next()
@@ -62,66 +55,58 @@ function auth(req, res, next) {
   if (!token) return res.status(401).json({ message: '未登录' })
   try {
     req.user = jwt.verify(token, jwtSecret)
-    next()
   } catch {
     return res.status(401).json({ message: '登录已失效' })
   }
+  const account = store.loadUsers().find((item) => item.id === req.user.sub)
+  if (!account) return res.status(401).json({ message: '用户不存在' })
+  if (account.disabled) return res.status(403).json({ message: '账号已停用' })
+  req.account = account
+  next()
 }
 
-function publicProvider(provider) {
-  const { credentials, ...rest } = provider
-  return { ...rest, credentialRef: credentials ? provider.id : null }
-}
-
-function findProvider(providerId, userId) {
-  return store.loadProviders().find((item) => item.id === providerId && item.ownerId === userId)
+function adminOnly(req, res, next) {
+  if (userRole(req.account) !== 'admin') return res.status(403).json({ message: '需要管理员权限' })
+  next()
 }
 
 function findWorkspace(workspaceId, userId) {
   return store.loadWorkspaces().find((item) => item.id === workspaceId && item.ownerId === userId)
 }
 
-async function loadProviderPage(provider, pageId) {
-  const bucket = String(provider.publicConfig.bucket ?? '')
-  const client = createS3Client(provider.publicConfig, provider.credentials)
-  const content = await getProviderPage(client, bucket, pageId)
-  const page = parsePage(content)
-  return { ...page, storageSourceId: `backend-s3:${provider.id}` }
+function writeWorkspace(ownerId, name, extra = {}) {
+  const workspace = { id: newId('ws'), name, ownerId, createdAt: nowIso(), ...extra }
+  const workspaces = store.loadWorkspaces()
+  workspaces.push(workspace)
+  store.saveWorkspaces(workspaces)
+  fs.mkdirSync(store.workspacePagesDir(workspace.id), { recursive: true })
+  fs.mkdirSync(path.join(store.workspaceDir(workspace.id), '.tie'), { recursive: true })
+  ensureWorkspaceSolution(workspace.id, workspace.name)
+  watchWorkspace(workspace.id)
+  return workspace
 }
 
-async function saveProviderPageRecord(provider, page, expectedUpdatedAt) {
-  const bucket = String(provider.publicConfig.bucket ?? '')
-  const client = createS3Client(provider.publicConfig, provider.credentials)
-  if (expectedUpdatedAt) {
-    try {
-      const current = await loadProviderPage(provider, page.id)
-      if (current.updatedAt !== expectedUpdatedAt) {
-        return resConflict()
-      }
-      if (current.markdown !== page.markdown || current.title !== page.title) {
-        await archiveProviderRevision(client, bucket, current)
-      }
-    } catch (error) {
-      if (error?.name !== 'NoSuchKey' && !String(error?.message ?? '').includes('NoSuchKey')) {
-        if (expectedUpdatedAt) throw error
-      }
-    }
-  }
-  const next = { ...page, storageSourceId: `backend-s3:${provider.id}`, updatedAt: page.updatedAt || nowIso() }
-  await putProviderPage(client, bucket, next)
-  return next
-}
-
-function resConflict() {
-  const error = new Error('页面已在其他设备更新，请重新载入后再保存')
-  error.status = 409
-  throw error
+function ensureDefaultWorkspace(ownerId) {
+  const owned = store.loadWorkspaces().filter((item) => item.ownerId === ownerId)
+  if (owned.length) return owned
+  return [writeWorkspace(ownerId, '我的工作区', { default: true })]
 }
 
 function handleError(res, error) {
   const status = error.status ?? 500
   res.status(status).json({ message: error.message ?? '服务器错误' })
 }
+
+app.use((req, res, next) => {
+  if ((req.originalUrl || req.url) === '/admin') return res.redirect(302, '/admin/')
+  next()
+})
+app.use('/admin', express.static(adminDir, { index: 'index.html', redirect: false }))
+app.use((req, res, next) => {
+  if ((req.originalUrl || req.url) === '/me') return res.redirect(302, '/me/')
+  next()
+})
+app.use('/me', express.static(meDir, { index: 'index.html', redirect: false }))
 
 app.get('/health', (req, res) => {
   const mcp = mcpStatus()
@@ -134,6 +119,7 @@ app.get('/health', (req, res) => {
       running: mcp.running,
       url: mcpUrlForRequest(req),
       error: mcp.error,
+      transport: mcp.transport,
     },
   })
 })
@@ -146,34 +132,85 @@ app.post('/api/v1/auth/register', async (req, res) => {
     if (!email || password.length < 6) return res.status(400).json({ message: '邮箱或密码无效' })
     const users = store.loadUsers()
     if (users.some((user) => user.email === email)) return res.status(409).json({ message: '邮箱已注册' })
-    const user = { id: newId('usr'), email, name, passwordHash: await bcrypt.hash(password, 10), createdAt: nowIso() }
+    const user = {
+      id: newId('usr'),
+      email,
+      name,
+      passwordHash: await bcrypt.hash(password, 10),
+      role: roleForNewUser(users),
+      disabled: false,
+      createdAt: nowIso(),
+    }
     users.push(user)
     store.saveUsers(users)
-    const accessToken = jwt.sign({ sub: user.id, email: user.email }, jwtSecret, { expiresIn: '30d' })
-    res.json({ accessToken, tokenType: 'Bearer', user: { id: user.id, email: user.email, name: user.name, createdAt: user.createdAt } })
+    ensureDefaultWorkspace(user.id)
+    res.json(issueSession(user, jwtSecret))
   } catch (error) { handleError(res, error) }
 })
 
 app.post('/api/v1/auth/login', async (req, res) => {
   try {
-    const email = String(req.body.email ?? '').trim().toLowerCase()
+    const identifier = String(req.body.email ?? req.body.username ?? '').trim()
     const password = String(req.body.password ?? '')
-    const user = store.loadUsers().find((item) => item.email === email)
+    if (!identifier || !password) return res.status(400).json({ message: '请填写用户名或邮箱，以及密码' })
+    const found = findUserByLogin(store.loadUsers(), identifier)
+    if (found.reason === 'ambiguous') return res.status(401).json({ message: '有多个同名账号，请用邮箱登录' })
+    const user = found.user
     if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
-      return res.status(401).json({ message: '邮箱或密码错误' })
+      return res.status(401).json({ message: '用户名、邮箱或密码错误' })
     }
-    const accessToken = jwt.sign({ sub: user.id, email: user.email }, jwtSecret, { expiresIn: '30d' })
-    res.json({ accessToken, tokenType: 'Bearer', user: { id: user.id, email: user.email, name: user.name, createdAt: user.createdAt } })
+    if (user.disabled) return res.status(403).json({ message: '账号已停用' })
+    res.json(issueSession(user, jwtSecret))
   } catch (error) { handleError(res, error) }
 })
 
+app.post('/api/v1/auth/refresh', (req, res) => {
+  try {
+    res.json(rotateSession(req.body?.refreshToken, jwtSecret))
+  } catch (error) { handleError(res, error) }
+})
+
+app.post('/api/v1/auth/logout', (req, res) => {
+  revokeSession(req.body?.refreshToken)
+  res.status(204).end()
+})
+
 app.get('/api/v1/me', auth, (req, res) => {
-  const user = store.loadUsers().find((item) => item.id === req.user.sub)
-  if (!user) return res.status(401).json({ message: '用户不存在' })
-  res.json({ id: user.id, email: user.email, name: user.name, createdAt: user.createdAt })
+  res.json(publicUser(req.account))
+})
+
+mountAdmin(app, { auth, adminOnly, handleError })
+
+app.get('/api/v1/admin/settings', auth, adminOnly, (_req, res) => {
+  const settings = loadSettings()
+  res.json(publicSettings(settings, detectCli(settings.mcp.cliPath)))
+})
+
+app.put('/api/v1/admin/settings', auth, adminOnly, (req, res) => {
+  const settings = applySettingsPatch(req.body ?? {})
+  res.json(publicSettings(settings, detectCli(settings.mcp.cliPath)))
+})
+
+app.get('/api/v1/me/mcp-tokens', auth, (req, res) => {
+  res.json(listMcpTokens(req.user.sub))
+})
+
+app.post('/api/v1/me/mcp-tokens', auth, (req, res) => {
+  const workspaceId = String(req.body.workspaceId ?? '').trim()
+  const workspace = findWorkspace(workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  const name = String(req.body.name ?? '').trim() || workspace.name
+  const created = createMcpToken({ userId: req.user.sub, name, workspaceId })
+  res.status(201).json(created)
+})
+
+app.delete('/api/v1/me/mcp-tokens/:tokenId', auth, (req, res) => {
+  if (!deleteMcpToken(req.user.sub, req.params.tokenId)) return res.status(404).json({ message: '令牌不存在' })
+  res.status(204).end()
 })
 
 app.get('/api/v1/workspaces', auth, (req, res) => {
+  ensureDefaultWorkspace(req.user.sub)
   const workspaces = store.loadWorkspaces().filter((item) => item.ownerId === req.user.sub)
   res.json(workspaces)
 })
@@ -181,17 +218,7 @@ app.get('/api/v1/workspaces', auth, (req, res) => {
 app.post('/api/v1/workspaces', auth, (req, res) => {
   const name = String(req.body.name ?? '').trim()
   if (!name) return res.status(400).json({ message: '工作区名称不能为空' })
-  const workspace = { id: newId('ws'), name, ownerId: req.user.sub, createdAt: nowIso() }
-  const storageProviderId = String(req.body.storageProviderId ?? '').trim()
-  if (storageProviderId) {
-    const provider = findProvider(storageProviderId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(400).json({ message: 'storageProviderId 无效' })
-    workspace.storageProviderId = storageProviderId
-  }
-  const workspaces = store.loadWorkspaces()
-  workspaces.push(workspace)
-  store.saveWorkspaces(workspaces)
-  res.status(201).json(workspace)
+  res.status(201).json(writeWorkspace(req.user.sub, name))
 })
 
 app.patch('/api/v1/workspaces/:workspaceId', auth, (req, res) => {
@@ -201,16 +228,6 @@ app.patch('/api/v1/workspaces/:workspaceId', auth, (req, res) => {
     const name = String(req.body.name ?? '').trim()
     if (!name) return res.status(400).json({ message: '工作区名称不能为空' })
     workspace.name = name
-  }
-  if (req.body.storageProviderId !== undefined) {
-    const storageProviderId = String(req.body.storageProviderId ?? '').trim()
-    if (!storageProviderId) {
-      delete workspace.storageProviderId
-    } else {
-      const provider = findProvider(storageProviderId, req.user.sub)
-      if (!provider || provider.kind !== 's3') return res.status(400).json({ message: 'storageProviderId 无效' })
-      workspace.storageProviderId = storageProviderId
-    }
   }
   const workspaces = store.loadWorkspaces().map((item) => item.id === workspace.id ? workspace : item)
   store.saveWorkspaces(workspaces)
@@ -223,80 +240,23 @@ app.delete('/api/v1/workspaces/:workspaceId', auth, (req, res) => {
   const dir = store.workspaceDir(workspace.id)
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true })
   store.saveWorkspaces(store.loadWorkspaces().filter((item) => item.id !== workspace.id))
+  deleteMcpTokensForWorkspace(workspace.id)
   res.status(204).end()
 })
 
-app.get('/api/v1/providers', auth, (req, res) => {
-  const providers = store.loadProviders()
-    .filter((item) => item.ownerId === req.user.sub)
-    .map(publicProvider)
-  res.json(providers)
+app.get('/api/v1/providers', auth, (_req, res) => {
+  res.json([])
 })
 
-app.post('/api/v1/providers', auth, (req, res) => {
-  const name = String(req.body.name ?? '').trim()
-  const kind = String(req.body.kind ?? 's3')
-  const publicConfig = req.body.publicConfig ?? {}
-  const credentials = req.body.credentials ?? null
-  if (!name) return res.status(400).json({ message: 'Provider 名称不能为空' })
-  if (kind === 's3' && (!publicConfig.endpoint || !publicConfig.bucket || !credentials?.accessKey || !credentials?.secretKey)) {
-    return res.status(400).json({ message: 'S3 Provider 需要 endpoint、bucket 和凭据' })
-  }
-  const provider = {
-    id: newId('prov'),
-    workspaceId: String(req.body.workspaceId ?? ''),
-    ownerId: req.user.sub,
-    name,
-    kind,
-    publicConfig,
-    credentials: kind === 's3' ? credentials : null,
-    createdAt: nowIso(),
-  }
-  const providers = store.loadProviders()
-  providers.push(provider)
-  store.saveProviders(providers)
-  res.status(201).json(publicProvider(provider))
-})
-
-app.patch('/api/v1/providers/:providerId', auth, (req, res) => {
-  const provider = findProvider(req.params.providerId, req.user.sub)
-  if (!provider) return res.status(404).json({ message: 'Provider 不存在' })
-  const name = req.body.name !== undefined ? String(req.body.name).trim() : provider.name
-  if (!name) return res.status(400).json({ message: 'Provider 名称不能为空' })
-  provider.name = name
-  if (req.body.publicConfig && typeof req.body.publicConfig === 'object') {
-    provider.publicConfig = { ...provider.publicConfig, ...req.body.publicConfig }
-  }
-  if (req.body.credentials?.accessKey && req.body.credentials?.secretKey) {
-    provider.credentials = req.body.credentials
-  }
-  const providers = store.loadProviders().map((item) => item.id === provider.id ? provider : item)
-  store.saveProviders(providers)
-  res.json(publicProvider(provider))
-})
-
-app.delete('/api/v1/providers/:providerId', auth, (req, res) => {
-  const provider = findProvider(req.params.providerId, req.user.sub)
-  if (!provider) return res.status(404).json({ message: 'Provider 不存在' })
-  store.saveProviders(store.loadProviders().filter((item) => item.id !== provider.id))
-  res.status(204).end()
-})
-
-app.get('/api/v1/providers/:providerId/health', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    await listProviderPageIds(client, String(provider.publicConfig.bucket ?? ''))
-    res.json({ ok: true })
-  } catch (error) { handleError(res, error) }
+app.post('/api/v1/providers', auth, (_req, res) => {
+  res.status(410).json({ message: '对象存储已停用，工作区只保存在服务器磁盘' })
 })
 
 app.get('/api/v1/workspaces/:workspaceId/pages', auth, async (req, res) => {
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
-    res.json(await workspaceStorage.listPages(workspace, findProvider, req.user.sub))
+    res.json(await workspaceStorage.listPages(workspace))
   } catch (error) { handleError(res, error) }
 })
 
@@ -304,7 +264,7 @@ app.get('/api/v1/workspaces/:workspaceId/pages/:pageId', auth, async (req, res) 
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
-    res.json(await workspaceStorage.getPage(workspace, req.params.pageId, findProvider, req.user.sub))
+    res.json(await workspaceStorage.getPage(workspace, req.params.pageId))
   } catch (error) { handleError(res, error) }
 })
 
@@ -317,8 +277,6 @@ app.put('/api/v1/workspaces/:workspaceId/pages/:pageId', auth, async (req, res) 
       workspace,
       { ...req.body, id: req.params.pageId },
       expectedUpdatedAt,
-      findProvider,
-      req.user.sub,
     )
     res.json(saved)
   } catch (error) { handleError(res, error) }
@@ -328,8 +286,25 @@ app.post('/api/v1/workspaces/:workspaceId/pages', auth, async (req, res) => {
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
-    await workspaceStorage.removePages(workspace, req.body.pageIds ?? [], findProvider, req.user.sub)
+    await workspaceStorage.removePages(workspace, req.body.pageIds ?? [])
     res.status(204).end()
+  } catch (error) { handleError(res, error) }
+})
+
+app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/reviews', auth, (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try {
+    res.json(readReviews(workspace.id, req.params.pageId))
+  } catch (error) { handleError(res, error) }
+})
+
+app.put('/api/v1/workspaces/:workspaceId/pages/:pageId/reviews', auth, (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try {
+    const incoming = Array.isArray(req.body?.entries) ? req.body.entries : []
+    res.json(saveMergedReviews(workspace.id, req.params.pageId, incoming))
   } catch (error) { handleError(res, error) }
 })
 
@@ -337,7 +312,7 @@ app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/revisions', auth, async (
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
-    res.json(await workspaceStorage.listRevisions(workspace, req.params.pageId, findProvider, req.user.sub))
+    res.json(await workspaceStorage.listRevisions(workspace, req.params.pageId))
   } catch (error) { handleError(res, error) }
 })
 
@@ -345,7 +320,7 @@ app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/revisions/:revisionId', a
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
-    res.json(await workspaceStorage.readRevision(workspace, req.params.pageId, req.params.revisionId, findProvider, req.user.sub))
+    res.json(await workspaceStorage.readRevision(workspace, req.params.pageId, req.params.revisionId))
   } catch (error) { handleError(res, error) }
 })
 
@@ -354,7 +329,7 @@ app.put('/api/v1/workspaces/:workspaceId/pages/:pageId/assets/:assetName', auth,
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
     const data = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? [])
-    const assetName = await workspaceStorage.saveAsset(workspace, req.params.pageId, req.params.assetName, data, findProvider, req.user.sub)
+    const assetName = await workspaceStorage.saveAsset(workspace, req.params.pageId, req.params.assetName, data)
     res.status(201).json({ assetName })
   } catch (error) { handleError(res, error) }
 })
@@ -363,7 +338,7 @@ app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/assets/:assetName', auth,
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
-    const data = await workspaceStorage.readAsset(workspace, req.params.pageId, req.params.assetName, findProvider, req.user.sub)
+    const data = await workspaceStorage.readAsset(workspace, req.params.pageId, req.params.assetName)
     res.setHeader('content-type', mimeFromAssetName(req.params.assetName))
     res.send(data)
   } catch (error) { handleError(res, error) }
@@ -373,114 +348,7 @@ app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/assets', auth, async (req
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
-    res.json({ assets: await workspaceStorage.listAssets(workspace, req.params.pageId, findProvider, req.user.sub) })
-  } catch (error) { handleError(res, error) }
-})
-
-app.get('/api/v1/providers/:providerId/pages', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    const bucket = String(provider.publicConfig.bucket ?? '')
-    const pageIds = await listProviderPageIds(client, bucket)
-    const pages = []
-    for (const pageId of pageIds) {
-      pages.push(await loadProviderPage(provider, pageId))
-    }
-    res.json(pages)
-  } catch (error) { handleError(res, error) }
-})
-
-app.get('/api/v1/providers/:providerId/pages/:pageId', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    res.json(await loadProviderPage(provider, req.params.pageId))
-  } catch (error) { handleError(res, error) }
-})
-
-app.put('/api/v1/providers/:providerId/pages/:pageId', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const expectedUpdatedAt = req.headers['if-unmodified-since']
-    const saved = await saveProviderPageRecord(provider, { ...req.body, id: req.params.pageId }, expectedUpdatedAt)
-    res.json(saved)
-  } catch (error) { handleError(res, error) }
-})
-
-app.post('/api/v1/providers/:providerId/pages', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    await deleteProviderPages(client, String(provider.publicConfig.bucket ?? ''), req.body.pageIds ?? [])
-    res.status(204).end()
-  } catch (error) { handleError(res, error) }
-})
-
-app.get('/api/v1/providers/:providerId/pages/:pageId/revisions', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    res.json(await listProviderRevisions(client, String(provider.publicConfig.bucket ?? ''), req.params.pageId))
-  } catch (error) { handleError(res, error) }
-})
-
-app.get('/api/v1/providers/:providerId/pages/:pageId/revisions/:revisionId', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    const bucket = String(provider.publicConfig.bucket ?? '')
-    const content = await getProviderRevision(client, bucket, req.params.pageId, req.params.revisionId)
-    const page = parsePage(content)
-    res.json({ ...page, storageSourceId: `backend-s3:${provider.id}` })
-  } catch (error) { handleError(res, error) }
-})
-
-app.put('/api/v1/providers/:providerId/pages/:pageId/assets/:assetName', auth, express.raw({ type: 'application/octet-stream', limit: '20mb' }), async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const data = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? [])
-    const assetName = sanitizeAssetName(req.params.assetName)
-    assertAssetPayload(data)
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    const bucket = String(provider.publicConfig.bucket ?? '')
-    await putProviderAsset(client, bucket, req.params.pageId, assetName, data, mimeFromAssetName(assetName))
-    res.status(201).json({ assetName })
-  } catch (error) { handleError(res, error) }
-})
-
-app.get('/api/v1/providers/:providerId/pages/:pageId/assets/:assetName', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const assetName = sanitizeAssetName(req.params.assetName)
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    const bucket = String(provider.publicConfig.bucket ?? '')
-    const data = await getProviderAsset(client, bucket, req.params.pageId, assetName)
-    res.setHeader('content-type', mimeFromAssetName(assetName))
-    res.send(data)
-  } catch (error) {
-    if (error?.name === 'NoSuchKey' || String(error?.message ?? '').includes('NoSuchKey')) {
-      return res.status(404).json({ message: '附件不存在' })
-    }
-    handleError(res, error)
-  }
-})
-
-app.get('/api/v1/providers/:providerId/pages/:pageId/assets', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    const bucket = String(provider.publicConfig.bucket ?? '')
-    const assets = await listProviderAssetNames(client, bucket, req.params.pageId)
-    res.json({ assets })
+    res.json({ assets: await workspaceStorage.listAssets(workspace, req.params.pageId) })
   } catch (error) { handleError(res, error) }
 })
 
@@ -524,56 +392,6 @@ app.get('/api/v1/workspaces/:workspaceId/files/:fileId/blob', auth, (req, res) =
     res.setHeader('content-type', 'application/octet-stream')
     res.setHeader('content-disposition', `attachment; filename="${blob.name}"`)
     res.send(blob.data)
-  } catch (error) { handleError(res, error) }
-})
-
-app.get('/api/v1/providers/:providerId/files', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    const files = await listProviderFiles(client, String(provider.publicConfig.bucket ?? ''))
-    res.json({ files })
-  } catch (error) { handleError(res, error) }
-})
-
-app.get('/api/v1/providers/:providerId/files/:fileId', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    res.json(await getProviderFile(client, String(provider.publicConfig.bucket ?? ''), req.params.fileId))
-  } catch (error) { handleError(res, error) }
-})
-
-app.put('/api/v1/providers/:providerId/files/:fileId', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    res.json(await upsertProviderFileMeta(client, String(provider.publicConfig.bucket ?? ''), { ...req.body, id: req.params.fileId }))
-  } catch (error) { handleError(res, error) }
-})
-
-app.put('/api/v1/providers/:providerId/files/:fileId/blob/:blobName', auth, express.raw({ type: 'application/octet-stream', limit: '20mb' }), async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const data = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? [])
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    const blobName = await putProviderFileBlob(client, String(provider.publicConfig.bucket ?? ''), req.params.fileId, req.params.blobName, data)
-    res.status(201).json({ blobName })
-  } catch (error) { handleError(res, error) }
-})
-
-app.get('/api/v1/providers/:providerId/files/:fileId/blob', auth, async (req, res) => {
-  try {
-    const provider = findProvider(req.params.providerId, req.user.sub)
-    if (!provider || provider.kind !== 's3') return res.status(404).json({ message: 'Provider 不存在' })
-    const client = createS3Client(provider.publicConfig, provider.credentials)
-    const data = await getProviderFileBlob(client, String(provider.publicConfig.bucket ?? ''), req.params.fileId)
-    res.setHeader('content-type', 'application/octet-stream')
-    res.send(data)
   } catch (error) { handleError(res, error) }
 })
 

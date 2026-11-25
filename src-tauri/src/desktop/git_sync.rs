@@ -7,8 +7,6 @@ use std::{
 };
 use tauri::AppHandle;
 
-const SYNC_FILE: &str = ".tie/sync.json";
-
 /// Pinned MinGit for Windows on-demand download (not bundled in the installer).
 #[cfg(windows)]
 const MINGIT_VERSION: &str = "2.47.1";
@@ -43,29 +41,18 @@ pub struct GitRuntimeStatus {
     pub message: String,
 }
 
-#[derive(Clone, Debug)]
-struct SyncConfig {
-    remote: String,
-    url: String,
-}
-
-pub(crate) fn validate_remote_url(url: &str) -> Result<(), String> {
-    let url = url.trim();
-    if url.is_empty()
-        || url.len() > 2000
-        || url.chars().any(|ch| ch.is_whitespace() || ch.is_control())
-    {
-        return Err("Git remote 无效".to_owned());
+fn report_from(report: tie_storage::local::git_sync::SyncReport) -> GitSyncResult {
+    let busy = report.mode == "busy";
+    GitSyncResult {
+        mode: if busy {
+            "skipped".into()
+        } else {
+            report.mode
+        },
+        message: if busy { String::new() } else { report.message },
+        committed: report.committed,
+        pushed: report.pushed,
     }
-    let allowed = url.starts_with("https://")
-        || url.starts_with("http://")
-        || url.starts_with("ssh://")
-        || url.starts_with("git@")
-        || url.starts_with("file://");
-    if !allowed {
-        return Err("Git remote 需要是 https、ssh、git@ 或 file URL".to_owned());
-    }
-    Ok(())
 }
 
 fn source_dir(app: &AppHandle, source_id: &str) -> Result<PathBuf, String> {
@@ -196,235 +183,6 @@ fn require_git(app: &AppHandle) -> Result<PathBuf, String> {
         .ok_or_else(missing_git_message)
 }
 
-fn read_config(root: &Path) -> Result<Option<SyncConfig>, String> {
-    let path = root.join(SYNC_FILE);
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
-    if value.get("engine").and_then(|item| item.as_str()) != Some("git") {
-        return Ok(None);
-    }
-    let url = value.get("url").and_then(|item| item.as_str()).unwrap_or("").trim().to_owned();
-    if !url.is_empty() {
-        validate_remote_url(&url)?;
-    }
-    let remote = value
-        .get("remote")
-        .and_then(|item| item.as_str())
-        .unwrap_or("origin")
-        .trim()
-        .to_owned();
-    if remote.is_empty() || remote.chars().any(|ch| ch.is_whitespace()) {
-        return Err("Git remote 名称无效".to_owned());
-    }
-    Ok(Some(SyncConfig { remote, url }))
-}
-
-fn write_config(root: &Path, url: &str) -> Result<(), String> {
-    let tie = root.join(".tie");
-    fs::create_dir_all(&tie).map_err(|error| error.to_string())?;
-    let ignore = tie.join(".gitignore");
-    if !ignore.exists() {
-        fs::write(&ignore, "sync.json\n").map_err(|error| error.to_string())?;
-    }
-    let body = serde_json::json!({
-        "engine": "git",
-        "remote": "origin",
-        "url": url,
-    });
-    fs::write(tie.join("sync.json"), format!("{body}\n")).map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-fn run_git(git: &Path, root: &Path, args: &[String]) -> Result<std::process::Output, String> {
-    Command::new(git)
-        .args(args)
-        .current_dir(root)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "Never")
-        .output()
-        .map_err(|error| format!("无法运行 git：{error}"))
-}
-
-fn git_text(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if stderr.is_empty() {
-        stdout
-    } else {
-        stderr
-    }
-}
-
-fn git_ok(output: std::process::Output) -> Result<String, String> {
-    if output.status.success() {
-        return Ok(git_text(&output));
-    }
-    Err(git_text(&output))
-}
-
-fn ensure_repo(git: &Path, root: &Path) -> Result<(), String> {
-    if root.join(".git").exists() {
-        return Ok(());
-    }
-    git_ok(run_git(git, root, &["init".into(), "-b".into(), "main".into()])?)?;
-    Ok(())
-}
-
-fn ensure_remote(git: &Path, root: &Path, remote: &str, url: &str) -> Result<(), String> {
-    if url.is_empty() {
-        return Ok(());
-    }
-    let current = run_git(git, root, &["remote".into(), "get-url".into(), remote.into()])?;
-    if current.status.success() {
-        let existing = String::from_utf8_lossy(&current.stdout).trim().to_owned();
-        if existing != url {
-            git_ok(run_git(
-                git,
-                root,
-                &["remote".into(), "set-url".into(), remote.into(), url.into()],
-            )?)?;
-        }
-        return Ok(());
-    }
-    git_ok(run_git(
-        git,
-        root,
-        &["remote".into(), "add".into(), remote.into(), url.into()],
-    )?)?;
-    Ok(())
-}
-
-fn commit_tree(git: &Path, root: &Path) -> Result<bool, String> {
-    for path in ["pages", ".tie"] {
-        if root.join(path).exists() {
-            git_ok(run_git(git, root, &["add".into(), "--".into(), path.into()])?)?;
-        }
-    }
-    let diff = run_git(git, root, &["diff".into(), "--cached".into(), "--quiet".into()])?;
-    if diff.status.code() == Some(0) {
-        return Ok(false);
-    }
-    if diff.status.code() != Some(1) {
-        return Err(git_text(&diff));
-    }
-    git_ok(run_git(
-        git,
-        root,
-        &[
-            "-c".into(),
-            "user.name=Tie".into(),
-            "-c".into(),
-            "user.email=tie@localhost".into(),
-            "commit".into(),
-            "-m".into(),
-            "tie: sync workspace".into(),
-        ],
-    )?)?;
-    Ok(true)
-}
-
-fn current_branch(git: &Path, root: &Path) -> Result<String, String> {
-    let name = git_ok(run_git(
-        git,
-        root,
-        &["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
-    )?)?;
-    if name.is_empty() || name == "HEAD" {
-        Ok("main".to_owned())
-    } else {
-        Ok(name)
-    }
-}
-
-fn sync_remote(git: &Path, root: &Path, remote: &str) -> Result<(), String> {
-    let listed = git_ok(run_git(git, root, &["remote".into()])?)?;
-    if !listed.split_whitespace().any(|name| name == remote) {
-        return Ok(());
-    }
-    git_ok(run_git(git, root, &["fetch".into(), remote.into()])?)?;
-    let branch = current_branch(git, root)?;
-    let remote_ref = format!("{remote}/{branch}");
-    let exists = run_git(
-        git,
-        root,
-        &[
-            "rev-parse".into(),
-            "--verify".into(),
-            "--quiet".into(),
-            remote_ref,
-        ],
-    )?;
-    if !exists.status.success() {
-        git_ok(run_git(
-            git,
-            root,
-            &["push".into(), "-u".into(), remote.into(), "HEAD".into()],
-        )?)?;
-        return Ok(());
-    }
-    let pull = run_git(
-        git,
-        root,
-        &[
-            "pull".into(),
-            "--rebase".into(),
-            "--autostash".into(),
-            remote.into(),
-            branch.clone(),
-        ],
-    )?;
-    if !pull.status.success() {
-        let _ = run_git(git, root, &["rebase".into(), "--abort".into()]);
-        return Err(format!(
-            "与其他设备内容冲突，已保留本地版本。{}",
-            git_text(&pull)
-        ));
-    }
-    git_ok(run_git(
-        git,
-        root,
-        &["push".into(), remote.into(), "HEAD".into()],
-    )?)?;
-    Ok(())
-}
-
-fn sync_root(git: &Path, root: &Path, config: Option<&SyncConfig>) -> Result<GitSyncResult, String> {
-    let has_repo = root.join(".git").exists();
-    if !has_repo && config.is_none() {
-        return Ok(GitSyncResult {
-            mode: "skipped".into(),
-            message: "".into(),
-            committed: false,
-            pushed: false,
-        });
-    }
-    ensure_repo(git, root)?;
-    if let Some(config) = config {
-        ensure_remote(git, root, &config.remote, &config.url)?;
-    }
-    let committed = commit_tree(git, root)?;
-    let remote_name = config.map(|item| item.remote.as_str()).unwrap_or("origin");
-    let listed = git_ok(run_git(git, root, &["remote".into()])?).unwrap_or_default();
-    let has_remote = listed.split_whitespace().any(|name| name == remote_name);
-    if !has_remote {
-        return Ok(GitSyncResult {
-            mode: "committed".into(),
-            message: "已保存本地变更，尚未配置多设备同步地址".into(),
-            committed,
-            pushed: false,
-        });
-    }
-    sync_remote(git, root, remote_name)?;
-    Ok(GitSyncResult {
-        mode: "synced".into(),
-        message: "".into(),
-        committed,
-        pushed: true,
-    })
-}
 
 #[cfg(windows)]
 fn download_mingit(app: &AppHandle) -> Result<PathBuf, String> {
@@ -576,8 +334,7 @@ pub(crate) fn git_ensure_runtime(app: AppHandle) -> Result<GitRuntimeStatus, Str
 pub(crate) fn git_sync_workspace(app: AppHandle, source_id: String) -> Result<GitSyncResult, String> {
     let git = require_git(&app)?;
     let root = source_dir(&app, &source_id)?;
-    let config = read_config(&root)?;
-    sync_root(&git, &root, config.as_ref())
+    Ok(report_from(tie_storage::local::git_sync::sync_workspace(&git, &root)?))
 }
 
 #[tauri::command]
@@ -586,13 +343,9 @@ pub(crate) fn git_enable_sync(
     source_id: String,
     remote_url: String,
 ) -> Result<GitSyncResult, String> {
-    let url = remote_url.trim().to_owned();
-    validate_remote_url(&url)?;
     let git = require_git(&app)?;
     let root = source_dir(&app, &source_id)?;
-    write_config(&root, &url)?;
-    let config = read_config(&root)?;
-    sync_root(&git, &root, config.as_ref())
+    Ok(report_from(tie_storage::local::git_sync::enable_and_sync(&git, &root, remote_url.trim())?))
 }
 
 #[cfg(test)]
@@ -601,10 +354,10 @@ mod tests {
 
     #[test]
     fn accepts_common_remote_urls() {
-        assert!(validate_remote_url("https://example.com/tie.git").is_ok());
-        assert!(validate_remote_url("git@github.com:tie/notes.git").is_ok());
-        assert!(validate_remote_url("file:///tmp/tie.git").is_ok());
-        assert!(validate_remote_url("notes.git").is_err());
-        assert!(validate_remote_url("https://example.com/tie git").is_err());
+        assert!(tie_storage::local::git_sync::validate_remote_url("https://example.com/tie.git").is_ok());
+        assert!(tie_storage::local::git_sync::validate_remote_url("git@github.com:tie/notes.git").is_ok());
+        assert!(tie_storage::local::git_sync::validate_remote_url("file:///tmp/tie.git").is_ok());
+        assert!(tie_storage::local::git_sync::validate_remote_url("notes.git").is_err());
+        assert!(tie_storage::local::git_sync::validate_remote_url("https://example.com/tie git").is_err());
     }
 }

@@ -86,6 +86,15 @@ describe('tie backend api', { concurrency: 1 }, () => {
     assert.equal(me.response.status, 200)
     assert.equal(me.body.email, 'tester@example.com')
 
+    const owned = await request('/api/v1/workspaces', {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    assert.equal(owned.response.status, 200)
+    assert.equal(owned.body.length, 1)
+    assert.equal(owned.body[0].name, '我的工作区')
+    assert.equal(owned.body[0].default, true)
+    assert.equal(owned.body[0].storageProviderId, undefined)
+
     const login = await request('/api/v1/auth/login', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -93,6 +102,60 @@ describe('tie backend api', { concurrency: 1 }, () => {
     })
     assert.equal(login.response.status, 200)
     assert.ok(login.body.accessToken)
+
+    const byName = await request('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'Tester', password: 'secret123' }),
+    })
+    assert.equal(byName.response.status, 200)
+    assert.equal(byName.body.user.email, 'tester@example.com')
+  })
+
+  it('rotates the refresh token and rejects the previous one', async () => {
+    const login = await request('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'tester@example.com', password: 'secret123' }),
+    })
+    assert.equal(login.response.status, 200)
+    assert.equal(typeof login.body.refreshToken, 'string')
+    assert.notEqual(login.body.refreshToken, login.body.accessToken)
+
+    const rotated = await request('/api/v1/auth/refresh', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ refreshToken: login.body.refreshToken }),
+    })
+    assert.equal(rotated.response.status, 200)
+    assert.notEqual(rotated.body.refreshToken, login.body.refreshToken)
+    assert.notEqual(rotated.body.accessToken, login.body.accessToken)
+
+    const me = await request('/api/v1/me', {
+      headers: { authorization: `Bearer ${rotated.body.accessToken}` },
+    })
+    assert.equal(me.response.status, 200)
+    assert.equal(me.body.email, 'tester@example.com')
+
+    const again = await request('/api/v1/auth/refresh', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ refreshToken: login.body.refreshToken }),
+    })
+    assert.equal(again.response.status, 401)
+
+    const loggedOut = await request('/api/v1/auth/logout', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ refreshToken: rotated.body.refreshToken }),
+    })
+    assert.equal(loggedOut.response.status, 204)
+    const afterLogout = await request('/api/v1/auth/refresh', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ refreshToken: rotated.body.refreshToken }),
+    })
+    assert.equal(afterLogout.response.status, 401)
   })
 
   it('rejects unauthorized workspace access', async () => {
@@ -124,6 +187,16 @@ describe('tie backend api', { concurrency: 1 }, () => {
     })
     assert.equal(saved.response.status, 200)
     assert.equal(saved.body.updatedAt, stamp)
+    const workspaceDir = path.join(dataDir, 'workspaces', workspaceId)
+    assert.equal(fs.existsSync(path.join(workspaceDir, 'pages', '测试页面.md')), true)
+    assert.equal(fs.existsSync(path.join(workspaceDir, 'pages', `${pageId}.md`)), false)
+    const meta = fs.readFileSync(path.join(workspaceDir, '.tie', 'meta', pageId), 'utf8')
+    assert.match(meta, /file: pages\/测试页面\.md/)
+    const tieName = fs.readdirSync(workspaceDir, { withFileTypes: true })
+      .find((entry) => entry.isFile() && entry.name.endsWith('.tie'))
+      ?.name
+    assert.equal(tieName, '测试页面.tie')
+    assert.match(fs.readFileSync(path.join(workspaceDir, tieName), 'utf8'), new RegExp(`root_page: ${pageId}`))
 
     const loaded = await request(`/api/v1/workspaces/${workspaceId}/pages/${pageId}`, {
       headers: { authorization: `Bearer ${token}` },
@@ -214,5 +287,29 @@ describe('tie backend api', { concurrency: 1 }, () => {
     })
     assert.equal(blob.response.status, 200)
     assert.equal(Buffer.from(blob.body).toString(), '%PDF')
+  })
+
+  it('asks for email when several accounts share a username', async () => {
+    for (const email of ['one@example.com', 'two@example.com']) {
+      const created = await request('/api/v1/auth/register', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email, password: 'secret123', name: '同名' }),
+      })
+      assert.equal(created.response.status, 200)
+    }
+    const ambiguous = await request('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: '同名', password: 'secret123' }),
+    })
+    assert.equal(ambiguous.response.status, 401)
+    assert.equal(ambiguous.body.message, '有多个同名账号，请用邮箱登录')
+    const byEmail = await request('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'one@example.com', password: 'secret123' }),
+    })
+    assert.equal(byEmail.response.status, 200)
   })
 })

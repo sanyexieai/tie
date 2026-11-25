@@ -150,6 +150,23 @@ pub fn run() {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             desktop::git_sync::list_page_audit_events,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::backend_session::load_backend_session,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::backend_session::refresh_backend_session,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::backend_session::save_backend_session,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::backend_session::clear_backend_session,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::backend_sync::backend_sync_cursor,
+            desktop::backend_sync::sync_backend_workspace,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::backend_sync::resolve_backend_sync_conflict,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::backend_sync::list_page_reviews,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::backend_sync::add_page_opinion,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             ai_cli::ai_cli_status,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             ai_cli::ai_cli_suggest_tags,
@@ -160,10 +177,6 @@ pub fn run() {
             codex_mcp::configure_agent_mcp,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             codex_mcp::set_mcp_source_path,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            codex_mcp::codex_mcp_status,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            codex_mcp::configure_codex_mcp,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             skills::list_skill_connections,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]

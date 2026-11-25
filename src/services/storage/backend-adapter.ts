@@ -103,30 +103,9 @@ export const backendStorageAdapter: StorageAdapter = {
   },
 }
 
-export async function loadAllBackendPages(localPages: Page[] = []): Promise<SyncResult[]> {
-  const profile = backendService.loadProfile()
-  if (!profile.accessToken) return []
-  try {
-    const workspaces = await backendService.listWorkspaces(profile)
-    // storageProviderId 只决定服务端落盘（磁盘|S3），页面一律走 workspace API。
-    const mappedWorkspaceIds = new Set(Object.values(backendService.loadWorkspaceMappings()))
-    const pages = (await Promise.all(workspaces.filter((workspace) => !mappedWorkspaceIds.has(workspace.id)).map(async (workspace) => {
-      const items = await backendService.listPages(profile, workspace.id)
-      return items.map((page) => ({ ...page, storageSourceId: `backend:${workspace.id}` }))
-    }))).flat()
-    const grouped = new Map<string, Page[]>()
-    pages.forEach((page) => {
-      const list = grouped.get(page.storageSourceId) ?? []
-      list.push(page)
-      grouped.set(page.storageSourceId, list)
-    })
-    return [...grouped.entries()].map(([sourceId, sourcePages]) => {
-      const remoteIds = new Set(sourcePages.map((page) => page.id))
-      return mergeSyncPages(sourceId, localPages, sourcePages, remoteIds)
-    })
-  } catch (error) {
-    return [{ ...emptySyncResult('backend', error instanceof Error ? error.message : '后台页面加载失败') }]
-  }
+export async function loadAllBackendPages(_localPages: Page[] = []): Promise<SyncResult[]> {
+  // 后台页面只经 tie sync 拉回本地目录，不再作为另一套页面树并进界面。
+  return []
 }
 
 export async function listBackendSources(): Promise<StorageSource[]> {

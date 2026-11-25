@@ -14,20 +14,18 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 function parseArgs(argv) {
-  const out = { skipBackend: false, skipMcp: false, skipCargo: true }
+  const out = { skipBackend: false, skipCargo: true }
   for (const arg of argv) {
     if (arg === '--skip-backend') out.skipBackend = true
-    else if (arg === '--skip-mcp') out.skipMcp = true
     else if (arg === '--cargo') out.skipCargo = false
     else if (arg === '--help' || arg === '-h') {
-      console.log(`用法: npm run preflight [-- --skip-backend] [-- --skip-mcp] [-- --cargo]
+      console.log(`用法: npm run preflight [-- --skip-backend] [-- --cargo]
 
 默认执行:
   1. npm run check
   2. npm test
   3. npm run build
-  4. npm run test:mcp
-  5. npm run test:backend
+  4. npm run test:backend
 
 --cargo 额外跑 cargo check（较慢，默认跳过）
 `)
@@ -62,9 +60,6 @@ function main() {
   run('Unit tests', 'npm', ['test'])
   run('Frontend production build', 'npm', ['run', 'build'])
 
-  if (!options.skipMcp) {
-    run('Tie MCP tests', 'npm', ['run', 'test:mcp'])
-  }
   if (!options.skipBackend) {
     run('Backend API tests', 'npm', ['run', 'test:backend'])
   }

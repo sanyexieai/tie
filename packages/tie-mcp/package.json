@@ -2,22 +2,5 @@
   "name": "@tie/mcp",
   "version": "1.0.49",
   "private": true,
-  "type": "module",
-  "description": "Local-first MCP server for Tie workspaces (Codex / other agents)",
-  "bin": {
-    "tie-mcp": "./src/server.js",
-    "tie-mcp-http": "./src/http-server.js"
-  },
-  "scripts": {
-    "start": "node src/server.js",
-    "start:http": "node src/http-server.js",
-    "test": "node --test test/*.test.js"
-  },
-  "engines": {
-    "node": ">=20"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.0",
-    "zod": "^3.25.0"
-  }
+  "description": "Tie Agent Skill 模板。MCP 由 Rust tie mcp 提供，这个目录不再包含 Node 服务。"
 }

@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tie_local::{ExportOptions, ImportStrategy, LocalWorkspace, WritePageInput, DEFAULT_EXPORT_DEPTH};
@@ -8,6 +9,7 @@ pub fn serve(ws: &LocalWorkspace) -> Result<(), String> {
     let mut stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut buf = Vec::new();
+    let mut http_down_until: Option<Instant> = None;
     eprintln!(
         "[tie] mcp ready · workspace={}",
         ws.root().display()
@@ -16,10 +18,90 @@ pub fn serve(ws: &LocalWorkspace) -> Result<(), String> {
         let Some(message) = read_message(&mut stdin, &mut buf)? else {
             return Ok(());
         };
+        if message.get("id").is_some() {
+            let cooled = http_down_until.is_some_and(|until| Instant::now() < until);
+            if !cooled {
+                match try_http(ws, &message) {
+                    HttpAttempt::Hit(response) => {
+                        if http_down_until.take().is_some() {
+                            eprintln!("[tie] mcp 后台 HTTP 已恢复");
+                        }
+                        write_message(&mut stdout, &response)?;
+                        continue;
+                    }
+                    HttpAttempt::Miss => {
+                        if http_down_until.is_none() {
+                            eprintln!("[tie] mcp 后台 HTTP 不通，改用本地工作区");
+                        }
+                        http_down_until = Some(Instant::now() + Duration::from_secs(15));
+                    }
+                    HttpAttempt::Skip => {}
+                }
+            }
+        }
         if let Some(response) = dispatch_message(ws, &message) {
             write_message(&mut stdout, &response)?;
         }
     }
+}
+
+enum ForwardFail {
+    Down,
+    Auth,
+}
+
+enum HttpAttempt {
+    Hit(Value),
+    Miss,
+    Skip,
+}
+
+fn try_http(ws: &LocalWorkspace, message: &Value) -> HttpAttempt {
+    let Some(target) = tie_cli::backend_sync::mcp_http_target(ws.root()) else {
+        return HttpAttempt::Skip;
+    };
+    let Ok(session) = tie_cli::backend_sync::ensure_session(false) else {
+        return HttpAttempt::Skip;
+    };
+    match post_mcp(&target.url, &session.access_token, &target.workspace_id, message) {
+        Ok(value) => HttpAttempt::Hit(value),
+        Err(ForwardFail::Auth) => {
+            let Ok(session) = tie_cli::backend_sync::ensure_session(true) else {
+                return HttpAttempt::Miss;
+            };
+            match post_mcp(&target.url, &session.access_token, &target.workspace_id, message) {
+                Ok(value) => HttpAttempt::Hit(value),
+                Err(_) => HttpAttempt::Miss,
+            }
+        }
+        Err(ForwardFail::Down) => HttpAttempt::Miss,
+    }
+}
+
+fn post_mcp(url: &str, token: &str, workspace_id: &str, message: &Value) -> Result<Value, ForwardFail> {
+    let endpoint = format!("{}/mcp", url.trim_end_matches('/'));
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|_| ForwardFail::Down)?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(token)
+        .header("x-tie-workspace", workspace_id)
+        .json(message)
+        .send();
+    let response = match response {
+        Ok(response) => response,
+        Err(_) => return Err(ForwardFail::Down),
+    };
+    let status = response.status().as_u16();
+    if status == 401 || status == 403 {
+        return Err(ForwardFail::Auth);
+    }
+    if !(200..300).contains(&status) {
+        return Err(ForwardFail::Down);
+    }
+    response.json().map_err(|_| ForwardFail::Down)
 }
 
 fn dispatch_message(ws: &LocalWorkspace, message: &Value) -> Option<Value> {
@@ -219,13 +301,20 @@ fn doctor(ws: &LocalWorkspace) -> Result<Value, String> {
         "ok": ok,
         "workspace": ws.root().display().to_string(),
         "backend": "tie",
+        "transport": std::env::var("TIE_MCP_VIA").unwrap_or_else(|_| "local".to_owned()),
         "tieCli": exe,
         "env": {
             "TIE_WORKSPACE": std::env::var("TIE_WORKSPACE").ok(),
             "TIE_ACTOR": std::env::var("TIE_ACTOR").ok(),
         },
         "formatCheck": report,
-        "next": if ok { "MCP 由本机 tie 提供，可使用 tie_* 工具" } else { "format check 失败：用 tie_get / tie_write 修，不要手写 frontmatter" }
+        "next": if !ok {
+            "format check 失败：用 tie_get / tie_write 修，不要手写 frontmatter"
+        } else if std::env::var("TIE_MCP_VIA").ok().as_deref() == Some("http") {
+            "这次请求由后台 HTTP MCP 处理"
+        } else {
+            "本机 tie 在提供 MCP。后台 HTTP 可用时会先走后台，不通再用这个工作区"
+        }
     }))
 }
 
@@ -513,5 +602,36 @@ mod tests {
         let parsed = take_message(&mut buf).expect("read").expect("message");
         assert_eq!(parsed, message);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn closed_http_port_is_unavailable() {
+        let error = post_mcp(
+            "http://127.0.0.1:1",
+            "token",
+            "ws_test",
+            &json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
+        )
+        .expect_err("closed");
+        assert!(matches!(error, ForwardFail::Down));
+    }
+
+    #[test]
+    fn reads_backend_target_from_sync_file() {
+        let dir = std::env::temp_dir().join(format!("tie-mcp-target-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ws = LocalWorkspace::init(&dir, "").expect("init");
+        assert!(tie_cli::backend_sync::mcp_http_target(ws.root()).is_none());
+        let tie = dir.join(".tie");
+        std::fs::create_dir_all(&tie).expect("tie");
+        std::fs::write(
+            tie.join("sync.json"),
+            "{\n  \"engine\": \"backend\",\n  \"url\": \"http://127.0.0.1:8787\",\n  \"workspaceId\": \"ws_demo\"\n}\n",
+        )
+        .expect("sync");
+        let target = tie_cli::backend_sync::mcp_http_target(ws.root()).expect("target");
+        assert_eq!(target.url, "http://127.0.0.1:8787");
+        assert_eq!(target.workspace_id, "ws_demo");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

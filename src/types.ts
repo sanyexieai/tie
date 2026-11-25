@@ -22,7 +22,7 @@ export interface Page {
   deletedAt: string | null
   /** 主存储源：多客户端协作的唯一真相源；日常保存只写入这里 */
   storageSourceId: string
-  /** 绑定源列表（含主源）。除主源外为备份镜像，不随每次保存自动写入，需手动「同步到备份」 */
+  /** 页面目前落在哪些工作区。保存只写主源，不再扇出到其它源。 */
   storageSourceIds?: string[]
 }
 

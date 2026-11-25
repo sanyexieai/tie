@@ -21,6 +21,7 @@ import WebReadView from '@/components/WebReadView.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
 import { startAutoSync } from '@/services/auto-sync'
+import { startBackendLive } from '@/services/backend-live'
 import { backendService } from '@/services/backend'
 import { checkForAppUpdateOnStartup } from '@/services/app-updater'
 import { installMobileBackHandler, resetMobileBackLeaveArm, uninstallMobileBackHandler } from '@/services/mobile-back'
@@ -355,11 +356,16 @@ watch(
   () => store.initialized && backend.connected && !backend.loading
     ? `${backend.profile.endpoint}:${backend.profile.user?.id}` : '',
   (identity, _, onCleanup) => {
-    if (!identity) return
+    if (!identity || !backend.profile.accessToken) return
     onCleanup(startAutoSync(
-      () => store.syncLocalToDefaultBackend(true),
+      () => store.syncBackendNow(),
       (error) => { backend.error = error instanceof Error ? error.message : '自动同步失败，将自动重试' },
     ))
+    onCleanup(startBackendLive({
+      endpoint: backend.profile.endpoint,
+      token: backend.profile.accessToken,
+      onWorkspace: () => store.scheduleBackendSync(),
+    }))
   },
   { immediate: true },
 )

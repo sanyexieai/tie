@@ -1,4 +1,5 @@
-use crate::io::relocate_page_file;
+use crate::io::{relocate_page_file, save_page_to_root};
+use crate::paths::repair_utf8_mojibake;
 use crate::page::{ensure_demo, merge_loaded_pages, normalize_page_sources, open_or_adopt};
 use crate::paths::default_workspace_root;
 use crate::settings::{load, save, source_from_path, workspace_sources};
@@ -34,6 +35,13 @@ pub fn load_file_workspace(
             let path = entry.map_err(|error| error.to_string())?.path();
             if path.extension().is_some_and(|extension| extension == "md") {
                 let mut page = open_or_adopt(&root, &path, &source.id)?;
+                let title = repair_utf8_mojibake(&page.title);
+                let markdown = repair_utf8_mojibake(&page.markdown);
+                if title != page.title || markdown != page.markdown {
+                    page.title = title;
+                    page.markdown = markdown;
+                    page = save_page_to_root(&root, page, None)?;
+                }
                 if page.storage_source_id.is_empty() {
                     page.storage_source_id = source.id.clone();
                 }

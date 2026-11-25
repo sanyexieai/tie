@@ -3,7 +3,9 @@
 //! Pure filesystem operations — no Tauri dependency.
 
 pub mod api;
+pub mod backend_session;
 pub mod export;
+pub mod git_sync;
 pub mod files;
 pub mod io;
 pub mod links;

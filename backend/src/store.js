@@ -43,8 +43,26 @@ export const store = {
   },
   loadUsers() { return readJson('users.json', []) },
   saveUsers(users) { writeJson('users.json', users) },
-  loadWorkspaces() { return readJson('workspaces.json', []) },
+  loadWorkspaces() {
+    const workspaces = readJson('workspaces.json', [])
+    let changed = false
+    const next = workspaces.map((item) => {
+      if (!item?.storageProviderId) return item
+      changed = true
+      const copy = { ...item }
+      delete copy.storageProviderId
+      return copy
+    })
+    if (changed) writeJson('workspaces.json', next)
+    return next
+  },
   saveWorkspaces(workspaces) { writeJson('workspaces.json', workspaces) },
   loadProviders() { return readJson('providers.json', []) },
   saveProviders(providers) { writeJson('providers.json', providers) },
+  loadSettings() { return readJson('settings.json', { mcp: { enabled: false, cliPath: '' }, ai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', apiKey: '' } }) },
+  saveSettings(settings) { writeJson('settings.json', settings) },
+  loadMcpTokens() { return readJson('mcp-tokens.json', []) },
+  saveMcpTokens(tokens) { writeJson('mcp-tokens.json', tokens) },
+  loadSessions() { return readJson('sessions.json', []) },
+  saveSessions(sessions) { writeJson('sessions.json', sessions) },
 }
