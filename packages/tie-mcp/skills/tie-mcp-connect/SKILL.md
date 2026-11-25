@@ -50,4 +50,10 @@ HTTP 故障、未开启或授权不可用时，不得自行改用本地，也不
 2. 调用 `tie_get`、`tie_list_recent` 验证真实读取，再调用 `tie_doctor` 确认通道没有变化。工具列表成功不证明 HTTP 已连通。
 3. 本机 `tie_write`、`tie_import`、`tie_file_ingest` 成功后会尽力同步一次。检查结果中的 `sync.state`：`synced` 表示本轮成功，`pending` 表示本地已保存但同步未完成，`skipped` 表示没有绑定服务器。不要把落盘成功说成已同步。后台 HTTP 子进程不会反向同步。
 
+连接正常后，查询知识优先使用分类树缩小范围：先 `tie_tree({depth: 1})` 看顶层，再用相关节点 ID 作为 `root` 按层展开。`depth` 范围 `1..8`，默认 `2`，指定根节点计为第一层；`childCount` 和 `childrenTruncated` 提示是否仍有子节点可展开。
+
+用 `tie_search` 的 `root` 搜索选定节点及其后代，按需用 `exclude` 排除无关分支及其后代。ID 优先于标题，标题重名时必须用 ID；检查结果的 `breadcrumb`（分类路径的 `id` / `title`）后按需读全文。局部结果不足再扩大范围，不反复输出全树或混入无关分类。
+
+写入前尽量沿树复用最细且稳定的已有分类，通过 `parentId` 指定父节点。分类不是必填项，没有合适节点仍可直接写入；不自动搬动旧页面，不为每条知识强造多层分类，用户明确需要时才新建分类页。完整检索与写入约定见 `tie-memory`。
+
 找不到 CLI 时按 Skill `tie-upgrade-cli` 构建。页面内容只用 `tie_*` 工具读写，不手改 frontmatter。

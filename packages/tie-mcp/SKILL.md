@@ -28,11 +28,32 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 
 ## 操作顺序
 
-1. 先 `tie_search` / `tie_list_recent`（可加 `tag: "memory"` / `resource`）避免重复页
-2. 需要全文时用 `tie_get`
-3. 关联上下文用 `tie_related`
-4. 外部文件用 `tie_file_ingest` / `tie_file_list` / `tie_file_get`
-5. 新建或更新用 `tie_write`（不要手写 frontmatter）
+1. 先用 `tie_tree({depth: 1})` 看顶层分类，按主题用 `root` 逐级展开相关分支，不反复输出整棵树
+2. 在选定分类内用 `tie_search` 的 `root` 检索，按需用 `exclude` 排除无关分支；可叠加 `tag: "memory"` / `resource`，用于查找知识及避免重复页
+3. 需要全文时用 `tie_get`；关联上下文用 `tie_related`
+4. 新知识尽量选定合适的已有分类，通过 `parentId` 写入；更新已有页使用 `pageId`，不顺便重排分类
+5. 外部文件用 `tie_file_ingest` / `tie_file_list` / `tie_file_get`；正文与笔记通过 `tie_write` 写入（不要手写 frontmatter）
+
+## 按树检索与分类
+
+树节点就是页面，父子关系表达知识分类。`tie_tree` 只返回节点摘要，不返回正文：
+
+- `depth` 为返回层数，范围 `1..8`，默认 `2`；传入 `root` 时，该节点算第一层
+- `root` 可用页面 ID 或唯一标题；分类标题可能重名，优先使用树中返回的 ID
+- `childCount` 是直接子节点数；`childrenTruncated: true` 表示还有未展开的子节点，不代表叶子
+
+推荐逐级查看：`tie_tree({depth: 1})` → `tie_tree({root: "pg_project", depth: 2})` → 选更具体的分类节点。只展开与当前问题有关的分支。
+
+搜索示例：`tie_search({query: "部署", root: "pg_project", exclude: ["pg_archive"], limit: 8})`。
+
+- `root` 包含选定节点自身及其全部后代；不传时可搜索整个工作区
+- `exclude` 是节点 ID 或唯一标题数组，排除各节点及其全部后代；排除优先于包含
+- 先按树范围筛候选，再评分与取 `limit`，无关分支不会占用结果名额
+- 结果中的 `breadcrumb` 只含分类路径的 `id` / `title`，从顶层到父节点，不含命中页自身；根据路径确认结果所属分类后再读全文
+
+相关分类内没有足够结果时，再有意识地扩大到父分类或其他分支。不要把“本次范围内无结果”说成整个知识库都没有这项知识。`tie_list_recent` 可用于了解近期变化，但不能替代按分类检索。
+
+写入时尽量复用最细且稳定的已有分类，逐级确定归属，例如已有的“研究 → 数据库 → PostgreSQL”。分类不是必填项：没有合适分类时可以直接写入，不因此阻断保存。不要为每条知识硬造多层目录，也不要自动搬动旧页面；只有用户明确需要时才新建分类页。
 
 本机 `tie_write`、`tie_import`、`tie_file_ingest` 成功后会尽力同步一次。结果中的 `sync.state` 为 `synced`（本轮成功）、`pending`（本地已保存但仍待同步）或 `skipped`（未绑定服务器）；向用户说明时区分落盘成功和同步完成。后台 HTTP 写入不反向启动同步。本机文件登记、打开提示及导入导出只由本机 CLI 提供，原生 HTTP Agent 不提供宿主文件访问。
 
@@ -98,9 +119,9 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 
 ## 写入规则
 
-- 创建：提供 `title` + `markdown`/`body`，可选 `kind`、`tags`、`parentTitle` / `parentId`
+- 创建：提供 `title` + `markdown`/`body`，可选 `kind`、`tags`、`parentTitle` / `parentId`；尽量先按树选分类，优先传明确的 `parentId`
 - `markdown` / `body` 必须是**纯 Markdown 正文**，不要传包含 `id/title/markdown` 的 JSON 包装字符串
 - 更新：必须带 `pageId`（或 `matchTitle: true` 且标题精确匹配）
-- **父子树**：用 `parentTitle` / `parentId` 写入 frontmatter `parent_id`；侧栏与编辑器底部子页列表由客户端按 id 渲染，**不要**在父页正文维护子链接
+- **父子树**：用 `parentId` / `parentTitle` 指定父节点；元数据由 `tie_write` 管理，侧栏与编辑器底部子页列表按 id 渲染。重名分类使用 ID，**不要**在父页正文维护子链接。未提供分类仍允许写入；更新时不传父节点可保留原归属
 - `#标签` 仍走 frontmatter `tags`
 - 禁止写入密钥、token、密码、私钥

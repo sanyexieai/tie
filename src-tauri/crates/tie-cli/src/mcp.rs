@@ -84,11 +84,12 @@ impl McpRuntime {
                 || json!({ "jsonrpc": "2.0", "id": id, "result": initialize(&params) }),
             );
             if let Some(result) = response.get_mut("result") {
-                result["instructions"] = json!(if self.server {
+                let connection_instructions = if self.server {
                     "当前由服务器 HTTP MCP 提供服务。请用 tie_doctor 确认 transport=http；本机文件导入与导出请由本地 CLI 执行。"
                 } else {
                     "有服务器绑定时，内容请求优先使用 HTTP。HTTP 异常不会自动切换本地；调用 tie_connection 查看原因，并先向用户确认，获准后才能 confirm_local。无本地登录会话时请用户提供 MCP token。工具列表成功不代表 HTTP 已连通，请看 tie_doctor.transport。"
-                });
+                };
+                result["instructions"] = json!(format!("{connection_instructions} 检索知识先用 tie_tree 按层选择分类，再用 tie_search 的 root/exclude 缩小范围，必要时 tie_get 读全文。写入尽量用 parentId 归入合适的已有分类，分类非必填，不自动重排旧树。"));
             }
             return Some(response);
         }
@@ -381,14 +382,18 @@ fn tool_defs() -> Vec<Value> {
             "confirmed": { "type": "boolean", "description": "仅在用户明确同意当前故障期降级后设为 true" }
         }))),
         tool("tie_doctor", "诊断本机 tie MCP 与工作区。升级出问题时先调这个。", json!({ "type": "object", "properties": {} })),
-        tool("tie_list_recent", "列出最近更新的页面", obj_props(json!({
+        tool("tie_list_recent", "列出最近更新的页面，可限定分类子树并排除无关分支。先用 tie_tree 按层选择分类。", obj_props(json!({
             "limit": { "type": "integer", "description": "返回条数，默认 20" },
-            "tag": { "type": "string", "description": "按标签精确过滤" }
+            "tag": { "type": "string", "description": "按标签精确过滤" },
+            "root": { "type": "string", "description": "分类节点 ID 或唯一标题，包含该节点及全部后代；省略时不限定" },
+            "exclude": { "type": "array", "items": { "type": "string" }, "description": "忽略这些节点及各自全部后代；优先使用节点 ID" }
         }))),
-        tool("tie_search", "按关键词或标签搜索页面", obj_props(json!({
+        tool("tie_search", "先用 tie_tree 逐级选择知识分类，再按关键词或标签搜索。root 限定相关子树，exclude 忽略无关分支；结果带分类路径。", obj_props(json!({
             "query": { "type": "string" },
             "tag": { "type": "string" },
-            "limit": { "type": "integer" }
+            "limit": { "type": "integer" },
+            "root": { "type": "string", "description": "分类节点 ID 或唯一标题，包含该节点及全部后代；省略时搜索全库" },
+            "exclude": { "type": "array", "items": { "type": "string" }, "description": "排除节点及其全部后代；在评分及结果数量限制前裁剪" }
         }))),
         tool("tie_get", "按页面 id 或精确标题读取全文", obj_props(json!({
             "id_or_title": { "type": "string" }
@@ -396,20 +401,23 @@ fn tool_defs() -> Vec<Value> {
         tool("tie_related", "查看出链、入链、子页和同标签页面", obj_props(json!({
             "id_or_title": { "type": "string" }
         }))),
-        tool("tie_write", "写入页面。不要手写 frontmatter，不要写「我」当 actor。", obj_props(json!({
+        tool("tie_write", "写入知识。尽量先用 tie_tree 逐级选择最合适的已有分类，通过 parentId 归类；分类非必填，没有合适分类可直接写入，不自动重排旧树。不要手写 frontmatter，不要写「我」当 actor。", obj_props(json!({
             "title": { "type": "string" },
             "markdown": { "type": "string" },
             "body": { "type": "string" },
             "pageId": { "type": "string" },
             "tags": { "type": "array", "items": { "type": "string" } },
-            "parentId": {},
-            "parentTitle": { "type": "string" },
+            "parentId": { "type": ["string", "null"], "description": "建议指定最合适的分类节点 ID；省略不强制分类，更新时保留原归属；null 明确放到顶层" },
+            "parentTitle": { "type": "string", "description": "父分类标题；有重名时应改用明确的 parentId" },
             "kind": { "type": "string" },
             "matchTitle": { "type": "boolean" },
             "icon": { "type": "string" },
             "actor": { "type": "string", "description": "Agent 名。不要写「我」" }
         }))),
-        tool("tie_tree", "页面树", obj_props(json!({ "root": { "type": "string" } }))),
+        tool("tie_tree", "按层浏览知识分类，不返回正文。先 depth=1 看顶层，再用 root 节点 ID、depth=2 逐级展开；childCount 与 childrenTruncated 表示是否还有未展开子节点。", obj_props(json!({
+            "root": { "type": "string", "description": "分类节点 ID 或唯一标题；该节点计为第一层" },
+            "depth": { "type": "integer", "minimum": 1, "maximum": 8, "default": 2, "description": "返回层数，默认 2；1 只返回当前根级" }
+        }))),
         tool("tie_export", "导出页面闭包到目录", obj_props(json!({
             "page": { "type": "string" },
             "depth": { "type": "integer" },
@@ -452,16 +460,20 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
         "tie_doctor" => doctor(ws),
         "tie_list_recent" => {
             let limit = int_arg(args, "limit", 20);
-            let hits = ws.list_recent(limit, str_arg(args, "tag"))?;
+            let (root, exclude) = search_scope_args(args)?;
+            let hits = ws.search_scoped("", str_arg(args, "tag"), limit, false, root, &exclude)?;
             Ok(json!(flatten_hits(hits)))
         }
         "tie_search" => {
             let query = str_arg(args, "query").unwrap_or("");
             let limit = int_arg(args, "limit", 12);
-            let hits = ws.search(query, str_arg(args, "tag"), limit, false)?;
+            let (root, exclude) = search_scope_args(args)?;
+            let hits =
+                ws.search_scoped(query, str_arg(args, "tag"), limit, false, root, &exclude)?;
             Ok(json!({
                 "workspace": ws.root().display().to_string(),
                 "backend": "tie",
+                "scope": { "root": root, "exclude": exclude },
                 "results": flatten_hits(hits)
             }))
         }
@@ -481,7 +493,15 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
         }
         "tie_write" => write_page(ws, args),
         "tie_tree" => {
-            Ok(serde_json::to_value(ws.tree(str_arg(args, "root"))?).map_err(|e| e.to_string())?)
+            let root = node_arg(args, "root")?;
+            let depth = match args.get("depth") {
+                None => 2,
+                Some(value) => value
+                    .as_u64()
+                    .filter(|depth| (1..=8).contains(depth))
+                    .ok_or("depth 必须是 1 到 8 的整数")? as usize,
+            };
+            Ok(serde_json::to_value(ws.tree_outline(root, depth)?).map_err(|e| e.to_string())?)
         }
         "tie_export" => {
             let page = required_str(args, "page")?;
@@ -577,18 +597,35 @@ fn write_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
             .filter_map(|item| item.as_str().map(str::to_owned))
             .collect::<Vec<_>>()
     });
-    let parent_id = match args.get("parentId") {
+    let mut parent_id = match args.get("parentId") {
         None => None,
         Some(Value::Null) => Some(None),
-        Some(value) => Some(Some(value.as_str().unwrap_or("").to_owned())),
+        Some(Value::String(value)) => {
+            Some(Some(value.to_owned()).filter(|id| !id.trim().is_empty()))
+        }
+        Some(_) => return Err("parentId 必须是分类节点 ID 或 null".into()),
     };
+    if let Some(title) = node_arg(args, "parentTitle")? {
+        let parent = ws
+            .tree_outline(Some(title), 1)?
+            .into_iter()
+            .next()
+            .ok_or("父分类不存在")?;
+        if parent_id
+            .as_ref()
+            .is_some_and(|id| id.as_deref() != Some(parent.page.id.as_str()))
+        {
+            return Err("parentId 与 parentTitle 指向不同分类，请用明确的 parentId".into());
+        }
+        parent_id = Some(Some(parent.page.id));
+    }
     let saved = ws.write_page(WritePageInput {
         title: str_owned(args, "title"),
         markdown,
         page_id: str_owned(args, "pageId"),
         tags,
         parent_id,
-        parent_title: str_owned(args, "parentTitle"),
+        parent_title: None,
         kind: str_owned(args, "kind"),
         match_title: args
             .get("matchTitle")
@@ -615,9 +652,42 @@ fn flatten_hits(hits: Vec<tie_local::SearchHit>) -> Vec<Value> {
             let mut page = serde_json::to_value(hit.page).ok()?;
             page["snippet"] = json!(hit.snippet);
             page["score"] = json!(hit.score);
+            page["breadcrumb"] = json!(hit
+                .breadcrumb
+                .into_iter()
+                .map(|ancestor| json!({ "id": ancestor.id, "title": ancestor.title }))
+                .collect::<Vec<_>>());
             Some(page)
         })
         .collect()
+}
+
+fn node_arg<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.trim()).filter(|value| !value.is_empty())),
+        Some(_) => Err(format!("{name} 必须是节点 ID 或标题字符串")),
+    }
+}
+
+fn search_scope_args(args: &Value) -> Result<(Option<&str>, Vec<String>), String> {
+    let root = node_arg(args, "root")?;
+    let exclude = match args.get("exclude") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| "exclude 的每一项必须是非空节点 ID 或标题".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err("exclude 必须是节点 ID 或标题的数组".into()),
+    };
+    Ok((root, exclude))
 }
 
 fn migration_status(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
@@ -934,6 +1004,135 @@ mod tests {
             assert!(!local_only_request(&message), "{name}");
         }
         assert!(!local_only_request(&json!({"method": "initialize"})));
+    }
+
+    #[test]
+    fn scoped_search_and_tree_keep_only_relevant_knowledge() {
+        let dir =
+            std::env::temp_dir().join(format!("tie-mcp-categories-{}", tie_local::new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_test").unwrap();
+        let save = |title: &str, body: &str, parent: Option<&str>| {
+            ws.write_page(WritePageInput {
+                title: Some(title.into()),
+                markdown: Some(body.into()),
+                parent_id: parent.map(|id| Some(id.to_owned())),
+                ..Default::default()
+            })
+            .unwrap()
+            .page
+        };
+        let project = save("项目", "# 项目", None);
+        let operations = save("运维", "# 运维", Some(&project.id));
+        let archive = save("旧方案", "# 旧方案", Some(&operations.id));
+        let current = save("Nginx 排障", "nginx current fix", Some(&operations.id));
+        save(
+            "已废弃的 Nginx 方案",
+            "nginx nginx nginx",
+            Some(&archive.id),
+        );
+        save("其它项目资料", "nginx nginx nginx", None);
+
+        let response = dispatch(
+            &ws,
+            "tools/call",
+            &json!({"name":"tie_tree", "arguments":{"root":project.id,"depth":1}}),
+        )
+        .unwrap();
+        let tree: Value =
+            serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(tree[0]["childCount"], 1);
+        assert_eq!(tree[0]["childrenTruncated"], true);
+        assert_eq!(tree[0]["children"], json!([]));
+
+        let response = dispatch(&ws, "tools/call", &json!({"name":"tie_search", "arguments":{"query":"nginx","root":operations.id,"exclude":[archive.id],"limit":1}})).unwrap();
+        assert_eq!(response["isError"], false);
+        let result: Value =
+            serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(result["results"].as_array().unwrap().len(), 1);
+        assert_eq!(result["results"][0]["id"], current.id);
+        assert_eq!(
+            result["results"][0]["breadcrumb"],
+            json!([
+                {"id":project.id,"title":"项目"}, {"id":operations.id,"title":"运维"}
+            ])
+        );
+        assert!(result["results"][0]["breadcrumb"][0]
+            .get("markdown")
+            .is_none());
+
+        let recent = call_tool(
+            &ws,
+            "tie_list_recent",
+            &json!({"root":operations.id,"exclude":[archive.id],"limit":50}),
+        )
+        .unwrap();
+        assert_eq!(recent.as_array().unwrap().len(), 2);
+        assert!(recent
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|page| page["id"] == operations.id || page["id"] == current.id));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn invalid_scopes_do_not_turn_into_global_queries() {
+        let dir = std::env::temp_dir().join(format!(
+            "tie-mcp-invalid-scope-{}",
+            tie_local::new_page_id()
+        ));
+        let ws = LocalWorkspace::init(&dir, "src_test").unwrap();
+        for args in [
+            json!({"root":42}),
+            json!({"exclude":"wrong"}),
+            json!({"exclude":[true]}),
+            json!({"exclude":[""]}),
+        ] {
+            assert!(call_tool(&ws, "tie_search", &args).is_err());
+        }
+        for depth in [json!(0), json!(9), json!("2"), json!(1.5)] {
+            assert!(call_tool(&ws, "tie_tree", &json!({"depth":depth})).is_err());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn classification_is_optional_but_titles_must_be_unambiguous() {
+        let dir = std::env::temp_dir().join(format!(
+            "tie-mcp-write-category-{}",
+            tie_local::new_page_id()
+        ));
+        let ws = LocalWorkspace::init(&dir, "src_test").unwrap();
+        let first = write_page(&ws, &json!({"title":"运维","markdown":"# 运维"})).unwrap();
+        let classified = write_page(
+            &ws,
+            &json!({"title":"配置","markdown":"# 配置", "parentTitle":"运维"}),
+        )
+        .unwrap();
+        assert_eq!(classified["page"]["parentId"], first["page"]["id"]);
+        write_page(&ws, &json!({"title":"运维","markdown":"# 运维"})).unwrap();
+        assert!(
+            write_page(&ws, &json!({"title":"不能错放","parentTitle":"运维"}))
+                .unwrap_err()
+                .contains("不唯一")
+        );
+        assert!(write_page(&ws, &json!({"title":"错误分类","parentId":true})).is_err());
+        let explicit = write_page(
+            &ws,
+            &json!({"title":"正确分类","parentId":first["page"]["id"]}),
+        )
+        .unwrap();
+        assert_eq!(explicit["page"]["parentId"], first["page"]["id"]);
+        let unclassified =
+            write_page(&ws, &json!({"title":"暂未分类","markdown":"# 暂未分类"})).unwrap();
+        assert!(unclassified["page"]["parentId"].is_null());
+        let updated = write_page(
+            &ws,
+            &json!({"pageId":classified["page"]["id"],"markdown":"# 更新内容"}),
+        )
+        .unwrap();
+        assert_eq!(updated["page"]["parentId"], first["page"]["id"]);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

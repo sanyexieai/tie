@@ -39,6 +39,8 @@ pub struct SearchHit {
     pub page: PageSummary,
     pub score: i32,
     pub snippet: String,
+    /// Ancestors from the top-level category to the direct parent.
+    pub breadcrumb: Vec<PageSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,6 +80,16 @@ pub struct TreeNode {
     #[serde(flatten)]
     pub page: PageSummary,
     pub children: Vec<TreeNode>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeOutlineNode {
+    #[serde(flatten)]
+    pub page: PageSummary,
+    pub children: Vec<TreeOutlineNode>,
+    pub child_count: usize,
+    pub children_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -281,9 +293,43 @@ impl LocalWorkspace {
         limit: usize,
         include_deleted: bool,
     ) -> Result<Vec<SearchHit>, String> {
+        self.search_scoped(query, tag, limit, include_deleted, None, &[])
+    }
+
+    /// Search a category and its descendants, pruning excluded branches before scoring.
+    pub fn search_scoped(
+        &self,
+        query: &str,
+        tag: Option<&str>,
+        limit: usize,
+        include_deleted: bool,
+        root: Option<&str>,
+        exclude: &[String],
+    ) -> Result<Vec<SearchHit>, String> {
         let q = query.trim();
         let tag_filter = tag.map(str::trim).filter(|t| !t.is_empty()).map(|t| t.to_lowercase());
         let mut pages = self.load_all(include_deleted)?;
+        let mut by_parent: HashMap<String, Vec<String>> = HashMap::new();
+        let mut summaries = HashMap::new();
+        for page in &pages {
+            if let Some(parent) = &page.parent_id {
+                by_parent.entry(parent.clone()).or_default().push(page.id.clone());
+            }
+            summaries.entry(page.id.clone()).or_insert_with(|| Self::summarize(page));
+        }
+        let included = root.map(|key| {
+            Self::resolve_scope_page(&pages, key)
+                .map(|page| Self::subtree_ids(&page.id, &by_parent))
+        }).transpose()?;
+        let mut excluded = HashSet::new();
+        for key in exclude {
+            let page = Self::resolve_scope_page(&pages, key)?;
+            excluded.extend(Self::subtree_ids(&page.id, &by_parent));
+        }
+        pages.retain(|page| {
+            included.as_ref().is_none_or(|ids| ids.contains(&page.id))
+                && !excluded.contains(&page.id)
+        });
         if let Some(tag) = &tag_filter {
             pages.retain(|page| page.tags.iter().any(|item| item.to_lowercase() == *tag));
         }
@@ -295,6 +341,7 @@ impl LocalWorkspace {
                 .take(limit)
                 .map(|page| SearchHit {
                     snippet: Self::snippet(&page, ""),
+                    breadcrumb: Self::page_breadcrumb(&page.id, &summaries),
                     page: Self::summarize(&page),
                     score: 0,
                 })
@@ -319,6 +366,7 @@ impl LocalWorkspace {
                     }),
                     page: Self::summarize(&page),
                     score,
+                    breadcrumb: Vec::new(),
                 })
             })
             .collect();
@@ -328,7 +376,57 @@ impl LocalWorkspace {
                 .then_with(|| b.page.updated_at.cmp(&a.page.updated_at))
         });
         hits.truncate(limit);
+        for hit in &mut hits {
+            hit.breadcrumb = Self::page_breadcrumb(&hit.page.id, &summaries);
+        }
         Ok(hits)
+    }
+
+    pub(crate) fn resolve_scope_page<'a>(pages: &'a [Page], key: &str) -> Result<&'a Page, String> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err("分类节点不能为空，请提供页面 ID 或唯一标题".into());
+        }
+        if let Some(page) = pages.iter().find(|page| page.id == key) {
+            return Ok(page);
+        }
+        let title = key.to_lowercase();
+        let mut matches = pages.iter().filter(|page| page.title.to_lowercase() == title);
+        let page = matches.next().ok_or_else(|| format!("分类节点不存在：{key}"))?;
+        if matches.any(|other| other.id != page.id) {
+            return Err(format!("分类标题不唯一：{key}；请使用页面 ID"));
+        }
+        Ok(page)
+    }
+
+    fn subtree_ids(root: &str, by_parent: &HashMap<String, Vec<String>>) -> HashSet<String> {
+        let mut visited = HashSet::new();
+        let mut pending = vec![root.to_owned()];
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            if let Some(children) = by_parent.get(&id) {
+                pending.extend(children.iter().cloned());
+            }
+        }
+        visited
+    }
+
+    fn page_breadcrumb(id: &str, summaries: &HashMap<String, PageSummary>) -> Vec<PageSummary> {
+        let mut path = Vec::new();
+        let mut visited = HashSet::from([id.to_owned()]);
+        let mut parent = summaries.get(id).and_then(|page| page.parent_id.as_deref());
+        while let Some(id) = parent {
+            if !visited.insert(id.to_owned()) {
+                break;
+            }
+            let Some(page) = summaries.get(id) else { break };
+            path.push(page.clone());
+            parent = page.parent_id.as_deref();
+        }
+        path.reverse();
+        path
     }
 
     pub fn list_recent(&self, limit: usize, tag: Option<&str>) -> Result<Vec<SearchHit>, String> {
@@ -337,49 +435,94 @@ impl LocalWorkspace {
 
     /// Page tree under optional root (default: all top-level pages).
     pub fn tree(&self, root_id: Option<&str>) -> Result<Vec<TreeNode>, String> {
-        let pages = self.load_all(false)?;
-        let mut by_parent: HashMap<Option<String>, Vec<Page>> = HashMap::new();
-        for page in pages {
-            by_parent
-                .entry(page.parent_id.clone())
-                .or_default()
-                .push(page);
+        fn plain(node: TreeOutlineNode) -> TreeNode {
+            TreeNode {
+                page: node.page,
+                children: node.children.into_iter().map(plain).collect(),
+            }
         }
-        for siblings in by_parent.values_mut() {
-            siblings.sort_by(|a, b| {
-                a.sort_key
-                    .cmp(&b.sort_key)
-                    .then_with(|| a.title.cmp(&b.title))
-            });
+        Ok(self.tree_nodes(root_id, None)?.into_iter().map(plain).collect())
+    }
+
+    /// Return the requested number of hierarchy levels; returned roots count as level one.
+    pub fn tree_outline(&self, root: Option<&str>, depth: usize) -> Result<Vec<TreeOutlineNode>, String> {
+        self.tree_nodes(root, Some(depth.clamp(1, 8)))
+    }
+
+    fn tree_nodes(&self, root: Option<&str>, depth: Option<usize>) -> Result<Vec<TreeOutlineNode>, String> {
+        let mut pages = self.load_all(false)?;
+        pages.sort_by(|a, b| a.sort_key.cmp(&b.sort_key).then_with(|| a.title.cmp(&b.title)).then_with(|| a.id.cmp(&b.id)));
+        let mut known = HashSet::new();
+        pages.retain(|page| known.insert(page.id.clone()));
+        let by_id: HashMap<&str, usize> = pages.iter().enumerate().map(|(index, page)| (page.id.as_str(), index)).collect();
+        let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut roots = Vec::new();
+        for (index, page) in pages.iter().enumerate() {
+            match page.parent_id.as_deref().filter(|parent| by_id.contains_key(parent)) {
+                Some(parent) => children.entry(parent).or_default().push(index),
+                None => roots.push(index),
+            }
         }
 
-        fn build(
-            parent: Option<&str>,
-            by_parent: &HashMap<Option<String>, Vec<Page>>,
-        ) -> Vec<TreeNode> {
-            let key = parent.map(str::to_owned);
-            let Some(children) = by_parent.get(&key) else {
-                return Vec::new();
+        fn cover(index: usize, pages: &[Page], children: &HashMap<&str, Vec<usize>>, covered: &mut HashSet<usize>) {
+            let mut pending = vec![index];
+            while let Some(index) = pending.pop() {
+                if covered.insert(index) {
+                    if let Some(children) = children.get(pages[index].id.as_str()) {
+                        pending.extend(children);
+                    }
+                }
+            }
+        }
+
+        if let Some(root) = root.map(str::trim).filter(|root| !root.is_empty()) {
+            let page = Self::resolve_scope_page(&pages, root)?;
+            roots = vec![by_id[page.id.as_str()]];
+        } else {
+            let mut covered = HashSet::new();
+            for &root in &roots {
+                cover(root, &pages, &children, &mut covered);
+            }
+            // A parent cycle has no natural root. Show one existing node without rewriting data.
+            for index in 0..pages.len() {
+                if !covered.contains(&index) {
+                    let mut anchor = index;
+                    let mut chain = HashSet::new();
+                    while chain.insert(anchor) {
+                        match pages[anchor].parent_id.as_deref().and_then(|parent| by_id.get(parent)) {
+                            Some(&parent) => anchor = parent,
+                            None => break,
+                        }
+                    }
+                    roots.push(anchor);
+                    cover(anchor, &pages, &children, &mut covered);
+                }
+            }
+        }
+
+        fn build(index: usize, pages: &[Page], children: &HashMap<&str, Vec<usize>>, remaining: Option<usize>, ancestors: &mut HashSet<usize>) -> TreeOutlineNode {
+            ancestors.insert(index);
+            let direct = children.get(pages[index].id.as_str()).map(Vec::as_slice).unwrap_or(&[]);
+            let nested = if remaining == Some(1) {
+                Vec::new()
+            } else {
+                direct.iter().filter_map(|&child| {
+                    if ancestors.contains(&child) {
+                        None
+                    } else {
+                        Some(build(child, pages, children, remaining.map(|depth| depth - 1), ancestors))
+                    }
+                }).collect::<Vec<_>>()
             };
-            children
-                .iter()
-                .map(|page| TreeNode {
-                    children: build(Some(page.id.as_str()), by_parent),
-                    page: LocalWorkspace::summarize(page),
-                })
-                .collect()
+            ancestors.remove(&index);
+            TreeOutlineNode {
+                page: LocalWorkspace::summarize(&pages[index]),
+                child_count: direct.len(),
+                children_truncated: nested.len() != direct.len(),
+                children: nested,
+            }
         }
-
-        if let Some(root) = root_id.map(str::trim).filter(|id| !id.is_empty()) {
-            let page = self
-                .resolve(root)?
-                .ok_or_else(|| format!("页面不存在：{root}"))?;
-            return Ok(vec![TreeNode {
-                children: build(Some(page.id.as_str()), &by_parent),
-                page: Self::summarize(&page),
-            }]);
-        }
-        Ok(build(None, &by_parent))
+        Ok(roots.into_iter().map(|root| build(root, &pages, &children, depth, &mut HashSet::new())).collect())
     }
 
     pub(crate) fn extract_outgoing(
@@ -955,6 +1098,99 @@ mod tests {
     use std::env;
 
     #[test]
+    fn tree_outline_depth_counts_and_full_tree_compatibility() {
+        let dir = env::temp_dir().join(format!("tie-tree-outline-{}", new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_tree_outline").unwrap();
+        let category = ws.write_page(WritePageInput { title: Some("Category".into()), ..Default::default() }).unwrap().page;
+        let child = ws.write_page(WritePageInput { title: Some("Child".into()), parent_id: Some(Some(category.id.clone())), ..Default::default() }).unwrap().page;
+        let leaf = ws.write_page(WritePageInput { title: Some("Leaf".into()), parent_id: Some(Some(child.id.clone())), ..Default::default() }).unwrap().page;
+        let top = ws.tree_outline(None, 1).unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].page.id, category.id);
+        assert_eq!(top[0].child_count, 1);
+        assert!(top[0].children_truncated);
+        assert!(top[0].children.is_empty());
+        let second = ws.tree_outline(Some(&category.id), 2).unwrap();
+        assert_eq!(second[0].children.len(), 1);
+        assert!(!second[0].children_truncated);
+        assert_eq!(second[0].children[0].page.id, child.id);
+        assert_eq!(second[0].children[0].child_count, 1);
+        assert!(second[0].children[0].children_truncated);
+        let complete = ws.tree(Some("Category")).unwrap();
+        assert_eq!(complete[0].children[0].children[0].page.id, leaf.id);
+        let json = serde_json::to_value(&complete).unwrap();
+        assert!(json[0].get("childCount").is_none());
+        assert!(json[0].get("childrenTruncated").is_none());
+        let empty_leaf = ws.tree_outline(Some(&leaf.id), 2).unwrap();
+        assert_eq!(empty_leaf[0].child_count, 0);
+        assert!(!empty_leaf[0].children_truncated);
+        assert!(ws.tree(Some("missing-category")).is_err());
+        ws.write_page(WritePageInput { title: Some("CATEGORY".into()), ..Default::default() }).unwrap();
+        assert!(ws.tree(Some("Category")).unwrap_err().contains("不唯一"));
+        assert_eq!(ws.tree(Some(&category.id)).unwrap()[0].page.id, category.id);
+        let mut last = leaf.id.clone();
+        for level in 0..9 {
+            last = ws.write_page(WritePageInput { title: Some(format!("Deep {level}")), parent_id: Some(Some(last)), ..Default::default() }).unwrap().page.id;
+        }
+        let capped = ws.tree_outline(Some(&category.id), usize::MAX).unwrap();
+        let mut node = &capped[0];
+        let mut levels = 1;
+        while let Some(child) = node.children.first() {
+            levels += 1;
+            node = child;
+        }
+        assert_eq!(levels, 8);
+        assert!(node.children_truncated);
+        assert!(ws.tree_outline(Some(&category.id), 0).unwrap()[0].children.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tree_outline_keeps_orphans_visible_and_cuts_parent_cycles_without_repair() {
+        let dir = env::temp_dir().join(format!("tie-tree-cycle-{}", new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_tree_cycle").unwrap();
+        let mut ids = Vec::new();
+        for title in ["Normal", "Missing parent", "Deleted parent", "Deleted parent child", "Cycle A", "Cycle B", "Self cycle", "Cycle descendant"] {
+            ids.push(ws.write_page(WritePageInput { title: Some(title.into()), ..Default::default() }).unwrap().page.id);
+        }
+        for (index, parent) in [(1, "pg_missing".to_owned()), (3, ids[2].clone()), (4, ids[5].clone()), (5, ids[4].clone()), (6, ids[6].clone()), (7, ids[4].clone())] {
+            let mut page = ws.get_by_id(&ids[index]).unwrap().unwrap();
+            page.parent_id = Some(parent);
+            if index == 7 {
+                page.sort_key = -1;
+            }
+            save_page_to_root(&dir, page, None).unwrap();
+        }
+        ws.soft_delete(&ids[2]).unwrap();
+        let outlines = ws.tree_outline(None, 8).unwrap();
+        assert!(outlines.iter().any(|node| node.page.id == ids[1]));
+        assert!(outlines.iter().any(|node| node.page.id == ids[3]));
+        assert!(!outlines.iter().any(|node| node.page.id == ids[7]));
+        fn collect(nodes: &[TreeOutlineNode], found: &mut Vec<String>) {
+            for node in nodes {
+                found.push(node.page.id.clone());
+                collect(&node.children, found);
+            }
+        }
+        let mut found = Vec::new();
+        collect(&outlines, &mut found);
+        let expected: HashSet<String> = ids.iter().enumerate().filter(|(index, _)| *index != 2).map(|(_, id)| id.clone()).collect();
+        assert_eq!(found.iter().cloned().collect::<HashSet<_>>(), expected);
+        assert_eq!(found.len(), expected.len());
+        let cycle = ws.tree(Some(&ids[4])).unwrap();
+        let next_cycle = cycle[0].children.iter().find(|node| node.page.id == ids[5]).unwrap();
+        assert!(next_cycle.children.is_empty());
+        let self_cycle = ws.tree_outline(Some(&ids[6]), 8).unwrap();
+        assert_eq!(self_cycle[0].child_count, 1);
+        assert!(self_cycle[0].children_truncated);
+        assert!(self_cycle[0].children.is_empty());
+        assert_eq!(ws.get_by_id(&ids[1]).unwrap().unwrap().parent_id.as_deref(), Some("pg_missing"));
+        assert_eq!(ws.get_by_id(&ids[4]).unwrap().unwrap().parent_id.as_deref(), Some(ids[5].as_str()));
+        assert!(ws.tree(Some(&ids[2])).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn write_get_search_roundtrip() {
         let dir = env::temp_dir().join(format!("tie-api-{}", new_page_id()));
         let _ = fs::remove_dir_all(&dir);
@@ -1045,6 +1281,100 @@ mod tests {
         assert_eq!(revised.len(), 1);
         assert_eq!(revised[0].page.id, expected.id);
         assert!(ws.load_all(false).unwrap().iter().any(|page| page.id == adopted.id));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn scoped_search_page(ws: &LocalWorkspace, title: &str, body: &str, parent: Option<&str>) -> WritePageResult {
+        ws.write_page(WritePageInput {
+            title: Some(title.to_owned()),
+            markdown: Some(format!("# {title}\n\n{body}\n")),
+            parent_id: parent.map(|id| Some(id.to_owned())),
+            tags: Some(vec!["memory".into()]),
+            ..Default::default()
+        }).unwrap()
+    }
+
+    #[test]
+    fn scoped_search_prunes_branches_before_scoring_and_limiting() {
+        let dir = env::temp_dir().join(format!("tie-scoped-search-{}", new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_local_scoped").unwrap();
+        let engineering = scoped_search_page(&ws, "Engineering", "needle category", None);
+        let backend = scoped_search_page(&ws, "Backend", "needle category", Some(&engineering.page.id));
+        let rust = scoped_search_page(&ws, "Rust ownership", "needle reference", Some(&backend.page.id));
+        let frontend = scoped_search_page(&ws, "Frontend", "needle category", Some(&engineering.page.id));
+        let react = scoped_search_page(&ws, "React", "needle reference", Some(&frontend.page.id));
+        let cooking = scoped_search_page(&ws, "Cooking", "unrelated category", None);
+        let irrelevant = scoped_search_page(&ws, "needle", "needle needle needle", Some(&cooking.page.id));
+
+        let hits = ws.search_scoped("needle", Some("MEMORY"), 50, false, Some("engineering"), &[frontend.page.id.clone()]).unwrap();
+        let found: HashSet<_> = hits.iter().map(|hit| hit.page.id.as_str()).collect();
+        assert_eq!(found, HashSet::from([engineering.page.id.as_str(), backend.page.id.as_str(), rust.page.id.as_str()]));
+        let rust_hit = hits.iter().find(|hit| hit.page.id == rust.page.id).unwrap();
+        assert_eq!(rust_hit.breadcrumb.iter().map(|page| page.id.as_str()).collect::<Vec<_>>(), vec![engineering.page.id.as_str(), backend.page.id.as_str()]);
+        assert!(!found.contains(react.page.id.as_str()));
+        assert!(!found.contains(irrelevant.page.id.as_str()));
+
+        let limited = ws.search_scoped("needle", None, 1, false, Some(&rust.page.id), &[]).unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].page.id, rust.page.id);
+        assert_eq!(ws.search("needle", None, 1, false).unwrap()[0].page.id, irrelevant.page.id);
+        assert!(ws.search_scoped("needle", None, 10, false, Some(&engineering.page.id), &[engineering.page.id.clone()]).unwrap().is_empty());
+        let recent = ws.search_scoped("", None, 50, false, Some(&backend.page.id), &[]).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert!(recent.iter().all(|hit| hit.score == 0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scoped_search_requires_unique_existing_categories() {
+        let dir = env::temp_dir().join(format!("tie-scope-resolution-{}", new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_local_resolution").unwrap();
+        let left = scoped_search_page(&ws, "Left", "category", None);
+        let right = scoped_search_page(&ws, "Right", "category", None);
+        let first = scoped_search_page(&ws, "Shared", "needle first", Some(&left.page.id));
+        let second = scoped_search_page(&ws, "Shared", "needle second", Some(&right.page.id));
+        assert!(ws.search_scoped("needle", None, 20, false, Some("shared"), &[]).unwrap_err().contains("不唯一"));
+        assert!(ws.search_scoped("needle", None, 20, false, None, &["Shared".into()]).unwrap_err().contains("不唯一"));
+        assert!(ws.search_scoped("needle", None, 20, false, Some("missing"), &[]).unwrap_err().contains("不存在"));
+        assert!(ws.search_scoped("needle", None, 20, false, None, &["pg_missing".into()]).unwrap_err().contains("不存在"));
+        assert!(ws.search_scoped("needle", None, 20, false, Some(" "), &[]).unwrap_err().contains("不能为空"));
+        let exact = ws.search_scoped("needle", None, 20, false, Some(&second.page.id), &[]).unwrap();
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].page.id, second.page.id);
+        let global = ws.search("needle", None, 20, false).unwrap();
+        assert_eq!(global.len(), 2);
+        assert!(global.iter().any(|hit| hit.page.id == first.page.id));
+        assert!(global.iter().any(|hit| hit.page.id == second.page.id));
+        assert!(ws.search("not-present", None, 20, false).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scoped_search_handles_cycles_and_deleted_categories() {
+        let dir = env::temp_dir().join(format!("tie-scope-cycle-{}", new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_local_cycle").unwrap();
+        let a = scoped_search_page(&ws, "A", "needle", None);
+        let b = scoped_search_page(&ws, "B", "needle", Some(&a.page.id));
+        let c = scoped_search_page(&ws, "C", "needle", Some(&b.page.id));
+        ws.write_page(WritePageInput {
+            page_id: Some(a.page.id.clone()),
+            parent_id: Some(Some(c.page.id.clone())),
+            ..Default::default()
+        }).unwrap();
+        let hits = ws.search_scoped("needle", None, 20, false, Some(&a.page.id), &[]).unwrap();
+        assert_eq!(hits.len(), 3);
+        for hit in &hits {
+            assert_eq!(hit.breadcrumb.len(), 2);
+            let ids: HashSet<_> = hit.breadcrumb.iter().map(|page| page.id.as_str()).collect();
+            assert_eq!(ids.len(), 2);
+            assert!(!ids.contains(hit.page.id.as_str()));
+        }
+        assert!(ws.search_scoped("needle", None, 20, false, Some(&a.page.id), &[b.page.id.clone()]).unwrap().is_empty());
+
+        let deleted = scoped_search_page(&ws, "Deleted category", "needle", None);
+        ws.soft_delete(&deleted.page.id).unwrap();
+        assert!(ws.search_scoped("needle", None, 20, false, Some(&deleted.page.id), &[]).is_err());
+        assert_eq!(ws.search_scoped("needle", None, 20, true, Some(&deleted.page.id), &[]).unwrap().len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

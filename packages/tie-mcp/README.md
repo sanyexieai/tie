@@ -16,7 +16,8 @@ Agent 怎么接：
 |------|------|
 | `tie_doctor` | 诊断 CLI / 工作区 / `format check`；升级时先调 |
 | `tie_connection` | 查看 HTTP 故障状态；仅在用户明确同意后确认当前故障期的本地降级 |
-| `tie_search` | 关键词 / 标签搜索 |
+| `tie_tree` | 按层查看知识分类树，支持 `root` / `depth`，返回子节点数量与截断标记 |
+| `tie_search` | 关键词 / 标签搜索，支持限定分类分支 `root` 与排除分支 `exclude` |
 | `tie_get` | 按 id 或精确标题读取全文 |
 | `tie_write` | 安全写入（自动 frontmatter；更新前写入 `.tie/history`） |
 | `tie_related` | 出链 / 入链 / 子页 / 同标签 |
@@ -36,6 +37,22 @@ Skill `tie-mcp-connect`：说明登录会话与 MCP token 两种授权、HTTP �
 本机 `tie_write`、`tie_import`、`tie_file_ingest` 成功后调用与 `tie sync` 相同的同步核心，尽力对齐一次。结果中的 `sync.state` 为 `synced`、`pending` 或 `skipped`，分别表示本轮成功、仍待同步、未绑定服务器。保存成功不等于同步完成；失败时保留本地数据。后台 HTTP 的 CLI 子进程不反向同步。
 
 宿主文件登记、打开提示及导入导出在本机执行，不把本机路径发送给后台。绑定服务器后，这些操作也先检查服务器；HTTP 异常时同样需要用户确认，不能直接绕过确认在本地执行。
+
+## 按树快速检索
+
+先用 `tie_tree({depth: 1})` 查看顶层分类，再用 `tie_tree({root: "pg_project", depth: 2})` 逐级展开相关分支。节点只含摘要，不含正文；`depth` 是返回层数，取值 `1..8`，默认 `2`，指定的 `root` 计为第一层。`childCount` 表示直接子节点数，`childrenTruncated` 区分被截断的分支与真正叶子。
+
+选好分类后再搜索，例如：
+
+```json
+{"query":"部署","root":"pg_project","exclude":["pg_archive"],"limit":8}
+```
+
+`root` 包含该节点及全部后代；`exclude` 排除给定节点及其全部后代，排除优先。节点选择可传 ID 或唯一标题，重名时必须使用 ID。检索先按树过滤，再评分和取 `limit`，避免无关分支占用结果名额。命中项的 `breadcrumb` 只返回从顶层到父节点的 `id` / `title`，便于确认知识归属，再按需 `tie_get` 读取正文。
+
+范围内结果不足时再扩大到父分类或其他相关分支，不把局部无结果当作全库无结果，也不反复向 Agent 输出完整知识树。
+
+新知识尽量复用已有分类，逐级选定最细且稳定的父节点，并在 `tie_write` 中优先传 `parentId`。分类不是必填项，没有合适分类仍可直接保存；不要自动重排旧树，也不要为每条知识强建多层分类。只有用户明确需要时才创建分类页。
 
 ## 正文链接协议
 
