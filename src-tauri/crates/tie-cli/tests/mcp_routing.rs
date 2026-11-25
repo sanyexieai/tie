@@ -560,3 +560,158 @@ fn backend_http_child_never_starts_reverse_http_or_sync() {
         .is_some());
     assert!(server.received.lock().unwrap().is_empty());
 }
+
+#[test]
+fn startup_and_failed_http_requests_do_not_adopt_unregistered_markdown() {
+    let directory = TestDirectory::new();
+    let workspace = directory.workspace();
+    let plain = workspace.root().join("pages/plain.md");
+    let original = "# Await confirmation\n\nMust stay unregistered\n";
+    fs::write(&plain, original).unwrap();
+    let server = HttpServer::start(false);
+    bind(&workspace, &server);
+    let meta = workspace.root().join(".tie/meta");
+    assert!(!meta.exists());
+    let mut agent = Agent::start(
+        &directory,
+        Some(workspace.root()),
+        &[("TIE_MCP_TOKEN", "test-user-token")],
+    );
+    agent.request("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}));
+    assert!(
+        !meta.exists(),
+        "initialization must not adopt local Markdown"
+    );
+    agent.request("tools/list", json!({}));
+    assert!(
+        !meta.exists(),
+        "tool discovery must not adopt local Markdown"
+    );
+
+    let blocked = agent.call("tie_get", json!({"id_or_title": "Await confirmation"}));
+    assert_eq!(blocked["result"]["isError"], true);
+    let blocked_value = tool_value(&blocked);
+    assert_eq!(blocked_value["code"], "HTTP_FALLBACK_CONFIRMATION_REQUIRED");
+    assert!(!meta.exists(), "blocked read must not adopt local Markdown");
+    let write = agent.call(
+        "tie_write",
+        json!({"title": "Blocked", "markdown": "must not save"}),
+    );
+    assert_eq!(write["result"]["isError"], true);
+    assert!(
+        !meta.exists(),
+        "blocked write must not adopt local Markdown"
+    );
+    assert_eq!(fs::read_to_string(&plain).unwrap(), original);
+    assert_eq!(fs::read_dir(workspace.pages_dir()).unwrap().count(), 1);
+
+    let confirmed = agent.call("tie_connection", json!({"action": "confirm_local", "confirmationId": blocked_value["confirmationId"], "confirmed": true}));
+    assert_eq!(confirmed["result"]["isError"], false);
+    let read = agent.call("tie_get", json!({"id_or_title": "Await confirmation"}));
+    assert_eq!(read["result"]["isError"], false);
+    assert_eq!(tool_value(&read)["markdown"], original);
+    assert_eq!(fs::read_dir(meta).unwrap().count(), 1);
+    assert_eq!(fs::read_to_string(&plain).unwrap(), original);
+}
+
+#[test]
+fn outage_gates_host_file_tools_without_forwarding_paths_to_http() {
+    let directory = TestDirectory::new();
+    let workspace = directory.workspace();
+    let original = workspace
+        .write_page(WritePageInput {
+            title: Some("Original page".into()),
+            markdown: Some("local content".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let source = LocalWorkspace::init(directory.0.join("import-source"), "src_import").unwrap();
+    let imported_page = source
+        .write_page(WritePageInput {
+            title: Some("Imported page".into()),
+            markdown: Some("import content".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let bundle = directory.0.join("import-bundle");
+    source
+        .export_closure(
+            &imported_page.page.id,
+            &tie_local::ExportOptions {
+                out: Some(bundle.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let attachment = directory.0.join("private-attachment.txt");
+    fs::write(&attachment, "private file bytes").unwrap();
+    let exported = directory.0.join("blocked-export");
+    let server = HttpServer::start(false);
+    bind(&workspace, &server);
+    let mut agent = Agent::start(
+        &directory,
+        Some(workspace.root()),
+        &[("TIE_MCP_TOKEN", "test-user-token")],
+    );
+    let calls = [
+        ("tie_import", json!({"path": bundle})),
+        (
+            "tie_file_ingest",
+            json!({"path": attachment, "mode": "copy"}),
+        ),
+        (
+            "tie_export",
+            json!({"page": original.page.id, "out": exported}),
+        ),
+    ];
+    let mut confirmation = Value::Null;
+    for (name, args) in &calls {
+        let blocked = agent.call(name, args.clone());
+        assert_eq!(blocked["result"]["isError"], true, "{name}: {blocked}");
+        let value = tool_value(&blocked);
+        assert_eq!(value["code"], "HTTP_FALLBACK_CONFIRMATION_REQUIRED");
+        if confirmation.is_null() {
+            confirmation = value["confirmationId"].clone();
+        } else {
+            assert_eq!(value["confirmationId"], confirmation);
+        }
+    }
+    assert_eq!(
+        fs::read_dir(workspace.root().join(".tie/meta"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert_eq!(fs::read_dir(workspace.pages_dir()).unwrap().count(), 1);
+    assert!(!workspace.root().join(".tie/files").exists());
+    assert!(!exported.exists());
+    assert_eq!(
+        fs::read_to_string(&attachment).unwrap(),
+        "private file bytes"
+    );
+
+    let confirmed = agent.call(
+        "tie_connection",
+        json!({"action": "confirm_local", "confirmationId": confirmation, "confirmed": true}),
+    );
+    assert_eq!(confirmed["result"]["isError"], false);
+    for (name, args) in &calls {
+        let response = agent.call(name, args.clone());
+        assert_eq!(response["result"]["isError"], false, "{name}: {response}");
+        if *name != "tie_export" {
+            assert_eq!(tool_value(&response)["sync"]["state"], "pending");
+        }
+    }
+    assert!(workspace
+        .get_by_id(&imported_page.page.id)
+        .unwrap()
+        .is_some());
+    assert_eq!(workspace.files().list(None, None, 10).unwrap().len(), 1);
+    assert!(exported.is_dir());
+    assert!(server
+        .received
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.start.starts_with("GET /health ")));
+}

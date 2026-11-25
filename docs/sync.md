@@ -75,7 +75,7 @@
 ## 与 MCP / Agent
 
 - MCP / `tie` CLI 读写的是某一份工作区树。写入等价于一次保存。
-- 文件登记、打开提示、目录导入/导出在本机 CLI 执行；后台 HTTP 不提供宿主文件访问。已绑定后台的本机 MCP 也会将这些操作留在本机。
+- 文件登记、打开提示、目录导入/导出在本机 CLI 执行；后台 HTTP 不提供宿主文件访问，也不接收这些操作的本机路径。绑定服务器后，这些本机操作同样先检查服务器；HTTP 异常时仍须用户确认后才可执行，不能借本机文件能力绕过降级确认。
 - 本机 `tie_write`、`tie_import`、`tie_file_ingest` 成功后尽力同步一次，结果附带 `sync.state`：`synced` 为本轮成功，`pending` 为本地已保存但同步未完成，`skipped` 为未绑定服务器。写入落盘成功与同步完成是两件事；同步失败时保留本地结果，不报告为已同步。后台 HTTP 的 CLI 子进程不反向启动同步。
 - 已绑定服务器的本机 `tie mcp` 先检查 `/health`，后台正常时经 HTTP 处理页面数据请求。HTTP 异常时返回故障，**不得自动降级到本地**。
 - 降级流程：`tie_connection` 的 `action: "status"` 返回故障和 `confirmationId`；Agent 向用户说明故障及将使用本地副本，取得明确同意后，才可调用 `action: "confirm_local"` 并传入该 `confirmationId`、`confirmed: true`。许可仅适用于当前故障期；HTTP 成功后立即撤销。未绑定服务器的纯本地工作区无需此确认。

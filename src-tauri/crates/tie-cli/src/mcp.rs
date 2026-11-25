@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use tie_local::{
@@ -21,6 +21,8 @@ pub fn serve(root: Option<&Path>, source_id: Option<&str>) -> Result<(), String>
 }
 
 struct McpRuntime {
+    root: Option<PathBuf>,
+    source_id: Option<String>,
     workspace: Option<LocalWorkspace>,
     http: Result<Option<crate::mcp_http::HttpTransport>, String>,
     server: bool,
@@ -31,19 +33,30 @@ struct McpRuntime {
 
 impl McpRuntime {
     fn new(root: Option<&Path>, source_id: Option<&str>) -> Result<Self, String> {
-        let workspace = root
-            .map(|root| LocalWorkspace::open_entry(root, source_id))
-            .transpose()?;
+        let (root, source_id) = if let Some(entry) = root {
+            let (root, solution) = tie_local::resolve_workspace_entry(entry)?;
+            let source_id = source_id
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    solution
+                        .map(|solution| solution.source_id)
+                        .filter(|id| !id.trim().is_empty())
+                });
+            (Some(root), source_id)
+        } else {
+            (None, source_id.map(str::to_owned))
+        };
         let server = std::env::var("TIE_MCP_VIA").ok().as_deref() == Some("http");
         let http = if server {
             Ok(None)
         } else {
-            crate::mcp_http::HttpTransport::from_workspace(
-                workspace.as_ref().map(LocalWorkspace::root),
-            )
+            crate::mcp_http::HttpTransport::from_workspace(root.as_deref())
         };
         Ok(Self {
-            workspace,
+            root,
+            source_id,
+            workspace: None,
             http,
             server,
             fallback_confirmed: false,
@@ -83,7 +96,7 @@ impl McpRuntime {
             let mut tools = tool_defs();
             if self.server {
                 tools.retain(|tool| tool["name"] != "tie_connection");
-            } else if self.workspace.is_none() {
+            } else if self.root.is_none() {
                 tools.retain(|tool| !host_file_tool(tool["name"].as_str().unwrap_or("")));
             }
             return Some(json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tools } }));
@@ -94,26 +107,34 @@ impl McpRuntime {
                 json!({ "jsonrpc": "2.0", "id": id, "result": match result { Ok(value) => tool_ok(value), Err(error) => tool_err(error) } }),
             );
         }
-        if !local_only_request(message) {
-            match self.remote(message) {
-                Ok(Some(response)) => return Some(response),
-                Ok(None) => {}
-                Err(reason) if !self.fallback_confirmed => {
-                    let details = self.fallback_error(&reason);
-                    return Some(if method == "tools/call" {
-                        json!({ "jsonrpc": "2.0", "id": id, "result": tool_ok_error(details) })
-                    } else {
-                        json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32001, "message": "HTTP MCP 不可用，未自动降级", "data": details } })
-                    });
+        let host_file = local_only_request(message);
+        let probe = json!({ "jsonrpc": "2.0", "id": "tie-host-file-probe", "method": "ping" });
+        match self.remote(if host_file { &probe } else { message }) {
+            Ok(Some(response)) if !host_file => return Some(response),
+            Ok(_) => {}
+            Err(reason) if !self.fallback_confirmed => {
+                let details = self.fallback_error(&reason);
+                return Some(if method == "tools/call" {
+                    json!({ "jsonrpc": "2.0", "id": id, "result": tool_ok_error(details) })
+                } else {
+                    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32001, "message": "HTTP MCP 不可用，未自动降级", "data": details } })
+                });
+            }
+            Err(_) => {}
+        }
+        if self.workspace.is_none() {
+            let opened = match &self.root {
+                Some(root) => LocalWorkspace::open(root, self.source_id.as_deref()),
+                None => Err("未配置本地工作区或 HTTP 服务器。远程接入请提供 TIE_MCP_URL 和用户签发的 MCP token。".to_owned()),
+            };
+            match opened {
+                Ok(workspace) => self.workspace = Some(workspace),
+                Err(error) => {
+                    return Some(json!({ "jsonrpc": "2.0", "id": id, "result": tool_err(error) }))
                 }
-                Err(_) => {}
             }
         }
-        let Some(ws) = &self.workspace else {
-            return Some(
-                json!({ "jsonrpc": "2.0", "id": id, "result": tool_err("未配置本地工作区或 HTTP 服务器。远程接入请提供 TIE_MCP_URL 和用户签发的 MCP token。".into()) }),
-            );
-        };
+        let ws = self.workspace.as_ref().expect("local workspace opened");
         let mut response = dispatch_message(ws, message)?;
         if !self.server
             && local_write_request(message)
@@ -126,9 +147,7 @@ impl McpRuntime {
 
     fn remote(&mut self, message: &Value) -> Result<Option<Value>, String> {
         if !self.server {
-            let updated = crate::mcp_http::HttpTransport::from_workspace(
-                self.workspace.as_ref().map(LocalWorkspace::root),
-            );
+            let updated = crate::mcp_http::HttpTransport::from_workspace(self.root.as_deref());
             let endpoint = |http: &Result<Option<crate::mcp_http::HttpTransport>, String>| {
                 http.as_ref()
                     .ok()
@@ -169,15 +188,15 @@ impl McpRuntime {
 
     fn fallback_error(&self, reason: &str) -> Value {
         json!({
-            "code": if self.workspace.is_some() { "HTTP_FALLBACK_CONFIRMATION_REQUIRED" } else { "HTTP_CONNECTION_REQUIRED" },
+            "code": if self.root.is_some() { "HTTP_FALLBACK_CONFIRMATION_REQUIRED" } else { "HTTP_CONNECTION_REQUIRED" },
             "reason": reason,
             "transport": "http",
             "authorizationRequired": reason.starts_with("MCP_AUTH_"),
             "localFallbackAllowed": false,
-            "confirmationId": self.workspace.as_ref().and_then(|_| self.pending.as_ref().map(|(id, _)| id)),
+            "confirmationId": self.root.as_ref().and_then(|_| self.pending.as_ref().map(|(id, _)| id)),
             "next": if reason.starts_with("MCP_AUTH_") {
                 "请由用户主动提供此服务器的 MCP token（私有 TIE_MCP_TOKEN_FILE），或重新登录。没有本地工作区时无法降级；有本地工作区且用户明确同意降级后，才可调用 tie_connection(action=confirm_local, confirmationId=本次编号, confirmed=true)。禁止 Agent 自行确认。"
-            } else if self.workspace.is_some() {
+            } else if self.root.is_some() {
                 "尚未读写本地。请向用户说明 HTTP 失败原因与本地数据可能尚未同步，询问是否同意降级。用户明确同意后调用 tie_connection(action=confirm_local, confirmationId=本次编号, confirmed=true)，再重试原请求；禁止由 Agent 自行确认。"
             } else {
                 "没有本地工作区，无法降级。请恢复服务器连接；没有可用登录会话时，由用户主动提供 MCP token。"
@@ -192,7 +211,7 @@ impl McpRuntime {
                     .pending
                     .as_ref()
                     .ok_or("没有等待用户确认的 HTTP 故障")?;
-                if self.workspace.is_none() {
+                if self.root.is_none() {
                     return Err("没有本地工作区，无法降级".into());
                 }
                 if args.get("confirmed").and_then(Value::as_bool) != Some(true)
@@ -221,7 +240,7 @@ impl McpRuntime {
                         )
                     }
                     Ok(None) => Ok(
-                        json!({ "ok": self.workspace.is_some(), "transport": "local", "mode": "local_only", "workspaceConfigured": self.workspace.is_some() }),
+                        json!({ "ok": self.root.is_some(), "transport": "local", "mode": "local_only", "workspaceConfigured": self.root.is_some() }),
                     ),
                     Err(error) => {
                         let mut value = self.fallback_error(&error);
@@ -545,7 +564,7 @@ fn doctor(ws: &LocalWorkspace) -> Result<Value, String> {
         } else if std::env::var("TIE_MCP_VIA").ok().as_deref() == Some("http") {
             "这次请求由后台 HTTP MCP 处理"
         } else {
-            "本机 tie 在提供 MCP。后台 HTTP 可用时会先走后台，不通再用这个工作区"
+            "本机 tie 在提供 MCP。绑定服务器时优先 HTTP，异常需用户明确确认后才使用本地工作区"
         }
     }))
 }

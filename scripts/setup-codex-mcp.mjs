@@ -117,8 +117,11 @@ function resolveBundledTieCli() {
 function normalizeMcpUrl(raw) {
   const url = String(raw || '').trim()
   if (!url) return ''
-  if (!/^https?:\/\//.test(url)) throw new Error(`MCP 地址需要以 http:// 或 https:// 开头：${url}`)
-  return url
+  let parsed
+  try { parsed = new URL(url) } catch { throw new Error('MCP 地址无效') }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('MCP 地址需要以 http:// 或 https:// 开头')
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error('MCP 地址不得包含凭据、查询参数或片段；令牌请使用私有文件')
+  return parsed.toString().replace(/\/$/, '')
 }
 
 function buildMcpBlock({ name, command, workspace, url, tokenFile }) {

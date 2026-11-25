@@ -35,6 +35,8 @@ Skill `tie-mcp-connect`：说明登录会话与 MCP token 两种授权、HTTP �
 
 本机 `tie_write`、`tie_import`、`tie_file_ingest` 成功后调用与 `tie sync` 相同的同步核心，尽力对齐一次。结果中的 `sync.state` 为 `synced`、`pending` 或 `skipped`，分别表示本轮成功、仍待同步、未绑定服务器。保存成功不等于同步完成；失败时保留本地数据。后台 HTTP 的 CLI 子进程不反向同步。
 
+宿主文件登记、打开提示及导入导出在本机执行，不把本机路径发送给后台。绑定服务器后，这些操作也先检查服务器；HTTP 异常时同样需要用户确认，不能直接绕过确认在本地执行。
+
 ## 正文链接协议
 
 | 用途 | 写法 | 桌面样式 |

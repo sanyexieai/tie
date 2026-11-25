@@ -36,6 +36,8 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 
 本机 `tie_write`、`tie_import`、`tie_file_ingest` 成功后会尽力同步一次。结果中的 `sync.state` 为 `synced`（本轮成功）、`pending`（本地已保存但仍待同步）或 `skipped`（未绑定服务器）；向用户说明时区分落盘成功和同步完成。后台 HTTP 写入不反向启动同步。本机文件登记、打开提示及导入导出只由本机 CLI 提供，原生 HTTP Agent 不提供宿主文件访问。
 
+有服务器绑定时，宿主文件操作也先检查服务器；HTTP 故障未经用户确认不得执行。它们仍在本机处理，不将本机路径发送给后台，不能利用这些工具绕过降级确认。
+
 ## 正文链接协议（必须遵守）
 
 桌面端按协议区分样式并打开；**写正文时选用正确协议**，不要混用。
