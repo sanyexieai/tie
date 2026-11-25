@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import JSZip from 'jszip'
 
 test.beforeEach(async ({ page }) => {
   await page.route('**/health', (route) => route.fulfill({
@@ -44,6 +45,45 @@ test('exports the current page solution in browser mode', async ({ page }) => {
   for await (const chunk of stream) text += chunk.toString()
   expect(text).toContain('kind: solution')
   expect(text).toContain('root_page:')
+})
+
+test('keeps bundle actions in collapsible settings and exports a real browser workspace archive', async ({ page }) => {
+  await waitForWorkspace(page)
+  const sidebar = page.locator('.sidebar')
+  await expect(sidebar.getByRole('button', { name: /^(打开 \.tie|导入 \.tiez|导出 \.tiez)$/ })).toHaveCount(0)
+  await sidebar.locator('.sidebar-storage-trigger').click()
+  const settings = page.getByRole('dialog', { name: '设置', exact: true })
+  await expect(settings).toBeVisible()
+  await expect(settings.getByRole('button', { name: '+ 添加工作区', exact: true })).toHaveCount(0)
+  const toggle = settings.getByRole('button', { name: '导入与导出', exact: true })
+  const panel = settings.locator('#storage-import-export-menu')
+  await expect(toggle).toHaveAttribute('aria-controls', 'storage-import-export-menu')
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(panel).toBeHidden()
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(panel).toBeVisible()
+  await expect(panel).toHaveAttribute('aria-label', '导入与导出')
+  await expect(panel.getByRole('button', { name: /^导入压缩包 \(\.tiez\)/ })).toBeVisible()
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(panel).toBeHidden()
+  await toggle.click()
+
+  const downloadPromise = page.waitForEvent('download')
+  await panel.getByRole('button', { name: /^导出压缩包 \(\.tiez\)/ }).click()
+  const download = await downloadPromise
+  expect(download.suggestedFilename()).toMatch(/\.tiez$/i)
+  const chunks: Buffer[] = []
+  for await (const chunk of await download.createReadStream()) chunks.push(Buffer.from(chunk))
+  const archive = await JSZip.loadAsync(Buffer.concat(chunks))
+  const files = Object.values(archive.files).filter((entry) => !entry.dir)
+  const markdownFiles = files.filter((entry) => /\.md$/i.test(entry.name))
+  expect(markdownFiles).toHaveLength(1)
+  expect(files.length).toBeGreaterThan(markdownFiles.length)
+  const markdown = await markdownFiles[0]!.async('string')
+  expect(markdown).toContain('# 欢迎使用 Tie')
+  expect(markdown).toContain('Tie 把 **Notion')
 })
 
 test('renders Mermaid, recovers from invalid syntax, and preserves markdown', async ({ page }) => {

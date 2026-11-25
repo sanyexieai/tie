@@ -75,6 +75,7 @@ function onThemeModeChange(mode: ThemeMode) {
   setThemeMode(mode)
 }
 const storageMenuOpen = ref(false)
+const importExportMenuOpen = ref(false)
 const choosingWorkspace = ref(false)
 const importingMarkdown = ref(false)
 const openingFromFiles = ref(false)
@@ -555,12 +556,12 @@ async function chooseWorkspace(kind: 'local' | 'smb') {
 
 async function importMarkdown() {
   importingMarkdown.value = true
-  try { await store.importMarkdownFiles(); storageMenuOpen.value = false } finally { importingMarkdown.value = false }
+  try { await store.importMarkdownFiles(); importExportMenuOpen.value = false } finally { importingMarkdown.value = false }
 }
 
 async function openFromFiles() {
   openingFromFiles.value = true
-  try { await store.openFromFiles(); storageMenuOpen.value = false } finally { openingFromFiles.value = false }
+  try { await store.openFromFiles(); importExportMenuOpen.value = false } finally { openingFromFiles.value = false }
 }
 
 async function openTieSolution() {
@@ -568,7 +569,7 @@ async function openTieSolution() {
   bundleNotice.value = ''
   try {
     if (await store.openTieEntry()) {
-      storageMenuOpen.value = false
+      importExportMenuOpen.value = false
       bundleNotice.value = '已打开 .tie 解决方案'
     }
   } catch (error) {
@@ -583,7 +584,7 @@ async function importTiezBundle() {
   bundleNotice.value = ''
   try {
     if (await store.importTiez()) {
-      storageMenuOpen.value = false
+      importExportMenuOpen.value = false
       bundleNotice.value = '已导入 .tiez 压缩包'
     }
   } catch (error) {
@@ -612,7 +613,7 @@ async function importBrowserTiez() {
   bundleNotice.value = ''
   try {
     if (await store.importTiezBrowser()) {
-      storageMenuOpen.value = false
+      importExportMenuOpen.value = false
       bundleNotice.value = '已导入 .tiez'
     }
   } catch (error) {
@@ -1089,7 +1090,22 @@ function restoreDefaultUpdateEndpoints() {
           @click="toggleCodexForm"
         >Agent 知识库</button>
         <button v-if="store.syncConflictsCount > 0" class="storage-conflict-notice" type="button" disabled>{{ store.syncConflictsCount }} 个同步冲突 · 见下方列表</button>
-        <button :class="{ active: storageMenuOpen }" @click="storageMenuOpen = !storageMenuOpen">+ 添加工作区</button>
+        <button
+          v-if="supportsLocalFileStorage || supportsSmbStorage"
+          type="button"
+          :class="{ active: storageMenuOpen }"
+          :aria-expanded="storageMenuOpen"
+          aria-controls="storage-add-workspace-menu"
+          @click="storageMenuOpen = !storageMenuOpen; importExportMenuOpen = false"
+        >+ 添加工作区</button>
+        <button
+          v-if="!supportsLocalFileStorage || !usesMobileUi"
+          type="button"
+          :class="{ active: importExportMenuOpen }"
+          :aria-expanded="importExportMenuOpen"
+          aria-controls="storage-import-export-menu"
+          @click="importExportMenuOpen = !importExportMenuOpen; storageMenuOpen = false"
+        >导入与导出</button>
       </div>
       <div v-if="store.syncConflictPages.length" class="storage-conflict-list">
         <strong>同步冲突</strong>
@@ -1106,9 +1122,11 @@ function restoreDefaultUpdateEndpoints() {
         </button>
       </div>
 
-      <div v-if="storageMenuOpen" class="storage-menu storage-settings-menu">
+      <div v-if="storageMenuOpen" id="storage-add-workspace-menu" class="storage-menu storage-settings-menu">
         <button v-if="supportsLocalFileStorage" :disabled="choosingWorkspace" @click="chooseWorkspace('local')"><strong>本地文件夹</strong><small>{{ usesMobileUi ? '选择手机上的文件夹或应用内知识库' : '再添加一个工作区' }}</small></button>
         <button v-if="supportsSmbStorage" :disabled="choosingWorkspace" @click="chooseWorkspace('smb')"><strong>SMB 挂载目录</strong><small>把已挂载的共享目录当作一个工作区</small></button>
+      </div>
+      <div v-if="importExportMenuOpen" id="storage-import-export-menu" class="storage-menu storage-settings-menu" role="group" aria-label="导入与导出">
         <button v-if="!supportsLocalFileStorage" :disabled="importingTiez" @click="importBrowserTiez"><strong>{{ importingTiez ? '正在导入…' : '导入压缩包 (.tiez)' }}</strong><small>浏览器演示工作区</small></button>
         <button v-if="!supportsLocalFileStorage" :disabled="packingTiez" @click="exportBrowserTiez"><strong>{{ packingTiez ? '正在导出…' : '导出压缩包 (.tiez)' }}</strong><small>下载当前演示工作区</small></button>
         <button v-if="supportsLocalFileStorage && !usesMobileUi" :disabled="openingFromFiles" @click="openFromFiles"><strong>{{ openingFromFiles ? '正在打开…' : '从文件打开' }}</strong><small>打开 .tie / .tiez / Markdown</small></button>

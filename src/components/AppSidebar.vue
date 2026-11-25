@@ -10,8 +10,6 @@ const store = useWorkspaceStore()
 const backend = useBackendStore()
 const topLevelDragOver = ref(false)
 const deleteError = ref('')
-const bundleBusy = ref(false)
-const isDesktop = '__TAURI_INTERNALS__' in window
 const emit = defineEmits<{ close: []; 'open-storage-settings': [] }>()
 const sourcesById = computed(() => Object.fromEntries(store.allSources.map((source) => [source.id, source])))
 const activePageCount = computed(() => store.pages.filter((page) => !page.deletedAt).length)
@@ -86,25 +84,6 @@ async function renameWorkspace() {
   if (name === null || name.trim() === store.workspace?.name) return
   await store.renameWorkspace(name)
 }
-
-async function openTie() {
-  bundleBusy.value = true
-  try { await store.openTieEntry() } finally { bundleBusy.value = false }
-}
-async function importTiez() {
-  bundleBusy.value = true
-  try {
-    if (isDesktop) await store.importTiez()
-    else await store.importTiezBrowser()
-  } finally { bundleBusy.value = false }
-}
-async function exportTiez() {
-  bundleBusy.value = true
-  try {
-    if (isDesktop) await store.packCurrentSourceTiez()
-    else await store.exportTiezBrowser()
-  } finally { bundleBusy.value = false }
-}
 </script>
 
 <template>
@@ -131,12 +110,6 @@ async function exportTiez() {
       <button type="button" @click="store.openTrash()">查看</button>
       <button type="button" class="ghost" @click="store.dismissTrashNotice()">×</button>
     </p>
-    <div class="sidebar-bundle-actions">
-      <button v-if="isDesktop" type="button" :disabled="bundleBusy" @click="openTie">打开 .tie</button>
-      <button type="button" :disabled="bundleBusy" @click="importTiez">导入 .tiez</button>
-      <button type="button" :disabled="bundleBusy" @click="exportTiez">导出 .tiez</button>
-    </div>
-
     <div class="sidebar-section-title">
       <span>我的页面</span>
       <small class="sidebar-page-count">{{ activePageCount }} 页</small>
