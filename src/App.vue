@@ -356,17 +356,20 @@ onMounted(async () => {
 })
 
 watch(
-  () => store.initialized && backend.connected && !backend.loading
-    ? `${backend.profile.endpoint}:${backend.profile.user?.id}` : '',
-  (identity, _, onCleanup) => {
-    if (!identity || !backend.profile.accessToken) return
+  [
+    () => store.initialized && backend.connected && !backend.loading
+      ? `${backend.profile.endpoint}:${backend.profile.user?.id}` : '',
+    () => backend.profile.accessToken,
+  ],
+  ([identity, token], _, onCleanup) => {
+    if (!identity || !token) return
     onCleanup(startAutoSync(
       () => store.syncBackendNow(),
       (error) => { backend.error = error instanceof Error ? error.message : '自动同步失败，将自动重试' },
     ))
     onCleanup(startBackendLive({
       endpoint: backend.profile.endpoint,
-      token: backend.profile.accessToken,
+      token,
       onWorkspace: () => store.scheduleBackendSync(),
     }))
   },

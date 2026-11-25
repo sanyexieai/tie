@@ -75,9 +75,9 @@ jobs:
 
       - name: Test tie-local + build tie CLI
         run: |
-          cargo test -p tie-local --manifest-path src-tauri/Cargo.toml
-          cargo build -p tie-cli --manifest-path src-tauri/Cargo.toml
-          test -x src-tauri/target/debug/tie
+          cargo test -p tie-local -p tie-cli --manifest-path src-tauri/Cargo.toml
+          npm run tie:prepare
+          test -x src-tauri/target/release/tie-cli
 
       - name: Check Tauri backend
         run: cargo check --manifest-path src-tauri/Cargo.toml

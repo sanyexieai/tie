@@ -1,7 +1,7 @@
 //! Logged-in backend user. The token stays in the app data directory, never in a workspace.
 
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{fs, io::Write, path::PathBuf};
 
 const FILE_NAME: &str = "backend-session.json";
 
@@ -59,7 +59,21 @@ pub fn app_data_dir() -> Result<PathBuf, String> {
 pub fn write_session_at(dir: &std::path::Path, session: &BackendSession) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     let body = serde_json::to_string_pretty(session).map_err(|error| error.to_string())?;
-    fs::write(dir.join(FILE_NAME), format!("{body}\n")).map_err(|error| error.to_string())
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(dir.join(FILE_NAME)).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())?;
+    }
+    file.set_len(0).map_err(|error| error.to_string())?;
+    file.write_all(format!("{body}\n").as_bytes()).map_err(|error| error.to_string())
 }
 
 pub fn read_session_at(dir: &std::path::Path) -> Result<Option<BackendSession>, String> {
@@ -90,4 +104,35 @@ pub fn read_session() -> Result<Option<BackendSession>, String> {
 
 pub fn clear_session() -> Result<(), String> {
     clear_session_at(&app_data_dir()?)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn session_is_private_on_create_and_rewrite() {
+        let dir = std::env::temp_dir().join(format!("tie-session-permissions-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let session = BackendSession {
+            endpoint: "https://backend.example".into(),
+            access_token: "test-access".into(),
+            refresh_token: "test-refresh".into(),
+            access_expires_at: String::new(),
+            user_id: "user-test".into(),
+            email: "test@example.com".into(),
+            name: "Test".into(),
+        };
+        write_session_at(&dir, &session).unwrap();
+        let path = dir.join(FILE_NAME);
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut updated = session.clone();
+        updated.access_token = "new".into();
+        write_session_at(&dir, &updated).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(read_session_at(&dir).unwrap().unwrap().access_token, updated.access_token);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

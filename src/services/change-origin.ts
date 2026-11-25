@@ -25,7 +25,7 @@ export async function resolveClientLabel() {
   if (!isTauriDesktop()) return kind
   try {
     const { hostname } = await import('@tauri-apps/plugin-os')
-    const host = (await hostname()).trim()
+    const host = (await hostname())?.trim()
     if (host) return `${host} · ${kind}`
   } catch {
     // 拿不到主机名时只保留客户端种类

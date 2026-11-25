@@ -48,6 +48,7 @@ pub fn serve(ws: &LocalWorkspace) -> Result<(), String> {
 enum ForwardFail {
     Down,
     Auth,
+    Target,
 }
 
 enum HttpAttempt {
@@ -63,22 +64,27 @@ fn try_http(ws: &LocalWorkspace, message: &Value) -> HttpAttempt {
     let Ok(session) = tie_cli::backend_sync::ensure_session(false) else {
         return HttpAttempt::Skip;
     };
-    match post_mcp(&target.url, &session.access_token, &target.workspace_id, message) {
+    match post_mcp(&target.url, &session.endpoint, &session.access_token, &target.workspace_id, message) {
         Ok(value) => HttpAttempt::Hit(value),
         Err(ForwardFail::Auth) => {
             let Ok(session) = tie_cli::backend_sync::ensure_session(true) else {
                 return HttpAttempt::Miss;
             };
-            match post_mcp(&target.url, &session.access_token, &target.workspace_id, message) {
+            match post_mcp(&target.url, &session.endpoint, &session.access_token, &target.workspace_id, message) {
                 Ok(value) => HttpAttempt::Hit(value),
+                Err(ForwardFail::Target) => HttpAttempt::Skip,
                 Err(_) => HttpAttempt::Miss,
             }
         }
         Err(ForwardFail::Down) => HttpAttempt::Miss,
+        Err(ForwardFail::Target) => HttpAttempt::Skip,
     }
 }
 
-fn post_mcp(url: &str, token: &str, workspace_id: &str, message: &Value) -> Result<Value, ForwardFail> {
+fn post_mcp(url: &str, session_endpoint: &str, token: &str, workspace_id: &str, message: &Value) -> Result<Value, ForwardFail> {
+    if !tie_cli::backend_sync::same_backend_endpoint(url, session_endpoint) {
+        return Err(ForwardFail::Target);
+    }
     let endpoint = format!("{}/mcp", url.trim_end_matches('/'));
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
@@ -608,12 +614,26 @@ mod tests {
     fn closed_http_port_is_unavailable() {
         let error = post_mcp(
             "http://127.0.0.1:1",
+            "http://127.0.0.1:1",
             "token",
             "ws_test",
             &json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
         )
         .expect_err("closed");
         assert!(matches!(error, ForwardFail::Down));
+    }
+
+    #[test]
+    fn different_backend_is_rejected_before_http() {
+        let error = post_mcp(
+            "http://127.0.0.1:1",
+            "https://backend.example",
+            "unused",
+            "ws_test",
+            &json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
+        )
+        .expect_err("different server");
+        assert!(matches!(error, ForwardFail::Target));
     }
 
     #[test]

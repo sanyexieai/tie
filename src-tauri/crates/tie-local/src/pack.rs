@@ -6,7 +6,7 @@
 use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -171,10 +171,16 @@ pub fn unpack_tiez(archive: &Path, out: &Path) -> Result<UnpackReport, String> {
             .by_index(i)
             .map_err(|e| format!("读取归档条目失败：{e}"))?;
         let name = entry.name().replace('\\', "/");
-        if name.contains("..") {
+        let relative = Path::new(&name);
+        if name.is_empty()
+            || name.contains(':')
+            || relative.components().any(|part| {
+                matches!(part, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+            })
+        {
             return Err(format!("归档含非法路径：{name}"));
         }
-        let dest = out.join(Path::new(&name));
+        let dest = out.join(relative);
         if name.ends_with('/') {
             fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
             continue;
@@ -215,6 +221,35 @@ mod tests {
     use crate::api::{LocalWorkspace, WritePageInput};
     use crate::solution::{write_solution, TieSolution};
     use std::env;
+
+    #[test]
+    fn unpack_rejects_paths_outside_output() {
+        let dir = env::temp_dir().join(format!("tie-unpack-paths-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let outside = dir.join("outside.md");
+        fs::write(&outside, "keep").unwrap();
+        let names = [
+            "../outside.md".to_owned(),
+            "pages/../outside.md".to_owned(),
+            outside.display().to_string(),
+            "C:\\outside.md".to_owned(),
+            "\\\\server\\share\\outside.md".to_owned(),
+        ];
+        for (index, name) in names.iter().enumerate() {
+            let archive = dir.join(format!("invalid-{index}.tiez"));
+            let mut zip = ZipWriter::new(File::create(&archive).unwrap());
+            zip.start_file(name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(b"replace").unwrap();
+            zip.finish().unwrap();
+            let out = dir.join(format!("out-{index}"));
+            let error = unpack_tiez(&archive, &out).unwrap_err();
+            assert!(error.contains("归档含非法路径"), "{name}: {error}");
+            assert_eq!(fs::read_to_string(&outside).unwrap(), "keep");
+            assert!(fs::read_dir(&out).unwrap().next().is_none());
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn pack_unpack_roundtrip() {

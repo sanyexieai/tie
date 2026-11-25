@@ -1,6 +1,9 @@
 import { expect, test } from '@playwright/test'
 
 test.beforeEach(async ({ page }) => {
+  await page.route('**/health', (route) => route.fulfill({
+    json: { ok: true, service: 'tie-backend', mcp: { enabled: false, running: false, url: null } },
+  }))
   await page.addInitScript(() => {
     localStorage.clear()
   })
@@ -11,7 +14,7 @@ async function waitForWorkspace(page: import('@playwright/test').Page) {
   await expect(page.locator('.editor-pane')).toBeVisible({ timeout: 15_000 })
   await expect(page.locator('.workspace-heading')).toContainText('我的知识库')
   // A fresh profile offers cloud sign-in before local demo interactions.
-  const onboarding = page.getByRole('dialog', { name: '连接云服务' })
+  const onboarding = page.getByRole('dialog', { name: '绑定服务器' })
   await expect(onboarding).toBeVisible()
   await onboarding.getByRole('button', { name: '关闭', exact: true }).click()
   await expect(onboarding).toBeHidden()
@@ -30,12 +33,17 @@ test('opens welcome page from sidebar', async ({ page }) => {
   await expect(page.getByRole('textbox', { name: '页面标题' })).toHaveValue('欢迎使用 Tie')
 })
 
-test('exports markdown in browser mode', async ({ page }) => {
+test('exports the current page solution in browser mode', async ({ page }) => {
   await waitForWorkspace(page)
   const downloadPromise = page.waitForEvent('download')
-  await page.getByTitle('导出 Markdown').click()
+  await page.getByTitle('导出 .tie，以当前页面为根', { exact: true }).click()
   const download = await downloadPromise
-  expect(download.suggestedFilename()).toMatch(/欢迎使用 Tie\.md$/i)
+  expect(download.suggestedFilename()).toMatch(/欢迎使用 Tie\.tie$/i)
+  const stream = await download.createReadStream()
+  let text = ''
+  for await (const chunk of stream) text += chunk.toString()
+  expect(text).toContain('kind: solution')
+  expect(text).toContain('root_page:')
 })
 
 test('renders Mermaid, recovers from invalid syntax, and preserves markdown', async ({ page }) => {

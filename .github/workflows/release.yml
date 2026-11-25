@@ -4,6 +4,19 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v1.0.51
+        required: true
+        type: string
+      include_android:
+        description: Also build Android
+        default: false
+        type: boolean
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 permissions:
   contents: write
@@ -140,6 +153,7 @@ jobs:
           if-no-files-found: error
 
   build-android:
+    if: github.event_name != 'workflow_dispatch' || inputs.include_android
     runs-on: ubuntu-22.04
     env:
       NDK_VERSION: "27.2.12479018"
@@ -208,7 +222,7 @@ jobs:
 
       - name: Collect Android APK
         env:
-          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_REF_NAME: ${{ env.RELEASE_TAG }}
         run: bash scripts/collect-android-apk.sh release-artifacts-android
 
       - name: Upload Android artifacts
@@ -220,6 +234,7 @@ jobs:
 
   publish:
     needs: [build-linux, build-windows, build-android]
+    if: always() && needs.build-linux.result == 'success' && needs.build-windows.result == 'success' && (needs.build-android.result == 'success' || needs.build-android.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -237,6 +252,7 @@ jobs:
           path: dist/windows
 
       - name: Download Android artifacts
+        if: needs.build-android.result == 'success'
         uses: actions/download-artifact@v5
         with:
           name: tie-android
@@ -245,7 +261,7 @@ jobs:
       - name: Merge updater manifest
         shell: bash
         env:
-          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_REF_NAME: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -260,8 +276,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Tie ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: Tie ${{ env.RELEASE_TAG }}
           draft: false
           generate_release_notes: true
           fail_on_unmatched_files: true
@@ -275,7 +292,7 @@ jobs:
             dist/*.exe
             dist/*.exe.sig
             dist/latest.json
-            dist/tie-*-android*.apk
+            ${{ needs.build-android.result == 'success' && 'dist/tie-*-android*.apk' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -285,6 +302,6 @@ jobs:
           PACKHUB_SLUG: tie
           PACKHUB_UPLOAD_KEY: ${{ secrets.PACKHUB_UPLOAD_KEY }}
           PACKHUB_TIMEOUT: "1800"
-          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_REF_NAME: ${{ env.RELEASE_TAG }}
         timeout-minutes: 40
         run: python3 scripts/publish-packhub-release.py dist --manifest dist/tauri-latest.json

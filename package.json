@@ -1,7 +1,7 @@
 {
   "name": "tie",
   "private": true,
-  "version": "1.0.49",
+  "version": "1.0.51",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,8 +17,8 @@
     "tauri": "tauri",
     "tauri:dev": "node scripts/tauri-dev.mjs",
     "tauri:build": "node scripts/tauri-build.mjs",
-    "tauri:build:linux": "tauri build --bundles deb,rpm",
-    "tauri:build:windows": "tauri build --bundles msi,nsis",
+    "tauri:build:linux": "node scripts/tauri-build.mjs --bundles deb,rpm",
+    "tauri:build:windows": "node scripts/tauri-build.mjs --bundles msi,nsis",
     "tauri:android:dev": "node scripts/tauri-android-dev.mjs",
     "tauri:android:build": "tauri android build",
     "android:emulator:setup": "bash scripts/setup-android-emulator.sh",

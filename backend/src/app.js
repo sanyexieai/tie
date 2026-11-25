@@ -23,10 +23,11 @@ import { assertProductionReady, createCorsMiddleware, resolveJwtSecret } from '.
 import { handleMcpRequest, mcpStatus, mcpUrlForRequest } from './mcp-http.js'
 import { applySettingsPatch, detectCli, loadSettings, publicSettings } from './settings.js'
 import { createMcpToken, deleteMcpToken, deleteMcpTokensForWorkspace, listMcpTokens } from './mcp-tokens.js'
-import { findUserByLogin, publicUser, roleForNewUser, userRole } from './accounts.js'
+import { findUserByLogin, publicUser, roleForNewUser, userRole, verifyPassword } from './accounts.js'
 import { issueSession, revokeSession, rotateSession } from './sessions.js'
 import { mountAdmin } from './admin.js'
 import { fileURLToPath } from 'node:url'
+import { assertResourceId } from './resource-id.js'
 
 export function createApp(options = {}) {
   const jwtSecret = resolveJwtSecret(options)
@@ -45,6 +46,16 @@ export function createApp(options = {}) {
     next()
   })
   app.use(express.json({ limit: '12mb' }))
+  for (const name of ['pageId', 'revisionId']) {
+    app.param(name, (_req, res, next, value) => {
+      try {
+        assertResourceId(value)
+        next()
+      } catch (error) {
+        res.status(error.status).json({ message: error.message })
+      }
+    })
+  }
 
 function nowIso() { return new Date().toISOString() }
 function newId(prefix) { return `${prefix}_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}` }
@@ -130,13 +141,14 @@ app.post('/api/v1/auth/register', async (req, res) => {
     const password = String(req.body.password ?? '')
     const name = String(req.body.name ?? '').trim() || email.split('@')[0]
     if (!email || password.length < 6) return res.status(400).json({ message: '邮箱或密码无效' })
+    const passwordHash = await bcrypt.hash(password, 10)
     const users = store.loadUsers()
     if (users.some((user) => user.email === email)) return res.status(409).json({ message: '邮箱已注册' })
     const user = {
       id: newId('usr'),
       email,
       name,
-      passwordHash: await bcrypt.hash(password, 10),
+      passwordHash,
       role: roleForNewUser(users),
       disabled: false,
       createdAt: nowIso(),
@@ -156,7 +168,7 @@ app.post('/api/v1/auth/login', async (req, res) => {
     const found = findUserByLogin(store.loadUsers(), identifier)
     if (found.reason === 'ambiguous') return res.status(401).json({ message: '有多个同名账号，请用邮箱登录' })
     const user = found.user
-    if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+    if (!user || !(await verifyPassword(password, user.passwordHash))) {
       return res.status(401).json({ message: '用户名、邮箱或密码错误' })
     }
     if (user.disabled) return res.status(403).json({ message: '账号已停用' })

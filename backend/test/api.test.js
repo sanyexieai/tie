@@ -242,6 +242,30 @@ describe('tie backend api', { concurrency: 1 }, () => {
     assert.deepEqual(listed.body.assets, ['a1.png'])
   })
 
+  it('rejects invalid resource ids before page, asset, or batch deletion access', async () => {
+    const invalidId = encodeURIComponent('invalid/page')
+    for (const suffix of ['', '/assets', '/assets/a1.png', '/revisions']) {
+      const result = await request(`/api/v1/workspaces/${workspaceId}/pages/${invalidId}${suffix}`, {
+        headers: { authorization: `Bearer ${token}` },
+      })
+      assert.equal(result.response.status, 400)
+    }
+    const revision = await request(`/api/v1/workspaces/${workspaceId}/pages/${pageId}/revisions/${invalidId}`, {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    assert.equal(revision.response.status, 400)
+    const removed = await request(`/api/v1/workspaces/${workspaceId}/pages`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ pageIds: [pageId, 'invalid/page'] }),
+    })
+    assert.equal(removed.response.status, 400)
+    const retained = await request(`/api/v1/workspaces/${workspaceId}/pages/${pageId}`, {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    assert.equal(retained.response.status, 200)
+  })
+
   it('stores workspace file registry and copy blobs', async () => {
     const fileId = 'file_aabbccddeeff0011'
     const meta = await request(`/api/v1/workspaces/${workspaceId}/files/${fileId}`, {

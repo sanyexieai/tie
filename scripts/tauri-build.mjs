@@ -19,10 +19,14 @@ function defaultBundles() {
 }
 
 function applyLocalUpdaterKey(env) {
-  if (env.TAURI_SIGNING_PRIVATE_KEY || env.TAURI_SIGNING_PRIVATE_KEY_PATH) return env
-  const keyPath = path.join(os.homedir(), '.tauri', 'tie.key')
+  if (env.TAURI_SIGNING_PRIVATE_KEY) return env
+  const keyPath = env.TAURI_SIGNING_PRIVATE_KEY_PATH || path.join(os.homedir(), '.tauri', 'tie.key')
   if (!fs.existsSync(keyPath)) return env
-  return { ...env, TAURI_SIGNING_PRIVATE_KEY_PATH: keyPath }
+  return {
+    ...env,
+    TAURI_SIGNING_PRIVATE_KEY: fs.readFileSync(keyPath, 'utf8').trim(),
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ?? '',
+  }
 }
 
 const args = process.argv.slice(2)

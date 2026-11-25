@@ -1,0 +1,14 @@
+.git
+.env
+**/.env
+**/backend.env
+packhub.env
+**/*.key
+**/node_modules
+src-tauri/target
+src-tauri/gen
+dist
+backend/data
+deploy/fnos/data
+test-results
+playwright-report

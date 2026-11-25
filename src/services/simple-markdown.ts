@@ -15,7 +15,15 @@ function inlineFormat(text: string) {
   out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>')
   out = out.replace(
     /\[([^\]]+)\]\(([^)]+)\)/g,
-    '<a href="$2" rel="noopener noreferrer">$1</a>',
+    (_, label: string, href: string) => {
+      try {
+        const protocol = new URL(href, 'https://tie.invalid/').protocol
+        if (!['http:', 'https:', 'mailto:', 'tel:', 'tie:'].includes(protocol)) return label
+      } catch {
+        return label
+      }
+      return `<a href="${href}" rel="noopener noreferrer">${label}</a>`
+    },
   )
   return out
 }

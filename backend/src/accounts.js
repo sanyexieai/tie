@@ -1,5 +1,7 @@
 import crypto from 'node:crypto'
 import jwt from 'jsonwebtoken'
+import bcrypt from 'bcryptjs'
+import { verify } from 'argon2'
 import { store } from './store.js'
 
 export function nowIso() {
@@ -35,6 +37,10 @@ export function publicUser(user) {
     disabled: Boolean(user.disabled),
     createdAt: user.createdAt,
   }
+}
+
+export async function verifyPassword(password, hash) {
+  return hash.startsWith('$argon2') ? verify(hash, password) : bcrypt.compare(password, hash)
 }
 
 export function signAccessToken(user, jwtSecret) {

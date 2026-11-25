@@ -13,7 +13,7 @@ function safePageId(pageId) {
   return typeof pageId === 'string'
     && pageId.length > 0
     && pageId.length <= 80
-    && /^[A-Za-z0-9_]+$/.test(pageId)
+    && /^[A-Za-z0-9_-]+$/.test(pageId)
 }
 
 function workspaceLabel(workspaceId) {

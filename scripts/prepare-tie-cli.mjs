@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Build tie-cli and stage Tauri externalBin sidecars:
- *   src-tauri/binaries/tie-<target-triple>[.exe]
+ *   src-tauri/binaries/tie-cli-<target-triple>[.exe]
  */
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -48,12 +48,15 @@ if (!fs.existsSync(built)) {
 }
 
 fs.mkdirSync(binariesDir, { recursive: true })
-const stagedName = process.platform === 'win32' ? `tie-${triple}.exe` : `tie-${triple}`
+const stagedName = process.platform === 'win32' ? `tie-cli-${triple}.exe` : `tie-cli-${triple}`
 const staged = path.join(binariesDir, stagedName)
-fs.copyFileSync(built, staged)
+// Replace the file so a running CLI can keep its existing executable open.
+const staging = `${staged}.tmp-${process.pid}`
+fs.copyFileSync(built, staging)
 try {
-  fs.chmodSync(staged, 0o755)
+  fs.chmodSync(staging, 0o755)
 } catch {
   /* windows */
 }
+fs.renameSync(staging, staged)
 console.log(`[prepare-tie-cli] staged ${staged}`)

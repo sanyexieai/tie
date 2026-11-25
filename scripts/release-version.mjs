@@ -25,6 +25,7 @@ const VERSION_FILES = [
   'src-tauri/Cargo.toml',
   'src-tauri/Cargo.lock',
   'backend/package.json',
+  'backend/package-lock.json',
   'packages/tie-mcp/package.json',
 ]
 
@@ -153,8 +154,8 @@ function setPackageJsonVersion(relativePath, version) {
   writeJson(relativePath, json)
 }
 
-function setPackageLockVersion(version) {
-  const filePath = path.join(root, 'package-lock.json')
+function setPackageLockVersion(version, relativePath = 'package-lock.json') {
+  const filePath = path.join(root, relativePath)
   const json = JSON.parse(fs.readFileSync(filePath, 'utf8'))
   json.version = version
   if (json.packages?.['']?.version) json.packages[''].version = version
@@ -245,6 +246,7 @@ function bumpAllVersions(nextVersion) {
   setCargoTomlVersion(nextVersion)
   setCargoLockVersion(nextVersion)
   setPackageJsonVersion('backend/package.json', nextVersion)
+  setPackageLockVersion(nextVersion, 'backend/package-lock.json')
   setPackageJsonVersion('packages/tie-mcp/package.json', nextVersion)
 }
 

@@ -61,6 +61,14 @@ if (cargoCheck.status !== 0) {
   process.exit(1)
 }
 
+const prepare = spawnSync(process.execPath, [path.join(root, 'scripts', 'prepare-tie-cli.mjs')], {
+  cwd: root,
+  stdio: 'inherit',
+  shell: process.platform === 'win32',
+  env,
+})
+if (prepare.status !== 0) process.exit(prepare.status ?? 1)
+
 const result = spawnSync('npx', ['tauri', 'dev', ...process.argv.slice(2)], {
   cwd: root,
   stdio: 'inherit',

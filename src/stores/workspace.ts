@@ -85,8 +85,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     .filter((item): item is NonNullable<typeof item> => Boolean(item)))
 
   const rawSources = computed(() => dedupeStorageSources([
-    ...(workspace.value?.sources ?? []).filter(isWorkspaceFileSource),
-    // 后台不是侧栏里的另一份页面树。登录后由同步进程把默认工作区对齐进本地目录。
+    ...(workspace.value?.sources ?? []).filter((source) => (
+      isWorkspaceFileSource(source) || (!desktopCanSync() && isBackendSourceId(source.id))
+    )),
+    // 桌面端只显示本地目录，后台由同步进程对齐；网页直接使用后台工作区。
     // 存量直连 S3 只读兼容（设置页已禁止新建）。
     ...(s3ProvidersVersion.value >= 0 ? loadLocalS3Providers().map(s3StorageSource) : []),
   ]))
@@ -440,7 +442,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function scheduleBackendSync() {
-    if (!backend.connected) return
+    if (!backend.connected || typeof window === 'undefined') return
     if (!desktopCanSync()) {
       if (backendSyncTimer) window.clearTimeout(backendSyncTimer)
       backendSyncTimer = window.setTimeout(() => {
@@ -1036,7 +1038,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function persistUnlocked(page: Page, options?: { force?: boolean; restore?: boolean }) {
+  async function persistUnlocked(page: Page, options?: { force?: boolean; restore?: boolean; sync?: boolean }) {
     const previous = pages.value.find((item) => item.id === page.id)
     // Re-check after acquiring the per-page save lock: queued editor drafts
     // must not resurrect a page that was trashed while they were waiting.
@@ -1273,7 +1275,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   const trashNotice = ref('')
-  let trashNoticeTimer: number | undefined
+  let trashNoticeTimer: ReturnType<typeof globalThis.setTimeout> | undefined
 
   async function trashPage(pageId: PageId) {
     const removed = collectSubtree(pageId)

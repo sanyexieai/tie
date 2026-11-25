@@ -10,6 +10,7 @@ process.env.TIE_JWT_SECRET = 'tie-test-secret-for-ci-with-enough-length'
 process.env.TIE_ALLOW_WEAK_SECRET = '1'
 
 const { createApp } = await import('../src/app.js')
+const cliPath = path.join(dataDir, process.platform === 'win32' ? 'tie-cli.cmd' : 'tie-cli')
 
 describe('mcp http from settings', { concurrency: 1 }, () => {
   /** @type {import('node:http').Server | null} */
@@ -32,8 +33,10 @@ describe('mcp http from settings', { concurrency: 1 }, () => {
       '})',
       '',
     ].join('\n'))
-    const cmd = path.join(dataDir, 'tie-cli.cmd')
-    fs.writeFileSync(cmd, `@echo off\r\n"${process.execPath}" "${fake}" %*\r\n`)
+    fs.writeFileSync(cliPath, process.platform === 'win32'
+      ? `@echo off\r\n"${process.execPath}" "${fake}" %*\r\n`
+      : `#!${process.execPath}\n${fs.readFileSync(fake, 'utf8')}`)
+    fs.chmodSync(cliPath, 0o755)
     server = createApp({ jwtSecret: process.env.TIE_JWT_SECRET }).listen(0, '127.0.0.1')
     await new Promise((resolve) => server.once('listening', resolve))
     const address = server.address()
@@ -87,7 +90,7 @@ describe('mcp http from settings', { concurrency: 1 }, () => {
       method: 'PUT',
       headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
       body: JSON.stringify({
-        mcp: { enabled: true, cliPath: path.join(dataDir, 'tie-cli.cmd') },
+        mcp: { enabled: true, cliPath },
         ai: { apiKey: 'sk-test', baseUrl: 'https://example.test/v1', model: 'demo' },
       }),
     })

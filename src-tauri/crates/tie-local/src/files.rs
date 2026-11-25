@@ -436,6 +436,22 @@ impl<'a> FileRegistry<'a> {
         }
     }
 
+    pub fn all_metadata(&self) -> Vec<Value> {
+        read_index(self.workspace)
+            .into_iter()
+            .filter_map(|entry| read_meta(self.workspace, &entry.id))
+            .collect()
+    }
+
+    pub fn upsert_metadata(&self, meta: &Value) -> Result<(), String> {
+        let id = meta.get("id").and_then(Value::as_str).unwrap_or("");
+        if !id.starts_with("file_") || !id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+            return Err("文件资源 id 无效".to_owned());
+        }
+        write_meta(self.workspace, meta)?;
+        upsert_index(self.workspace, meta)
+    }
+
     pub fn list(
         &self,
         query: Option<&str>,

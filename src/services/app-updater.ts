@@ -343,21 +343,8 @@ export async function checkForAppUpdate(options: { silent?: boolean } = {}) {
     await loadCurrentVersion()
     const currentVersion = state.currentVersion
 
-    // Check the PackHub manifest first. It is also the fallback path for
-    // installations whose Tauri updater endpoint still has an older config;
-    // this keeps update detection working while a signed plugin manifest is
-    // being rolled out.
-    const manifestUpdate = await checkViaManifest(currentVersion).catch(() => null)
-    if (manifestUpdate) {
-      setAvailableUpdate({
-        version: manifestUpdate.version,
-        notes: manifestUpdate.notes,
-        installMode: 'manual',
-        manual: manifestUpdate,
-      })
-      return manifestUpdate
-    }
-
+    // Prefer the signed updater on desktop releases. A manifest match must
+    // not short-circuit this path and silently force every update to manual.
     if (supportsAutoAppUpdate()) {
       try {
         const update = await check()
@@ -373,8 +360,8 @@ export async function checkForAppUpdate(options: { silent?: boolean } = {}) {
           })
           return update
         }
-        state.phase = 'uptodate'
-        return null
+        // Older installations may still use an outdated plugin endpoint.
+        // Check the current manifest below before declaring them up to date.
       } catch (pluginError) {
         const manual = await checkViaManifest(currentVersion)
         if (manual) {

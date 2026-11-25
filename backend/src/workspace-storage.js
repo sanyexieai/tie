@@ -2,6 +2,7 @@
  * 工作区只落在服务器磁盘。HTTP MCP 和同步读写的是同一份目录。
  */
 import { notifyWorkspace } from './live.js'
+import { assertResourceId } from './resource-id.js'
 import { deleteWorkspacePageAssets, listWorkspacePageAssets, readWorkspacePageAsset, saveWorkspacePageAsset } from './workspace-assets.js'
 import {
   deleteWorkspacePages,
@@ -37,7 +38,13 @@ export async function savePage(workspace, page, expectedUpdatedAt) {
 }
 
 export async function removePages(workspace, pageIds) {
-  deleteWorkspacePages(workspace.id, pageIds ?? [])
+  if (!Array.isArray(pageIds)) {
+    const error = new Error('页面列表无效')
+    error.status = 400
+    throw error
+  }
+  pageIds.forEach(assertResourceId)
+  deleteWorkspacePages(workspace.id, pageIds)
   notifyWorkspace(workspace.id)
 }
 

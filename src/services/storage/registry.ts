@@ -248,17 +248,9 @@ export const storageRegistry = {
     const targetAdapter = this.resolve(targetSourceId)
     const transferred = withPageSources(page, targetSourceId, [targetSourceId])
     await targetAdapter.savePage(transferred, { writeSourceId: targetSourceId, force: true })
-    try {
-      await this.copyPageHistory(page, page.storageSourceId, targetSourceId)
-    } catch (error) {
-      console.warn('历史版本迁移失败', error)
-    }
-    try {
-      await this.copyPageAssets(page, page.storageSourceId, targetSourceId)
-    } catch (error) {
-      console.warn('页面附件迁移失败', error)
-    }
-    for (const sourceId of pageSourceIds(page)) {
+    await this.copyPageHistory(page, page.storageSourceId, targetSourceId)
+    await this.copyPageAssets(page, page.storageSourceId, targetSourceId)
+    for (const sourceId of pageSourceIds(page).filter((id) => id !== targetSourceId)) {
       try {
         await this.resolve(sourceId).permanentlyDeletePages(sourceId, [{ ...page, storageSourceId: sourceId }])
       } catch (error) {

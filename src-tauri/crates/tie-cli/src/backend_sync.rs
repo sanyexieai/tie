@@ -47,6 +47,7 @@ struct CursorEntry {
 enum Action {
     Push,
     Pull,
+    Conflict,
     Skip,
 }
 
@@ -178,7 +179,7 @@ fn sync_as_user(
     session: &tie_local::backend_session::BackendSession,
     ws: &LocalWorkspace,
 ) -> Result<BackendSyncReport, String> {
-    if normalize_endpoint(&session.endpoint)? != normalize_endpoint(&target.url)? {
+    if !same_backend_endpoint(&session.endpoint, &target.url) {
         return Err("当前登录的后台和这个工作区配置的后台不是同一台".to_owned());
     }
     let client = http_client()?;
@@ -215,7 +216,7 @@ fn sync_with(target: &BackendTarget, token: &str, ws: &LocalWorkspace, actor: &s
         .collect();
     let mut pushed = 0u32;
     let mut pulled = 0u32;
-    let conflicts = Vec::new();
+    let mut conflicts = Vec::new();
 
     for local in &local_pages {
         let remote = remote_by_id.remove(&local.id);
@@ -226,11 +227,6 @@ fn sync_with(target: &BackendTarget, token: &str, ws: &LocalWorkspace, actor: &s
                 }
             }
             Action::Push => {
-                if let Some(remote) = remote.as_ref() {
-                    if both_edited(local, remote, cursor.get(&local.id)) {
-                        keep_newer(ws.root(), actor, local, remote);
-                    }
-                }
                 match put_remote(&client, target, token, local, remote.as_ref()) {
                 Ok(saved) => {
                     cursor.insert(local.id.clone(), entry(local, &saved));
@@ -238,36 +234,37 @@ fn sync_with(target: &BackendTarget, token: &str, ws: &LocalWorkspace, actor: &s
                 }
                 Err(error) if error == "conflict" => {
                     let fresh = get_remote_page(&client, target, token, &local.id)?;
-                    keep_newer(ws.root(), actor, local, &fresh);
-                    if local.updated_at > fresh.updated_at {
-                        let saved = put_remote(&client, target, token, local, None)?;
-                        cursor.insert(local.id.clone(), entry(local, &saved));
-                        pushed += 1;
-                    } else {
-                        pull_page(ws, &fresh, Some(local))?;
-                        cursor.insert(fresh.id.clone(), entry(&fresh, &fresh));
-                        pulled += 1;
-                    }
-                    let _ = exchange_reviews(&client, target, token, ws.root(), &local.id);
+                    note_divergence(ws.root(), actor, local, &fresh);
+                    conflicts.push(local.id.clone());
                 }
                 Err(error) => return Err(error),
             }
             }
             Action::Pull => {
                 if let Some(remote) = remote {
-                    if both_edited(local, &remote, cursor.get(&local.id)) {
-                        keep_newer(ws.root(), actor, local, &remote);
-                    }
                     pull_page(ws, &remote, Some(local))?;
                     cursor.insert(remote.id.clone(), entry(&remote, &remote));
                     let _ = exchange_reviews(&client, target, token, ws.root(), &remote.id);
                     pulled += 1;
                 }
             }
+            Action::Conflict => {
+                if let Some(remote) = remote {
+                    note_divergence(ws.root(), actor, local, &remote);
+                    conflicts.push(local.id.clone());
+                }
+            }
         }
     }
 
+    let mut purged = Vec::new();
     for remote in remote_by_id.into_values() {
+        if remote.deleted_at.is_some()
+            && cursor.get(&remote.id).is_some_and(|previous| previous.remote == remote.updated_at)
+        {
+            purged.push(remote.id.clone());
+            continue;
+        }
         match plan(None, Some(&remote), cursor.get(&remote.id)) {
             Action::Pull | Action::Skip => {
                 pull_page(ws, &remote, None)?;
@@ -275,10 +272,28 @@ fn sync_with(target: &BackendTarget, token: &str, ws: &LocalWorkspace, actor: &s
                 let _ = exchange_reviews(&client, target, token, ws.root(), &remote.id);
                 pulled += 1;
             }
-            Action::Push => {}
+            Action::Push | Action::Conflict => {}
         }
     }
 
+    if !purged.is_empty() {
+        let response = client.post(format!(
+            "{}/api/v1/workspaces/{}/pages", target.url.trim_end_matches('/'), target.workspace_id
+        )).bearer_auth(token).json(&json!({ "pageIds": purged })).send()
+            .map_err(|error| format!("永久删除尚未同步：{error}"))?;
+        if !response.status().is_success() {
+            return Err(format!("永久删除尚未同步：{}", response.status()));
+        }
+        for id in &purged { cursor.remove(id); }
+        pushed += purged.len() as u32;
+    }
+
+    crate::resources_sync::sync_resources(
+        &client,
+        &format!("{}/api/v1/workspaces/{}", target.url.trim_end_matches('/'), target.workspace_id),
+        token,
+        ws,
+    )?;
     write_cursor(ws.root(), &cursor)?;
     for page_id in review_page_ids(ws.root()) {
         let _ = exchange_reviews(&client, target, token, ws.root(), &page_id);
@@ -468,6 +483,13 @@ fn normalize_endpoint(url: &str) -> Result<String, String> {
     Ok(url)
 }
 
+pub fn same_backend_endpoint(left: &str, right: &str) -> bool {
+    match (normalize_endpoint(left), normalize_endpoint(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 #[derive(Deserialize)]
 struct Me {
     email: String,
@@ -536,37 +558,9 @@ fn plan(local: Option<&Page>, remote: Option<&Page>, cursor: Option<&CursorEntry
                 Some(cursor) if remote.updated_at == cursor.remote && local.updated_at != cursor.local => {
                     Action::Push
                 }
-                _ => prefer_newer(local, remote),
+                _ => Action::Conflict,
             }
         }
-    }
-}
-
-fn prefer_newer(local: &Page, remote: &Page) -> Action {
-    if local.updated_at > remote.updated_at {
-        Action::Push
-    } else {
-        Action::Pull
-    }
-}
-
-fn both_edited(local: &Page, remote: &Page, cursor: Option<&CursorEntry>) -> bool {
-    if same_content(local, remote) {
-        return false;
-    }
-    match cursor {
-        Some(cursor) if local.updated_at == cursor.local && remote.updated_at != cursor.remote => false,
-        Some(cursor) if remote.updated_at == cursor.remote && local.updated_at != cursor.local => false,
-        _ => true,
-    }
-}
-
-fn keep_newer(root: &Path, actor: &str, local: &Page, remote: &Page) {
-    note_divergence(root, actor, local, remote);
-    if local.updated_at > remote.updated_at {
-        mark_resolution(root, &local.id, &local.updated_at, &remote.updated_at);
-    } else {
-        mark_resolution(root, &local.id, &remote.updated_at, &local.updated_at);
     }
 }
 
@@ -790,7 +784,7 @@ pub fn align(ws: &LocalWorkspace, url: &str, workspace_id: &str) -> Result<Backe
 pub fn resolve_conflict(ws: &LocalWorkspace, page_id: &str, keep_local: bool) -> Result<BackendSyncReport, String> {
     let target = read_config(ws.root())?.ok_or("未配置后台。请先同步一次")?;
     let session = ensure_session(false)?;
-    if normalize_endpoint(&session.endpoint)? != normalize_endpoint(&target.url)? {
+    if !same_backend_endpoint(&session.endpoint, &target.url) {
         return Err("当前登录的后台和这个工作区配置的后台不是同一台".to_owned());
     }
     let client = http_client()?;
@@ -974,7 +968,7 @@ fn note_divergence(root: &Path, actor: &str, local: &Page, remote: &Page) {
             "pageId": local.id,
             "title": local.title,
             "status": "open",
-            "note": "两边都改过。较新的一份已写入正文，另一份留在修改记录里"
+            "note": "两边都改过，正文未覆盖，请选择保留哪一份"
         }));
     }
     let _ = write_reviews(root, &local.id, &file);
@@ -1144,6 +1138,15 @@ fn write_status(root: &Path, report: &BackendSyncReport) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn backend_endpoint_must_match_the_login_server() {
+        assert!(same_backend_endpoint(" https://backend.example/ ", "https://backend.example"));
+        assert!(!same_backend_endpoint("https://backend.example", "https://other.example"));
+        assert!(!same_backend_endpoint("https://backend.example", "http://backend.example"));
+        assert!(!same_backend_endpoint("https://backend.example/base", "https://backend.example"));
+        assert!(!same_backend_endpoint("invalid", "invalid"));
+    }
+
     fn page(id: &str, markdown: &str, updated_at: &str) -> Page {
         Page {
             id: id.into(),
@@ -1171,11 +1174,11 @@ mod tests {
         };
         assert_eq!(plan(Some(&local), None, None), Action::Push);
         assert_eq!(plan(None, Some(&remote), None), Action::Pull);
-        assert_eq!(plan(Some(&local), Some(&remote), None), Action::Pull);
+        assert_eq!(plan(Some(&local), Some(&remote), None), Action::Conflict);
         let mut newer = local.clone();
         newer.updated_at = "2026-01-03T00:00:00.000Z".into();
         newer.markdown = "更新的本地".into();
-        assert_eq!(plan(Some(&newer), Some(&remote), None), Action::Push);
+        assert_eq!(plan(Some(&newer), Some(&remote), None), Action::Conflict);
         let mut remote_old = remote.clone();
         remote_old.updated_at = cursor.remote.clone();
         remote_old.markdown = "后台".into();
@@ -1184,6 +1187,129 @@ mod tests {
         local_old.updated_at = cursor.local.clone();
         local_old.markdown = "本地".into();
         assert_eq!(plan(Some(&local_old), Some(&remote), Some(&cursor)), Action::Pull);
-        assert_eq!(plan(Some(&local), Some(&remote), Some(&cursor)), Action::Pull);
+        assert_eq!(plan(Some(&local), Some(&remote), Some(&cursor)), Action::Conflict);
+    }
+
+    #[test]
+    fn conflicts_and_concurrent_remote_edits_preserve_both_files() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        for concurrent in [false, true] {
+            let dir = std::env::temp_dir().join(format!("tie-conflict-{}-{concurrent}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            let local_ws = LocalWorkspace::init(&dir.join("local"), "src_test").unwrap();
+            let remote_ws = LocalWorkspace::init(&dir.join("remote"), "src_test").unwrap();
+            let local = page("pg_sync", "local draft", "2026-01-02T00:00:00.000Z");
+            let remote = page("pg_sync", "remote draft", "2026-01-01T00:00:00.000Z");
+            save_page_to_root(local_ws.root(), local.clone(), None).unwrap();
+            save_page_to_root(remote_ws.root(), remote.clone(), None).unwrap();
+            if concurrent {
+                let cursor = HashMap::from([(local.id.clone(), CursorEntry {
+                    local: "2025-12-31T00:00:00.000Z".into(), remote: remote.updated_at.clone(),
+                })]);
+                write_cursor(local_ws.root(), &cursor).unwrap();
+            }
+            let puts = Arc::new(AtomicUsize::new(0));
+            let requests = puts.clone();
+            let root = remote_ws.root().to_owned();
+            let server = crate::test_http::Server::start(move |request, body| {
+                let request = request.replace("/api/v1/workspaces/ws_test", "");
+                if request.starts_with("GET /pages HTTP") {
+                    let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
+                    return (200, serde_json::to_vec(&ws.load_all(true).unwrap()).unwrap());
+                }
+                if request.contains("/reviews ") {
+                    return (200, if request.starts_with("PUT ") { body.to_vec() } else { b"{\"entries\":[]}".to_vec() });
+                }
+                if request.contains(" /pages/pg_sync HTTP") {
+                    let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
+                    if request.starts_with("PUT ") {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        let changed = page("pg_sync", "concurrent remote", "2026-01-03T00:00:00.000Z");
+                        save_page_to_root(&root, changed, None).unwrap();
+                        return (409, b"{}".to_vec());
+                    }
+                    return (200, serde_json::to_vec(&ws.resolve("pg_sync").unwrap().unwrap()).unwrap());
+                }
+                crate::resources_sync::tests::respond(&root, &request, body)
+            });
+            let target = BackendTarget { url: server.url.clone(), workspace_id: "ws_test".into() };
+            let report = sync_with(&target, "", &local_ws, "test").unwrap();
+            assert_eq!(report.mode, "conflict");
+            assert_eq!(report.conflicts, vec!["pg_sync"]);
+            assert_eq!(report.pushed, 0);
+            assert_eq!(report.pulled, 0);
+            assert_eq!(local_ws.resolve("pg_sync").unwrap().unwrap().markdown, "local draft");
+            assert_eq!(remote_ws.resolve("pg_sync").unwrap().unwrap().markdown,
+                if concurrent { "concurrent remote" } else { "remote draft" });
+            assert_eq!(puts.load(Ordering::SeqCst), usize::from(concurrent));
+            assert_eq!(read_reviews(local_ws.root(), "pg_sync").entries.len(), 2);
+            drop(server);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn purges_only_tracked_unchanged_remote_trash() {
+        use std::sync::{Arc, Mutex};
+        let dir = std::env::temp_dir().join(format!("tie-sync-purge-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let local = LocalWorkspace::init(&dir.join("local"), "src_test").unwrap();
+        let remote = LocalWorkspace::init(&dir.join("remote"), "src_test").unwrap();
+        let stamp = "2026-01-02T00:00:00.000Z";
+        let mut cursor = HashMap::new();
+        for (id, deleted, tracked) in [
+            ("pg_purged", true, true), ("pg_unseen", true, false),
+            ("pg_active", false, true), ("pg_changed", true, true),
+        ] {
+            let mut item = page(id, id, stamp);
+            if deleted { item.deleted_at = Some(stamp.into()); }
+            save_page_to_root(remote.root(), item, None).unwrap();
+            if tracked {
+                cursor.insert(id.into(), CursorEntry {
+                    local: stamp.into(),
+                    remote: if id == "pg_changed" { "2026-01-01T00:00:00.000Z" } else { stamp }.into(),
+                });
+            }
+        }
+        write_cursor(local.root(), &cursor).unwrap();
+        let deleted = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded = deleted.clone();
+        let root = remote.root().to_owned();
+        let server = crate::test_http::Server::start(move |request, body| {
+            let request = request.replace("/api/v1/workspaces/ws_test", "");
+            let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
+            if request.starts_with("GET /pages HTTP") {
+                return (200, serde_json::to_vec(&ws.load_all(true).unwrap()).unwrap());
+            }
+            if request.starts_with("POST /pages HTTP") {
+                let value: Value = serde_json::from_slice(body).unwrap();
+                for id in value["pageIds"].as_array().unwrap() {
+                    let id = id.as_str().unwrap();
+                    ws.purge_page(id, false).unwrap();
+                    recorded.lock().unwrap().push(id.to_owned());
+                }
+                return (204, Vec::new());
+            }
+            if request.contains("/reviews ") { return (200, b"{\"entries\":[]}".to_vec()); }
+            crate::resources_sync::tests::respond(&root, &request, body)
+        });
+        let target = BackendTarget { url: server.url.clone(), workspace_id: "ws_test".into() };
+        let first = sync_with(&target, "", &local, "test").unwrap();
+        assert_eq!(first.pushed, 1);
+        assert_eq!(first.pulled, 3);
+        assert_eq!(*deleted.lock().unwrap(), vec!["pg_purged"]);
+        assert!(local.resolve("pg_purged").unwrap().is_none());
+        assert!(remote.resolve("pg_purged").unwrap().is_none());
+        assert!(!read_cursor(local.root()).unwrap().contains_key("pg_purged"));
+        for id in ["pg_unseen", "pg_active", "pg_changed"] {
+            assert!(local.resolve(id).unwrap().is_some());
+            assert!(remote.resolve(id).unwrap().is_some());
+        }
+        let next = sync_with(&target, "", &local, "test").unwrap();
+        assert_eq!(next.pushed, 0);
+        assert_eq!(next.pulled, 0);
+        assert!(local.resolve("pg_purged").unwrap().is_none());
+        drop(server);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
