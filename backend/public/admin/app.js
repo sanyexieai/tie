@@ -98,10 +98,12 @@ async function enter(session) {
   rememberSession(session)
   const me = await api('/api/v1/me')
   if (me.role !== 'admin') {
+    sessionStorage.setItem('tie.me.token', JSON.stringify({
+      accessToken: state.token,
+      refreshToken: state.refreshToken,
+    }))
     sessionStorage.removeItem(tokenKey)
-    state.token = ''
-    state.refreshToken = ''
-    showLogin('这个账号不是管理员。普通用户请打开 /me/')
+    window.location.replace('/me/')
     return
   }
   state.me = me
@@ -246,7 +248,7 @@ async function renderUsers() {
     <h2>用户</h2>
     <p class="lead">每个用户只能看到自己的工作区。停用后无法登录，已发出的令牌也会失效。</p>
     <div class="toolbar">
-      <input id="user-q" placeholder="搜索邮箱或名称" value="${esc(query)}">
+      <input id="user-q" placeholder="搜索邮箱或用户名" value="${esc(query)}">
       <select id="user-status">
         <option value="" ${status === '' ? 'selected' : ''}>全部</option>
         <option value="active" ${status === 'active' ? 'selected' : ''}>可用</option>
@@ -272,7 +274,7 @@ async function renderUsers() {
     button.onclick = () => openUser(button.dataset.user)
   })
   document.querySelector('#user-create').onclick = () => openEditor('新建用户', [
-    { name: 'name', label: '名称', required: true },
+    { name: 'name', label: '用户名', required: true },
     { name: 'email', label: '邮箱', type: 'email', required: true },
     { name: 'password', label: '初始密码', type: 'password', required: true },
     { name: 'role', label: '角色', type: 'select', value: 'user', options: [{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }] },
@@ -282,7 +284,7 @@ async function renderUsers() {
     button.onclick = () => {
       const user = byId.get(button.dataset.edit)
       openEditor('编辑用户', [
-        { name: 'name', label: '名称', value: user.name, required: true },
+        { name: 'name', label: '用户名', value: user.name, required: true },
         { name: 'email', label: '邮箱', type: 'email', value: user.email, required: true },
         { name: 'role', label: '角色', type: 'select', value: user.role, options: [{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }] },
         { name: 'disabled', label: '停用这个账号', type: 'checkbox', checked: user.disabled },
@@ -334,7 +336,7 @@ async function renderUserDetail() {
     </table></div>`
   document.querySelector('#back').onclick = () => { state.userId = null; render() }
   document.querySelector('#edit').onclick = () => openEditor('编辑用户', [
-    { name: 'name', label: '名称', value: user.name, required: true },
+    { name: 'name', label: '用户名', value: user.name, required: true },
     { name: 'email', label: '邮箱', type: 'email', value: user.email, required: true },
     { name: 'role', label: '角色', type: 'select', value: user.role, options: [{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }] },
     { name: 'disabled', label: '停用这个账号', type: 'checkbox', checked: user.disabled },
@@ -576,6 +578,7 @@ function setAccountField(registering) {
   const input = document.querySelector('#account-field input')
   label.textContent = registering ? '邮箱' : '用户名或邮箱'
   input.type = registering ? 'email' : 'text'
+  input.autocomplete = registering ? 'email' : 'username'
   input.placeholder = registering ? 'name@example.com' : '用户名或 name@example.com'
 }
 
@@ -584,11 +587,11 @@ function setGateMode(mode) {
   const registering = mode === 'register'
   nameField.hidden = !registering
   setAccountField(registering)
-  gateSubmit.textContent = registering ? '注册' : '登录'
+  gateSubmit.textContent = registering ? '注册并登录' : '登录'
   gateSwitch.textContent = registering ? '已有账号？登录' : '没有账号？注册'
   gateLead.textContent = registering
-    ? '注册后即可进入。如果这是第一名用户，这个账号就是管理员。'
-    : '管理这台服务器上的用户和工作区。普通用户账号不能进入。'
+    ? '注册后自动登录。用户名在这台服务器上唯一，留空时使用邮箱前缀。第一名用户成为管理员。'
+    : '管理员进入管理后台，普通用户自动进入我的账号。'
   gateForm.querySelector('input[name="password"]').autocomplete = registering ? 'new-password' : 'current-password'
 }
 

@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs'
 import fs from 'node:fs'
 import path from 'node:path'
-import { enabledAdmins, newId, nowIso, publicUser, userRole } from './accounts.js'
+import { assertUniqueUserIdentity, enabledAdmins, newId, nowIso, publicUser, userRole } from './accounts.js'
 import { deleteWorkspacePages, ensureWorkspaceSolution, getWorkspacePage, listWorkspacePages, saveWorkspacePage } from './workspace-pages.js'
 import { deleteMcpTokensForUser, deleteMcpTokensForWorkspace } from './mcp-tokens.js'
 import { watchWorkspace } from './live.js'
@@ -160,13 +160,14 @@ export function mountAdmin(app, { auth, adminOnly, handleError }) {
       const name = String(req.body.name ?? '').trim() || email.split('@')[0]
       const role = req.body.role === 'admin' ? 'admin' : 'user'
       if (!email || !email.includes('@') || password.length < 6) fail('邮箱或密码无效')
+      const passwordHash = await bcrypt.hash(password, 10)
       const users = store.loadUsers()
-      if (users.some((item) => item.email === email)) fail('邮箱已注册', 409)
+      assertUniqueUserIdentity(users, { email, name })
       const user = {
         id: newId('usr'),
         email,
         name,
-        passwordHash: await bcrypt.hash(password, 10),
+        passwordHash,
         role,
         disabled: false,
         createdAt: nowIso(),
@@ -179,14 +180,20 @@ export function mountAdmin(app, { auth, adminOnly, handleError }) {
 
   app.patch('/api/v1/admin/users/:userId', ...guard, async (req, res) => {
     try {
+      let passwordHash
+      if (req.body.password !== undefined && String(req.body.password) !== '') {
+        const password = String(req.body.password)
+        if (password.length < 6) fail('密码至少 6 位')
+        passwordHash = await bcrypt.hash(password, 10)
+      }
       const users = store.loadUsers()
       const user = users.find((item) => item.id === req.params.userId)
       if (!user) fail('用户不存在', 404)
+      const previous = { ...user }
       const self = user.id === req.account.id
       if (req.body.email !== undefined) {
         const email = String(req.body.email ?? '').trim().toLowerCase()
         if (!email || !email.includes('@')) fail('邮箱无效')
-        if (users.some((item) => item.email === email && item.id !== user.id)) fail('邮箱已注册', 409)
         user.email = email
       }
       if (req.body.name !== undefined) {
@@ -204,11 +211,8 @@ export function mountAdmin(app, { auth, adminOnly, handleError }) {
         if (self && disabled) fail('不能停用自己的账号', 409)
         user.disabled = disabled
       }
-      if (req.body.password !== undefined && String(req.body.password) !== '') {
-        const password = String(req.body.password)
-        if (password.length < 6) fail('密码至少 6 位')
-        user.passwordHash = await bcrypt.hash(password, 10)
-      }
+      assertUniqueUserIdentity(users, user, previous)
+      if (passwordHash !== undefined) user.passwordHash = passwordHash
       assertStillHasAdmin(users)
       store.saveUsers(users)
       res.json(publicUser(user))

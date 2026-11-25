@@ -29,6 +29,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Install backend dependencies
+        run: npm ci --prefix backend
+
       - name: Typecheck frontend
         run: npm run check
 
@@ -45,9 +48,6 @@ jobs:
         run: npm run test:e2e
         env:
           CI: true
-
-      - name: Install backend dependencies
-        run: npm ci --prefix backend
 
       - name: Run backend API tests
         run: npm run test:backend

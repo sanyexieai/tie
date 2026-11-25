@@ -159,6 +159,7 @@ function setAccountField(registering) {
   const input = document.querySelector('#account-field input')
   label.textContent = registering ? '邮箱' : '用户名或邮箱'
   input.type = registering ? 'email' : 'text'
+  input.autocomplete = registering ? 'email' : 'username'
   input.placeholder = registering ? 'name@example.com' : '用户名或 name@example.com'
 }
 
@@ -167,9 +168,10 @@ function setGateMode(mode) {
   const registering = mode === 'register'
   nameField.hidden = !registering
   setAccountField(registering)
-  gateSubmit.textContent = registering ? '注册' : '登录'
+  gateSubmit.textContent = registering ? '注册并登录' : '登录'
   gateSwitch.textContent = registering ? '已有账号？登录' : '没有账号？注册'
-  gateLead.textContent = registering ? '注册后进入自己的工作区和 MCP 令牌。第一名用户会成为管理员。' : '登录后管理自己的工作区和 MCP 令牌。'
+  gateLead.textContent = registering ? '注册后自动登录并进入我的账号。用户名在这台服务器上唯一，留空时使用邮箱前缀。第一名用户成为管理员。' : '登录后管理自己的工作区和 MCP 令牌。'
+  gateForm.querySelector('input[name="password"]').autocomplete = registering ? 'new-password' : 'current-password'
 }
 
 gateSwitch.onclick = () => setGateMode(gateMode === 'login' ? 'register' : 'login')
@@ -201,4 +203,4 @@ document.querySelector('#logout').onclick = () => {
   }
   showLogin()
 }
-if (state.token) enter(state.token).catch((error) => showLogin(error.message))
+if (state.token) enter({ accessToken: state.token, refreshToken: state.refreshToken }).catch((error) => showLogin(error.message))

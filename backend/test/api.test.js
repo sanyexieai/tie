@@ -10,6 +10,7 @@ process.env.TIE_JWT_SECRET = 'tie-test-secret-for-ci-with-enough-length'
 process.env.TIE_ALLOW_WEAK_SECRET = '1'
 
 const { createApp } = await import('../src/app.js')
+const { store } = await import('../src/store.js')
 
 function demoPage(id, updatedAt, workspaceId) {
   return {
@@ -313,15 +314,18 @@ describe('tie backend api', { concurrency: 1 }, () => {
     assert.equal(Buffer.from(blob.body).toString(), '%PDF')
   })
 
-  it('asks for email when several accounts share a username', async () => {
-    for (const email of ['one@example.com', 'two@example.com']) {
+  it('rejects new duplicate names and keeps legacy duplicates usable by email', async () => {
+    for (const [email, status] of [['one@example.com', 200], ['two@example.com', 409]]) {
       const created = await request('/api/v1/auth/register', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ email, password: 'secret123', name: '同名' }),
       })
-      assert.equal(created.response.status, 200)
+      assert.equal(created.response.status, status)
     }
+    const users = store.loadUsers()
+    users.push({ ...users.find((user) => user.email === 'one@example.com'), id: 'usr_legacy_duplicate', email: 'two@example.com' })
+    store.saveUsers(users)
     const ambiguous = await request('/api/v1/auth/login', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -329,11 +333,14 @@ describe('tie backend api', { concurrency: 1 }, () => {
     })
     assert.equal(ambiguous.response.status, 401)
     assert.equal(ambiguous.body.message, '有多个同名账号，请用邮箱登录')
-    const byEmail = await request('/api/v1/auth/login', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email: 'one@example.com', password: 'secret123' }),
-    })
-    assert.equal(byEmail.response.status, 200)
+    for (const email of ['one@example.com', 'two@example.com']) {
+      const byEmail = await request('/api/v1/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email, password: 'secret123' }),
+      })
+      assert.equal(byEmail.response.status, 200)
+      assert.equal(byEmail.body.user.email, email)
+    }
   })
 })

@@ -23,7 +23,7 @@ import { assertProductionReady, createCorsMiddleware, resolveJwtSecret } from '.
 import { handleMcpRequest, mcpStatus, mcpUrlForRequest } from './mcp-http.js'
 import { applySettingsPatch, detectCli, loadSettings, publicSettings } from './settings.js'
 import { createMcpToken, deleteMcpToken, deleteMcpTokensForWorkspace, listMcpTokens } from './mcp-tokens.js'
-import { findUserByLogin, publicUser, roleForNewUser, userRole, verifyPassword } from './accounts.js'
+import { assertUniqueUserIdentity, findUserByLogin, publicUser, roleForNewUser, userRole, verifyPassword } from './accounts.js'
 import { issueSession, revokeSession, rotateSession } from './sessions.js'
 import { mountAdmin } from './admin.js'
 import { fileURLToPath } from 'node:url'
@@ -143,7 +143,7 @@ app.post('/api/v1/auth/register', async (req, res) => {
     if (!email || password.length < 6) return res.status(400).json({ message: '邮箱或密码无效' })
     const passwordHash = await bcrypt.hash(password, 10)
     const users = store.loadUsers()
-    if (users.some((user) => user.email === email)) return res.status(409).json({ message: '邮箱已注册' })
+    assertUniqueUserIdentity(users, { email, name })
     const user = {
       id: newId('usr'),
       email,
