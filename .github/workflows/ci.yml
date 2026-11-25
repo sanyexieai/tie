@@ -8,6 +8,9 @@ on:
       - 'v*'
   pull_request:
 
+env:
+  RUST_TOOLCHAIN: '1.94.0'
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -50,6 +53,8 @@ jobs:
         run: npm run test:backend
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Install Linux Tauri dependencies
         run: |
@@ -99,6 +104,8 @@ jobs:
         run: npm ci
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Install Linux build dependencies
         run: |
@@ -153,6 +160,8 @@ jobs:
         run: npm ci
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
         with:

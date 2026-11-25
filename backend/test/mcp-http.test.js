@@ -29,7 +29,7 @@ describe('mcp http from settings', { concurrency: 1 }, () => {
       "process.stdin.on('data', (chunk) => { raw += chunk })",
       "process.stdin.on('end', () => {",
       '  const message = JSON.parse(raw)',
-      "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { ok: true, method: message.method } }) + '\\n')",
+      "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { ok: true, method: message.method, tools: [{ name: 'tie_get' }, { name: 'tie_file_ingest' }, { name: 'tie_export' }] } }) + '\\n')",
       '})',
       '',
     ].join('\n'))
@@ -140,6 +140,18 @@ describe('mcp http from settings', { concurrency: 1 }, () => {
     assert.equal(called.response.status, 200)
     assert.equal(called.body.result.ok, true)
     assert.equal(called.body.result.method, 'tools/list')
+    assert.deepEqual(called.body.result.tools, [{ name: 'tie_get' }])
+
+    for (const name of ['tie_file_ingest', 'tie_file_open_hint', 'tie_export', 'tie_import']) {
+      const localOnly = await request('/mcp', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${issued.body.token}` },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name, arguments: {} } }),
+      })
+      assert.equal(localOnly.response.status, 200)
+      assert.equal(localOnly.body.result.isError, true)
+      assert.match(localOnly.body.result.content[0].text, /本机文件操作/)
+    }
 
     const sessionCall = await request('/mcp', {
       method: 'POST',

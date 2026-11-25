@@ -58,6 +58,9 @@ enum HttpAttempt {
 }
 
 fn try_http(ws: &LocalWorkspace, message: &Value) -> HttpAttempt {
+    if local_only_request(message) {
+        return HttpAttempt::Skip;
+    }
     let Some(target) = tie_cli::backend_sync::mcp_http_target(ws.root()) else {
         return HttpAttempt::Skip;
     };
@@ -78,6 +81,17 @@ fn try_http(ws: &LocalWorkspace, message: &Value) -> HttpAttempt {
         }
         Err(ForwardFail::Down) => HttpAttempt::Miss,
         Err(ForwardFail::Target) => HttpAttempt::Skip,
+    }
+}
+
+fn local_only_request(message: &Value) -> bool {
+    match message.get("method").and_then(Value::as_str) {
+        Some("tools/list") => true,
+        Some("tools/call") => matches!(
+            message.pointer("/params/name").and_then(Value::as_str),
+            Some("tie_file_ingest" | "tie_file_open_hint" | "tie_export" | "tie_import")
+        ),
+        _ => false,
     }
 }
 
@@ -591,9 +605,26 @@ mod tests {
         assert!(names.contains(&"tie_doctor"));
         assert!(names.contains(&"tie_search"));
         assert!(names.contains(&"tie_write"));
+        for name in ["tie_file_ingest", "tie_file_open_hint", "tie_export", "tie_import"] {
+            assert!(names.contains(&name));
+        }
         let doctor = dispatch(&ws, "tools/call", &json!({"name": "tie_doctor", "arguments": {}})).expect("doctor");
         assert_eq!(doctor["isError"], false);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_file_tools_and_tool_list_stay_local() {
+        assert!(local_only_request(&json!({"method": "tools/list"})));
+        for name in ["tie_file_ingest", "tie_file_open_hint", "tie_export", "tie_import"] {
+            let message = json!({"method": "tools/call", "params": {"name": name}});
+            assert!(local_only_request(&message), "{name}");
+        }
+        for name in ["tie_search", "tie_get", "tie_write", "tie_file_list", "tie_file_get"] {
+            let message = json!({"method": "tools/call", "params": {"name": name}});
+            assert!(!local_only_request(&message), "{name}");
+        }
+        assert!(!local_only_request(&json!({"method": "initialize"})));
     }
 
     #[test]

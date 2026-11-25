@@ -4,6 +4,8 @@ import { detectCli, loadSettings } from './settings.js'
 import { findMcpToken, touchMcpToken } from './mcp-tokens.js'
 import { store } from './store.js'
 
+const LOCAL_FILE_TOOLS = new Set(['tie_file_ingest', 'tie_file_open_hint', 'tie_export', 'tie_import'])
+
 export function mcpStatus() {
   const settings = loadSettings()
   const cli = detectCli(settings.mcp.cliPath)
@@ -147,9 +149,19 @@ export async function handleMcpRequest(req, res, jwtSecret) {
     res.status(400).json({ message: 'MCP 每次只接收一条 JSON-RPC 消息' })
     return
   }
+  if (message.method === 'tools/call' && LOCAL_FILE_TOOLS.has(message.params?.name)) {
+    res.json({
+      jsonrpc: '2.0', id: message.id ?? null,
+      result: { isError: true, content: [{ type: 'text', text: '本机文件操作请通过本机 tie mcp 执行，后台 HTTP 不提供宿主文件访问。' }] },
+    })
+    return
+  }
   const workspaceDir = store.workspaceDir(workspace.id)
   try {
     const response = await exchangeWithTie(status.cli, ['--workspace', workspaceDir, 'mcp'], message)
+    if (message.method === 'tools/list' && Array.isArray(response.result?.tools)) {
+      response.result.tools = response.result.tools.filter((tool) => !LOCAL_FILE_TOOLS.has(tool.name))
+    }
     if (caller.touch) touchMcpToken(caller.touch)
     res.json(response)
   } catch (error) {
