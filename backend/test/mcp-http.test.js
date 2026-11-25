@@ -21,6 +21,10 @@ describe('mcp http from settings', { concurrency: 1 }, () => {
   let adminToken = ''
   /** @type {string} */
   let userToken = ''
+  /** @type {string} */
+  let workspaceId = ''
+  /** @type {string} */
+  let mcpToken = ''
 
   before(async () => {
     const fake = path.join(dataDir, 'fake-mcp.cjs')
@@ -29,6 +33,7 @@ describe('mcp http from settings', { concurrency: 1 }, () => {
       "process.stdin.on('data', (chunk) => { raw += chunk })",
       "process.stdin.on('end', () => {",
       '  const message = JSON.parse(raw)',
+      "  if (message.method.startsWith('notifications/')) return",
       "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { ok: true, method: message.method, tools: [{ name: 'tie_get' }, { name: 'tie_file_ingest' }, { name: 'tie_export' }] } }) + '\\n')",
       '})',
       '',
@@ -106,6 +111,7 @@ describe('mcp http from settings', { concurrency: 1 }, () => {
       body: JSON.stringify({ name: '成员的库' }),
     })
     assert.equal(mine.response.status, 201)
+    workspaceId = mine.body.id
     const foreign = await request('/api/v1/me/mcp-tokens', {
       method: 'POST',
       headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
@@ -120,6 +126,7 @@ describe('mcp http from settings', { concurrency: 1 }, () => {
     })
     assert.equal(issued.response.status, 201)
     assert.match(issued.body.token, /^tmcp_/)
+    mcpToken = issued.body.token
 
     const page = await request('/me/')
     assert.equal(page.response.status, 200)
@@ -173,6 +180,40 @@ describe('mcp http from settings', { concurrency: 1 }, () => {
         'x-tie-workspace': 'ws_missing',
       },
       body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'ping' }),
+    })
+    assert.equal(otherWorkspace.response.status, 404)
+  })
+
+  it('accepts initialized notifications without a CLI response for both authorization flows', async () => {
+    const notification = JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })
+    const missing = await request('/mcp', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: notification,
+    })
+    assert.equal(missing.response.status, 401)
+
+    for (const headers of [
+      { authorization: `Bearer ${mcpToken}` },
+      { authorization: `Bearer ${userToken}`, 'x-tie-workspace': workspaceId },
+    ]) {
+      const accepted = await request('/mcp', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: notification,
+      })
+      assert.equal(accepted.response.status, 202)
+      assert.equal(accepted.body, '')
+    }
+
+    const otherWorkspace = await request('/mcp', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${userToken}`,
+        'x-tie-workspace': 'ws_missing',
+      },
+      body: notification,
     })
     assert.equal(otherWorkspace.response.status, 404)
   })

@@ -6,7 +6,7 @@
 
 ## 进程
 
-保存之后，和后台对齐由客户端上的 **同步进程** 做，不由 MCP 做，也不由后台在自己的数据目录里再起一个进程。
+保存之后，和后台对齐由客户端上的 **同步进程** 做。本机 MCP 写入成功后也会调用与 `tie sync` 相同的同步核心，尽力对齐一次；MCP 协议本身不承担对齐逻辑，后台不会在自己的数据目录里再起同步进程。
 
 | 进程 | 怎么起 | 做什么 |
 |------|--------|--------|
@@ -76,12 +76,15 @@
 
 - MCP / `tie` CLI 读写的是某一份工作区树。写入等价于一次保存。
 - 文件登记、打开提示、目录导入/导出在本机 CLI 执行；后台 HTTP 不提供宿主文件访问。已绑定后台的本机 MCP 也会将这些操作留在本机。
-- 对齐后台由同步进程做，不由 MCP 协议做。
-- 管理员在后台「服务」里打开 MCP 后，Agent 用 `/health` 里的 `mcp.url`，并带上用户自己签发的令牌。没绑后台时，Agent 直接调用本机 `tie mcp`。
+- 本机 `tie_write`、`tie_import`、`tie_file_ingest` 成功后尽力同步一次，结果附带 `sync.state`：`synced` 为本轮成功，`pending` 为本地已保存但同步未完成，`skipped` 为未绑定服务器。写入落盘成功与同步完成是两件事；同步失败时保留本地结果，不报告为已同步。后台 HTTP 的 CLI 子进程不反向启动同步。
+- 已绑定服务器的本机 `tie mcp` 先检查 `/health`，后台正常时经 HTTP 处理页面数据请求。HTTP 异常时返回故障，**不得自动降级到本地**。
+- 降级流程：`tie_connection` 的 `action: "status"` 返回故障和 `confirmationId`；Agent 向用户说明故障及将使用本地副本，取得明确同意后，才可调用 `action: "confirm_local"` 并传入该 `confirmationId`、`confirmed: true`。许可仅适用于当前故障期；HTTP 成功后立即撤销。未绑定服务器的纯本地工作区无需此确认。
+- 授权优先使用同一服务器的 `backend-session.json` 登录会话；401 时可刷新一次。没有本地登录会话或没有 Tie 应用时，用户主动提供该服务器签发的 MCP token。它只授权令牌绑定的工作区，不替代同步进程的账号登录。
+- 无本地应用的原生 HTTP Agent 可使用 `/health` 给出的 `mcp.url`，以 `Authorization: Bearer <MCP token>` 连接。CLI 桥接可通过 `TIE_MCP_URL`（服务器根地址或 `/mcp`）与 `TIE_MCP_TOKEN` / `TIE_MCP_TOKEN_FILE` 连接，此模式无需本地工作区。凭据用客户端凭据管理或私有 token 文件保存，禁止写入页面或提交仓库。
 
 ## 已经否掉、不要再接回来的做法
 
-- 用环境变量令牌绕过注册登录
+- 用 MCP token 代替同步进程的账号登录
 - 同步进程去推 Git 远程
 - 本机再启一个 HTTP MCP，或用 `node` 跑 `packages/tie-mcp`
 - 客户端直连 S3 作为新增源
@@ -91,6 +94,6 @@
 
 - **导出闭包**：`tie export` / MCP `tie_export` / 编辑器「⇪」— 见 `page-format.md`
 - **整树携带**：`.tie` 解决方案 + 目录树；可选 `.tiez`（`tie pack` / `tie unpack`）
-- **后台 MCP HTTP**：管理员在「服务」里打开。请求由后台转给 Rust `tie-cli mcp`，工作区是令牌上绑定的那一份。没绑后台时 Agent 直接调用本机 `tie`
+- **后台 MCP HTTP**：管理员在「服务」里打开。请求由后台转给 Rust `tie-cli mcp`；MCP token 使用其绑定工作区，登录会话还须指定本人工作区。没绑后台的本机 Agent 直接使用本地 `tie mcp`
 - **只读 Web**：浏览器打开 `#/read/<pageId>`
 - **Agent 变更**：`.tie/audit/events.jsonl`；右侧栏「变更」

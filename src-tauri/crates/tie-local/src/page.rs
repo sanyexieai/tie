@@ -2,7 +2,7 @@ use crate::paths::{
     allocate_page_path, page_asset_dir, page_meta_path, resolve_workspace_file, revision_dir,
     workspace_relative,
 };
-use tie_common::fs_path::paths_equal;
+use tie_common::fs_path::{canonicalize, paths_equal};
 use tie_common::{Page, MAX_PAGE_REVISIONS};
 use std::{collections::HashMap, fs, path::Path};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -114,6 +114,7 @@ pub fn frontmatter(page: &Page) -> String {
     )
 }
 
+#[derive(Clone)]
 struct PageMeta {
     id: String,
     file: String,
@@ -248,6 +249,51 @@ fn find_meta_for_file(root: &Path, md_path: &Path) -> Option<PageMeta> {
     None
 }
 
+pub(crate) struct PageMetaIndex(HashMap<String, PageMeta>);
+
+impl PageMetaIndex {
+    pub(crate) fn load(root: &Path) -> Self {
+        let mut by_file = HashMap::new();
+        if let Ok(entries) = fs::read_dir(root.join(".tie").join("meta")) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Ok(text) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Some(meta) = parse_meta(&text) else {
+                    continue;
+                };
+                let Some(resolved) = resolve_workspace_file(root, &meta.file) else {
+                    continue;
+                };
+                // Match find_meta_for_file: the first valid sidecar for a file wins.
+                by_file.entry(Self::file_key(&resolved)).or_insert(meta);
+            }
+        }
+        Self(by_file)
+    }
+
+    fn file_key(path: &Path) -> String {
+        let path = canonicalize(path);
+        let text = path.to_string_lossy();
+        #[cfg(windows)]
+        {
+            text.replace('/', "\\").to_ascii_lowercase()
+        }
+        #[cfg(not(windows))]
+        {
+            text.into_owned()
+        }
+    }
+
+    fn get(&self, path: &Path) -> Option<PageMeta> {
+        self.0.get(&Self::file_key(path)).cloned()
+    }
+}
+
 fn page_from_meta(meta: PageMeta, markdown: String, source_id: &str) -> Page {
     let fallback = if meta.title.trim().is_empty() {
         "无标题"
@@ -328,11 +374,24 @@ pub fn read_stored_page(root: &Path, path: &Path) -> Result<Page, String> {
 
 /// Open a markdown file. Plain files get a sidecar and the bytes on disk stay as they are.
 pub fn open_or_adopt(root: &Path, path: &Path, source_id: &str) -> Result<Page, String> {
+    open_or_adopt_with_meta_index(root, path, source_id, None)
+}
+
+pub(crate) fn open_or_adopt_with_meta_index(
+    root: &Path,
+    path: &Path,
+    source_id: &str,
+    index: Option<&mut PageMetaIndex>,
+) -> Result<Page, String> {
     let content = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     if is_tie_document(&content) {
         return parse_page(&content).map_err(|error| format!("{}: {error}", path.display()));
     }
-    if let Some(meta) = find_meta_for_file(root, path) {
+    let meta = match index.as_deref() {
+        Some(index) => index.get(path),
+        None => find_meta_for_file(root, path),
+    };
+    if let Some(meta) = meta {
         return Ok(page_from_meta(meta, content, source_id));
     }
     let relative = workspace_relative(root, path)?;
@@ -344,23 +403,23 @@ pub fn open_or_adopt(root: &Path, path: &Path, source_id: &str) -> Result<Page, 
             .unwrap_or("无标题")
             .to_owned()
     });
-    let page = page_from_meta(
-        PageMeta {
-            id: new_page_id(),
-            file: relative.clone(),
-            parent_id: String::new(),
-            sort_key: 0,
-            icon: String::new(),
-            title,
-            tags: Vec::new(),
-            created_at: now.clone(),
-            updated_at: now,
-            deleted_at: String::new(),
-        },
-        content,
-        source_id,
-    );
+    let meta = PageMeta {
+        id: new_page_id(),
+        file: relative.clone(),
+        parent_id: String::new(),
+        sort_key: 0,
+        icon: String::new(),
+        title,
+        tags: Vec::new(),
+        created_at: now.clone(),
+        updated_at: now,
+        deleted_at: String::new(),
+    };
+    let page = page_from_meta(meta.clone(), content, source_id);
     write_page_meta(root, &page, &relative)?;
+    if let Some(index) = index {
+        index.0.entry(PageMetaIndex::file_key(path)).or_insert(meta);
+    }
     Ok(page)
 }
 

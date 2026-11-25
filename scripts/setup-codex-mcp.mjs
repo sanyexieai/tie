@@ -2,8 +2,8 @@
 /**
  * 把 Tie 接入 Codex / Cursor / Claude Code。
  *
- * 始终写入本机 tie mcp。进程会先试后台 HTTP，不通再用本地工作区。
- * --url 只作说明，不会把配置改成只剩 HTTP。
+ * 始终写入本机 tie mcp。后台正常时走 HTTP，降级本地前须用户确认。
+ * --url 保留为 TIE_MCP_URL，无应用时可配合私有 MCP token 文件接入。
  *
  * 用法:
  *   npm run mcp:setup -- --workspace /path/to/workspace
@@ -25,6 +25,7 @@ function parseArgs(argv) {
   const out = {
     workspace: process.env.TIE_WORKSPACE || '',
     url: process.env.TIE_MCP_URL || '',
+    tokenFile: process.env.TIE_MCP_TOKEN_FILE || '',
     name: 'tie',
     dryRun: false,
     skipSkill: false,
@@ -36,6 +37,8 @@ function parseArgs(argv) {
     else if (arg.startsWith('--workspace=')) out.workspace = arg.slice('--workspace='.length)
     else if (arg === '--url') out.url = argv[++i] || ''
     else if (arg.startsWith('--url=')) out.url = arg.slice('--url='.length)
+    else if (arg === '--token-file') out.tokenFile = argv[++i] || ''
+    else if (arg.startsWith('--token-file=')) out.tokenFile = arg.slice('--token-file='.length)
     else if (arg === '--name') out.name = argv[++i] || out.name
     else if (arg.startsWith('--name=')) out.name = arg.slice('--name='.length)
     else if (arg === '--clients') out.clients = parseClients(argv[++i] || '')
@@ -70,7 +73,8 @@ function printHelp() {
 
 Options:
   -w, --workspace <path>     Tie 工作区根目录（含 pages/）；也可设 TIE_WORKSPACE
-      --url <mcp-url>        可选。只打印后台地址，配置仍写本机 tie mcp
+      --url <mcp-url>        后台地址，保存为 TIE_MCP_URL；可不指定本地工作区
+      --token-file <path>    用户提供的 MCP token 私有文件路径，不复制令牌内容
       --clients <list>       逗号分隔：codex,cursor,claude（默认全部）
       --name <id>            MCP server 名，默认 tie
       --dry-run              只预览，不改文件
@@ -117,7 +121,7 @@ function normalizeMcpUrl(raw) {
   return url
 }
 
-function buildMcpBlock({ name, command, workspace }) {
+function buildMcpBlock({ name, command, workspace, url, tokenFile }) {
   return [
     `[mcp_servers.${name}]`,
     `command = ${escapeTomlString(command)}`,
@@ -125,16 +129,22 @@ function buildMcpBlock({ name, command, workspace }) {
     'enabled = true',
     '',
     `[mcp_servers.${name}.env]`,
-    `TIE_WORKSPACE = ${escapeTomlString(workspace)}`,
+    ...(workspace ? [`TIE_WORKSPACE = ${escapeTomlString(workspace)}`] : []),
+    ...(url ? [`TIE_MCP_URL = ${escapeTomlString(url)}`] : []),
+    ...(tokenFile ? [`TIE_MCP_TOKEN_FILE = ${escapeTomlString(tokenFile)}`] : []),
     '',
   ].join('\n')
 }
 
-function buildMcpJsonEntry({ command, workspace, withType }) {
+function buildMcpJsonEntry({ command, workspace, url, tokenFile, withType }) {
   const entry = {
     command,
     args: ['mcp'],
-    env: { TIE_WORKSPACE: workspace },
+    env: {
+      ...(workspace ? { TIE_WORKSPACE: workspace } : {}),
+      ...(url ? { TIE_MCP_URL: url } : {}),
+      ...(tokenFile ? { TIE_MCP_TOKEN_FILE: tokenFile } : {}),
+    },
   }
   if (withType) entry.type = 'stdio'
   return entry
@@ -154,7 +164,7 @@ function stripMcpServer(toml, name) {
       i += 1
       while (i < lines.length) {
         const trimmed = lines[i].trim()
-        if (trimmed.startsWith('[') && trimmed.ends_with(']')) {
+        if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
           if (isOwnSection(lines[i])) {
             i += 1
             continue
@@ -191,14 +201,14 @@ function backupFile(filePath, dryRun) {
   return backup
 }
 
-function writeCodexConfig({ name, url, command, workspace, dryRun }) {
+function writeCodexConfig({ name, url, tokenFile, command, workspace, dryRun }) {
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex')
   const configPath = path.join(codexHome, 'config.toml')
   const existing = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : ''
-  const next = upsertMcpConfig(existing, { name, url, command, workspace })
+  const next = upsertMcpConfig(existing, { name, url, tokenFile, command, workspace })
   console.log(`Codex 配置: ${configPath}`)
   if (dryRun) {
-    console.log(`\n----- Codex MCP 段 -----\n${buildMcpBlock({ name, url, command, workspace })}`)
+    console.log(`\n----- Codex MCP 段 -----\n${buildMcpBlock({ name, url, tokenFile, command, workspace })}`)
     return
   }
   fs.mkdirSync(codexHome, { recursive: true })
@@ -207,7 +217,7 @@ function writeCodexConfig({ name, url, command, workspace, dryRun }) {
   console.log(`已写入: ${configPath}`)
 }
 
-function upsertJsonMcpConfig({ configPath, name, url, command, workspace, withType, dryRun, label }) {
+function upsertJsonMcpConfig({ configPath, name, url, tokenFile, command, workspace, withType, dryRun, label }) {
   console.log(`${label} 配置: ${configPath}`)
   let root = {}
   if (fs.existsSync(configPath)) {
@@ -222,7 +232,7 @@ function upsertJsonMcpConfig({ configPath, name, url, command, workspace, withTy
   if (!root.mcpServers || typeof root.mcpServers !== 'object' || Array.isArray(root.mcpServers)) {
     root.mcpServers = {}
   }
-  root.mcpServers[name] = buildMcpJsonEntry({ url, command, workspace, withType })
+  root.mcpServers[name] = buildMcpJsonEntry({ url, tokenFile, command, workspace, withType })
   if (dryRun) {
     console.log(`\n----- ${label} mcpServers.${name} -----\n${JSON.stringify(root.mcpServers[name], null, 2)}`)
     return
@@ -287,18 +297,19 @@ function installSkills(workspace, clients, dryRun) {
 
 function main() {
   const opts = parseArgs(process.argv.slice(2))
-  if (!opts.workspace) {
+  if (!opts.workspace && !opts.url) {
     printHelp()
-    console.error('错误: 必须提供 --workspace 或环境变量 TIE_WORKSPACE')
+    console.error('错误: 请提供 --workspace 或 --url')
     process.exit(1)
   }
 
-  const workspace = validateWorkspace(opts.workspace)
+  const workspace = opts.workspace ? validateWorkspace(opts.workspace) : ''
   const url = normalizeMcpUrl(opts.url)
+  const tokenFile = opts.tokenFile ? path.resolve(opts.tokenFile) : ''
   const tieCli = resolveBundledTieCli()
-  console.log(`工作区: ${workspace}`)
+  console.log(`工作区: ${workspace || '仅连接远程服务器'}`)
   console.log(`本机 MCP: ${tieCli || '未找到'} mcp`)
-  if (url) console.log(`后台 HTTP ${url} 由 tie mcp 在运行时先试，配置里不写 url`)
+  if (url) console.log(`后台 HTTP: ${url}（保存为 TIE_MCP_URL）`)
   console.log(`客户端: ${opts.clients.join(', ')}`)
   if (!tieCli && !opts.dryRun) {
     console.error('没有 tie CLI。请先构建 tie，或设置 TIE_CLI。')
@@ -306,13 +317,14 @@ function main() {
   }
 
   if (opts.clients.includes('codex')) {
-    writeCodexConfig({ name: opts.name, url, command: tieCli, workspace, dryRun: opts.dryRun })
+    writeCodexConfig({ name: opts.name, url, tokenFile, command: tieCli, workspace, dryRun: opts.dryRun })
   }
   if (opts.clients.includes('cursor')) {
     upsertJsonMcpConfig({
       configPath: path.join(os.homedir(), '.cursor', 'mcp.json'),
       name: opts.name,
       url,
+      tokenFile,
       command: tieCli,
       workspace,
       withType: false,
@@ -325,6 +337,7 @@ function main() {
       configPath: path.join(os.homedir(), '.claude.json'),
       name: opts.name,
       url,
+      tokenFile,
       command: tieCli,
       workspace,
       withType: true,
@@ -333,13 +346,13 @@ function main() {
     })
   }
 
-  if (!opts.skipSkill) {
+  if (!opts.skipSkill && workspace) {
     const skills = installSkills(workspace, opts.clients, opts.dryRun)
     console.log(`工作区 Skill: ${path.join(workspace, '.agents', 'skills')}`)
     for (const rootDir of skills.mirrors) console.log(`已同步 Skill 根: ${rootDir}`)
   }
 
-  console.log('\n完成。客户端会启动本机 tie mcp。后台 HTTP 通的时候先走后台，不通再用本地工作区。请新开对话后使用 tie_* 工具。')
+  console.log('\n完成。客户端会启动 tie mcp。服务器正常时使用 HTTP，异常时须由用户确认后才能降级本地；无登录会话时请用户提供 MCP token。请新开对话后使用 tie_* 工具。')
 }
 
 try {

@@ -4,6 +4,7 @@ use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 mod mcp;
+mod mcp_http;
 mod sync;
 
 use tie_local::{
@@ -318,6 +319,7 @@ fn run() -> Result<(), String> {
             backend_url,
             ..
         } if login || register || logout => sync::account(login, register, logout, backend_url.as_deref(), email.as_deref(), password.as_deref(), name.as_deref()),
+        Commands::Mcp => mcp::serve(workspace_flag.as_deref(), source_id.as_deref()),
         other => {
             let root = workspace_flag
                 .ok_or("请通过 --workspace 或 TIE_WORKSPACE 指定工作区根目录或 .tie 解决方案")?;
@@ -440,10 +442,6 @@ fn run() -> Result<(), String> {
                     let strategy: ImportStrategy = strategy.parse()?;
                     print_json(&ws.import_closure(&path, strategy)?)
                 }
-                Commands::Mcp => {
-                    mcp::serve(&ws)?;
-                    Ok(())
-                }
                 Commands::Sync {
                     watch,
                     status,
@@ -512,6 +510,7 @@ fn run() -> Result<(), String> {
                 }
                 Commands::Init { .. }
                 | Commands::Open { .. }
+                | Commands::Mcp
                 | Commands::Unpack { .. } => unreachable!(),
             }
         }

@@ -183,7 +183,7 @@ tie --workspace "$OTHER_WORKSPACE" import ./pack --strategy skip
 | `export` / `import` | 页面闭包（子集分享，不是整树 pack） |
 | `format check` | 格式校验 |
 
-页面读写只走 `tie` CLI（无 JS 回退）。缺二进制时用 Skill `tie-upgrade-cli` 或 `tie_doctor`。Agent 只在绑定了已开启 MCP HTTP 的后台时使用 HTTP 地址；否则直接调用本机 `tie`。不要用 `node` 启动 `server.js`。
+页面读写只走 Rust `tie` CLI（无 JS 回退），后台 HTTP 也调用同一 CLI。缺二进制时用 Skill `tie-upgrade-cli` 或 `tie_doctor`。已有本地工作区的 Agent 保留 `tie mcp` 桥接，服务器健康时走 HTTP，异常降级须用户确认；无应用的远程 Agent 可用用户提供的 MCP token 直接连接 `/mcp`。连接与同步规则见 [`sync.md`](./sync.md#与-mcp--agent)。不要用 `node` 启动 `server.js`。
 
 输出默认为 JSON。`write` 把元数据写入 `.tie/meta/`，更新前把旧内容放入 `.tie/history/`。旧的 Tie 头仍能读，下次保存时去掉。
 

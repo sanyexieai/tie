@@ -167,7 +167,7 @@ Tie 内的页面 ID 与跨源链接写在 Markdown Frontmatter 中；迁移目�
 - 浏览器模式不支持 `tie://asset/` 真实附件存储
 - Linux AppImage 安装包尚未提供（当前 Release 为 deb/rpm；Windows 为 msi/nsis）
 - 桌面版支持应用内自动更新（默认 PackHub，GitHub 为回退；需 Release 已签名）；浏览器演示模式与 Android 精简版不支持
-- Agent 知识库：本地 Agent 始终拉起 `tie mcp`。进程先试后台 HTTP，不通再用本地工作区。`packages/tie-mcp` 只放 Skill 模板
+- Agent 知识库：已有本地工作区的 Agent 使用 `tie mcp`。绑定服务器后先检查健康状态，正常走 HTTP；异常需用户确认才降级本地。无应用的远程 Agent 可用用户提供的 MCP token 直接连接 HTTP。`packages/tie-mcp` 只放 Skill 模板
 
 ## 运行
 
@@ -329,13 +329,13 @@ npm run tauri:android:build
 
 ### 可选：Agent 知识库（Codex / Cursor / Claude Code）
 
-- **绑了后台且 MCP HTTP 在跑**：存储设置 →「Agent 知识库」→「接入所选客户端」，写入后台地址
-- **没绑后台**：同一入口去掉旧的 node 启动项，Agent 直接调用本机 `tie`
+- **已有本地工作区**：存储设置 →「Agent 知识库」→「接入所选客户端」，配置本机 `tie mcp`。绑定后台时健康检查通过后走 HTTP，否则需用户确认降级；纯本地工作区直接在本地处理
+- **没有本地应用**：用户提供服务器签发的 MCP token，原生 HTTP Agent 直接连接 `/mcp`；也可只安装 CLI，通过 `TIE_MCP_URL` 和私有 `TIE_MCP_TOKEN_FILE` 桥接
 - **命令行**：
 
 ```bash
 npm run mcp:setup -- --workspace /path/to/workspace --url http://后台主机:8787/mcp
-# 不传 --url：只去掉旧的 node 启动项，并打印本机 tie
+# --url 保留为桥接的 TIE_MCP_URL；不传时从工作区绑定读取
 ```
 
 配置与 Skill 见 [`packages/tie-mcp/README.md`](packages/tie-mcp/README.md)。

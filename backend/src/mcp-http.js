@@ -149,6 +149,13 @@ export async function handleMcpRequest(req, res, jwtSecret) {
     res.status(400).json({ message: 'MCP 每次只接收一条 JSON-RPC 消息' })
     return
   }
+  // CLI 不回应通知；HTTP 在鉴权后直接确认接收，不能把空 stdout 当作上游失败。
+  if (message.jsonrpc === '2.0' && !Object.hasOwn(message, 'id')
+      && typeof message.method === 'string' && message.method.startsWith('notifications/')) {
+    if (caller.touch) touchMcpToken(caller.touch)
+    res.status(202).end()
+    return
+  }
   if (message.method === 'tools/call' && LOCAL_FILE_TOOLS.has(message.params?.name)) {
     res.json({
       jsonrpc: '2.0', id: message.id ?? null,

@@ -3,8 +3,9 @@
 use crate::io::save_page_to_root;
 use crate::links::rewrite_legacy_workspace_hrefs;
 use crate::page::{
-    frontmatter, is_tie_document, new_page_id, normalize_page_sources, open_or_adopt, parse_page,
-    read_stored_page, remove_page_assets, remove_page_meta,
+    frontmatter, is_tie_document, new_page_id, normalize_page_sources,
+    open_or_adopt_with_meta_index, parse_page, read_stored_page, remove_page_assets,
+    remove_page_meta, PageMetaIndex,
 };
 use crate::paths::{find_page_file, revision_dir};
 use crate::solution::{ensure_solution_file, find_solution_file, resolve_workspace_entry};
@@ -149,8 +150,14 @@ impl LocalWorkspace {
 
     pub fn load_all(&self, include_deleted: bool) -> Result<Vec<Page>, String> {
         let mut pages = Vec::new();
+        let mut meta_index = PageMetaIndex::load(&self.root);
         for file in self.list_page_files()? {
-            match open_or_adopt(&self.root, &file, &self.default_source_id) {
+            match open_or_adopt_with_meta_index(
+                &self.root,
+                &file,
+                &self.default_source_id,
+                Some(&mut meta_index),
+            ) {
                 Ok(page) => {
                     if include_deleted || page.deleted_at.is_none() {
                         pages.push(self.hydrate_page_source(page));
@@ -988,6 +995,73 @@ mod tests {
         let sol = ws.solution_path();
         let opened = LocalWorkspace::open_entry(&sol, None).unwrap();
         assert_eq!(opened.default_source_id(), "src_local_openentrytest01");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_all_preserves_sidecar_priority_legacy_and_external_changes() {
+        let dir = env::temp_dir().join(format!("tie-load-index-{}", new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_local_index").unwrap();
+        let saved = ws.write_page(WritePageInput {
+            title: Some("Registered".into()),
+            markdown: Some("registered body".into()),
+            tags: Some(vec!["initial".into()]),
+            ..Default::default()
+        }).unwrap();
+        let registered = dir.join(&saved.path);
+        let original_meta = crate::paths::page_meta_path(&dir, &saved.page.id);
+        let duplicate_meta = crate::paths::page_meta_path(&dir, "pg_duplicate");
+        fs::write(&duplicate_meta, fs::read_to_string(&original_meta).unwrap()
+            .replace(&format!("id: {}\n", saved.page.id), "id: pg_duplicate\n")).unwrap();
+        fs::write(dir.join(".tie/meta/invalid"), "id: pg_invalid\nfile: ../outside.md\n").unwrap();
+        let expected = crate::page::open_or_adopt(&dir, &registered, "src_local_index").unwrap();
+
+        let mut legacy = expected.clone();
+        legacy.id = "pg_legacy_index".into();
+        legacy.markdown = "# Legacy\n\nlegacy body\n".into();
+        let legacy_file = dir.join("pages/legacy.md");
+        let legacy_bytes = frontmatter(&legacy);
+        fs::write(&legacy_file, &legacy_bytes).unwrap();
+        let mut ignored_sidecar = legacy.clone();
+        ignored_sidecar.id = "pg_ignored_legacy".into();
+        crate::page::write_page_meta(&dir, &ignored_sidecar, "pages/legacy.md").unwrap();
+
+        let plain_file = dir.join("pages/unregistered.md");
+        let plain_bytes = "---\r\ntitle: Foreign YAML\r\n---\r\n\r\nplain body\r\n";
+        fs::write(&plain_file, plain_bytes).unwrap();
+        let pages = ws.load_all(false).unwrap();
+        assert_eq!(pages.len(), 3);
+        assert!(pages.iter().any(|page| page.id == expected.id && page.tags == expected.tags));
+        assert!(pages.iter().any(|page| page.id == legacy.id && page.markdown == legacy.markdown));
+        let adopted = pages.iter().find(|page| page.markdown == plain_bytes).unwrap();
+        assert!(crate::paths::page_meta_path(&dir, &adopted.id).is_file());
+        assert_eq!(fs::read_to_string(&plain_file).unwrap(), plain_bytes);
+        assert_eq!(fs::read_to_string(&legacy_file).unwrap(), legacy_bytes);
+
+        let winning_meta = crate::paths::page_meta_path(&dir, &expected.id);
+        let changed = fs::read_to_string(&winning_meta).unwrap().replace("tags: [initial]", "tags: [revised]");
+        fs::write(&winning_meta, changed).unwrap();
+        let revised = ws.list_recent(10, Some("revised")).unwrap();
+        assert_eq!(revised.len(), 1);
+        assert_eq!(revised[0].page.id, expected.id);
+        assert!(ws.load_all(false).unwrap().iter().any(|page| page.id == adopted.id));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_all_reuses_new_sidecars_for_symlink_aliases() {
+        let dir = env::temp_dir().join(format!("tie-load-alias-{}", new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_local_alias").unwrap();
+        let file = dir.join("pages/plain.md");
+        fs::write(&file, "# Same file\n\nbody\n").unwrap();
+        std::os::unix::fs::symlink(&file, dir.join("pages/alias.md")).unwrap();
+        let pages = ws.load_all(false).unwrap();
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].id, pages[1].id);
+        assert_eq!(fs::read_dir(dir.join(".tie/meta")).unwrap().count(), 1);
+        let again = ws.load_all(false).unwrap();
+        assert!(again.iter().all(|page| page.id == pages[0].id));
         let _ = fs::remove_dir_all(&dir);
     }
 }

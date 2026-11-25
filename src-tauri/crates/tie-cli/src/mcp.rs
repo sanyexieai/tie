@@ -1,127 +1,309 @@
 use std::io::{Read, Write};
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tie_local::{ExportOptions, ImportStrategy, LocalWorkspace, WritePageInput, DEFAULT_EXPORT_DEPTH};
+use tie_local::{
+    ExportOptions, ImportStrategy, LocalWorkspace, WritePageInput, DEFAULT_EXPORT_DEPTH,
+};
 
-pub fn serve(ws: &LocalWorkspace) -> Result<(), String> {
+pub fn serve(root: Option<&Path>, source_id: Option<&str>) -> Result<(), String> {
+    let mut runtime = McpRuntime::new(root, source_id)?;
     let mut stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut buf = Vec::new();
-    let mut http_down_until: Option<Instant> = None;
-    eprintln!(
-        "[tie] mcp ready · workspace={}",
-        ws.root().display()
-    );
-    loop {
-        let Some(message) = read_message(&mut stdin, &mut buf)? else {
-            return Ok(());
-        };
-        if message.get("id").is_some() {
-            let cooled = http_down_until.is_some_and(|until| Instant::now() < until);
-            if !cooled {
-                match try_http(ws, &message) {
-                    HttpAttempt::Hit(response) => {
-                        if http_down_until.take().is_some() {
-                            eprintln!("[tie] mcp 后台 HTTP 已恢复");
-                        }
-                        write_message(&mut stdout, &response)?;
-                        continue;
-                    }
-                    HttpAttempt::Miss => {
-                        if http_down_until.is_none() {
-                            eprintln!("[tie] mcp 后台 HTTP 不通，改用本地工作区");
-                        }
-                        http_down_until = Some(Instant::now() + Duration::from_secs(15));
-                    }
-                    HttpAttempt::Skip => {}
-                }
-            }
-        }
-        if let Some(response) = dispatch_message(ws, &message) {
+    eprintln!("[tie] mcp ready");
+    while let Some(message) = read_message(&mut stdin, &mut buf)? {
+        if let Some(response) = runtime.handle(&message) {
             write_message(&mut stdout, &response)?;
         }
     }
+    Ok(())
 }
 
-enum ForwardFail {
-    Down,
-    Auth,
-    Target,
+struct McpRuntime {
+    workspace: Option<LocalWorkspace>,
+    http: Result<Option<crate::mcp_http::HttpTransport>, String>,
+    server: bool,
+    fallback_confirmed: bool,
+    pending: Option<(String, String)>,
+    confirmation_number: u64,
 }
 
-enum HttpAttempt {
-    Hit(Value),
-    Miss,
-    Skip,
-}
-
-fn try_http(ws: &LocalWorkspace, message: &Value) -> HttpAttempt {
-    if local_only_request(message) {
-        return HttpAttempt::Skip;
+impl McpRuntime {
+    fn new(root: Option<&Path>, source_id: Option<&str>) -> Result<Self, String> {
+        let workspace = root
+            .map(|root| LocalWorkspace::open_entry(root, source_id))
+            .transpose()?;
+        let server = std::env::var("TIE_MCP_VIA").ok().as_deref() == Some("http");
+        let http = if server {
+            Ok(None)
+        } else {
+            crate::mcp_http::HttpTransport::from_workspace(
+                workspace.as_ref().map(LocalWorkspace::root),
+            )
+        };
+        Ok(Self {
+            workspace,
+            http,
+            server,
+            fallback_confirmed: false,
+            pending: None,
+            confirmation_number: 0,
+        })
     }
-    let Some(target) = tie_cli::backend_sync::mcp_http_target(ws.root()) else {
-        return HttpAttempt::Skip;
-    };
-    let Ok(session) = tie_cli::backend_sync::ensure_session(false) else {
-        return HttpAttempt::Skip;
-    };
-    match post_mcp(&target.url, &session.endpoint, &session.access_token, &target.workspace_id, message) {
-        Ok(value) => HttpAttempt::Hit(value),
-        Err(ForwardFail::Auth) => {
-            let Ok(session) = tie_cli::backend_sync::ensure_session(true) else {
-                return HttpAttempt::Miss;
-            };
-            match post_mcp(&target.url, &session.endpoint, &session.access_token, &target.workspace_id, message) {
-                Ok(value) => HttpAttempt::Hit(value),
-                Err(ForwardFail::Target) => HttpAttempt::Skip,
-                Err(_) => HttpAttempt::Miss,
+
+    fn handle(&mut self, message: &Value) -> Option<Value> {
+        if message.get("id").is_none()
+            || message
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .starts_with("notifications/")
+        {
+            return None;
+        }
+        let method = message.get("method").and_then(Value::as_str).unwrap_or("");
+        let params = message.get("params").cloned().unwrap_or(json!({}));
+        let id = message["id"].clone();
+        // Keep discovery available so an Agent can ask for authorization or fallback approval.
+        if method == "initialize" {
+            let mut response = self.remote(message).ok().flatten().unwrap_or_else(
+                || json!({ "jsonrpc": "2.0", "id": id, "result": initialize(&params) }),
+            );
+            if let Some(result) = response.get_mut("result") {
+                result["instructions"] = json!(if self.server {
+                    "当前由服务器 HTTP MCP 提供服务。请用 tie_doctor 确认 transport=http；本机文件导入与导出请由本地 CLI 执行。"
+                } else {
+                    "有服务器绑定时，内容请求优先使用 HTTP。HTTP 异常不会自动切换本地；调用 tie_connection 查看原因，并先向用户确认，获准后才能 confirm_local。无本地登录会话时请用户提供 MCP token。工具列表成功不代表 HTTP 已连通，请看 tie_doctor.transport。"
+                });
+            }
+            return Some(response);
+        }
+        if method == "tools/list" {
+            let mut tools = tool_defs();
+            if self.server {
+                tools.retain(|tool| tool["name"] != "tie_connection");
+            } else if self.workspace.is_none() {
+                tools.retain(|tool| !host_file_tool(tool["name"].as_str().unwrap_or("")));
+            }
+            return Some(json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tools } }));
+        }
+        if method == "tools/call" && params["name"] == "tie_connection" && !self.server {
+            let result = self.connection(&params["arguments"]);
+            return Some(
+                json!({ "jsonrpc": "2.0", "id": id, "result": match result { Ok(value) => tool_ok(value), Err(error) => tool_err(error) } }),
+            );
+        }
+        if !local_only_request(message) {
+            match self.remote(message) {
+                Ok(Some(response)) => return Some(response),
+                Ok(None) => {}
+                Err(reason) if !self.fallback_confirmed => {
+                    let details = self.fallback_error(&reason);
+                    return Some(if method == "tools/call" {
+                        json!({ "jsonrpc": "2.0", "id": id, "result": tool_ok_error(details) })
+                    } else {
+                        json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32001, "message": "HTTP MCP 不可用，未自动降级", "data": details } })
+                    });
+                }
+                Err(_) => {}
             }
         }
-        Err(ForwardFail::Down) => HttpAttempt::Miss,
-        Err(ForwardFail::Target) => HttpAttempt::Skip,
+        let Some(ws) = &self.workspace else {
+            return Some(
+                json!({ "jsonrpc": "2.0", "id": id, "result": tool_err("未配置本地工作区或 HTTP 服务器。远程接入请提供 TIE_MCP_URL 和用户签发的 MCP token。".into()) }),
+            );
+        };
+        let mut response = dispatch_message(ws, message)?;
+        if !self.server
+            && local_write_request(message)
+            && response.pointer("/result/isError").and_then(Value::as_bool) == Some(false)
+        {
+            attach_sync(&mut response, sync_after_write(ws));
+        }
+        Some(response)
     }
+
+    fn remote(&mut self, message: &Value) -> Result<Option<Value>, String> {
+        if !self.server {
+            let updated = crate::mcp_http::HttpTransport::from_workspace(
+                self.workspace.as_ref().map(LocalWorkspace::root),
+            );
+            let endpoint = |http: &Result<Option<crate::mcp_http::HttpTransport>, String>| {
+                http.as_ref()
+                    .ok()
+                    .and_then(Option::as_ref)
+                    .map(|http| http.endpoint().to_owned())
+            };
+            if endpoint(&updated) != endpoint(&self.http) {
+                self.fallback_confirmed = false;
+                self.pending = None;
+            }
+            self.http = updated;
+        }
+        let response = match &self.http {
+            Ok(Some(http)) => http.request(message),
+            Ok(None) => return Ok(None),
+            Err(error) => Err(error.clone()),
+        };
+        match response {
+            Ok(response) => {
+                self.fallback_confirmed = false;
+                self.pending = None;
+                Ok(Some(response))
+            }
+            Err(error) => {
+                if self.pending.is_none() {
+                    self.confirmation_number += 1;
+                    self.pending = Some((
+                        format!("local-{}-{}", std::process::id(), self.confirmation_number),
+                        error.clone(),
+                    ));
+                } else if let Some((_, reason)) = &mut self.pending {
+                    *reason = error.clone();
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn fallback_error(&self, reason: &str) -> Value {
+        json!({
+            "code": if self.workspace.is_some() { "HTTP_FALLBACK_CONFIRMATION_REQUIRED" } else { "HTTP_CONNECTION_REQUIRED" },
+            "reason": reason,
+            "transport": "http",
+            "authorizationRequired": reason.starts_with("MCP_AUTH_"),
+            "localFallbackAllowed": false,
+            "confirmationId": self.workspace.as_ref().and_then(|_| self.pending.as_ref().map(|(id, _)| id)),
+            "next": if reason.starts_with("MCP_AUTH_") {
+                "请由用户主动提供此服务器的 MCP token（私有 TIE_MCP_TOKEN_FILE），或重新登录。没有本地工作区时无法降级；有本地工作区且用户明确同意降级后，才可调用 tie_connection(action=confirm_local, confirmationId=本次编号, confirmed=true)。禁止 Agent 自行确认。"
+            } else if self.workspace.is_some() {
+                "尚未读写本地。请向用户说明 HTTP 失败原因与本地数据可能尚未同步，询问是否同意降级。用户明确同意后调用 tie_connection(action=confirm_local, confirmationId=本次编号, confirmed=true)，再重试原请求；禁止由 Agent 自行确认。"
+            } else {
+                "没有本地工作区，无法降级。请恢复服务器连接；没有可用登录会话时，由用户主动提供 MCP token。"
+            }
+        })
+    }
+
+    fn connection(&mut self, args: &Value) -> Result<Value, String> {
+        match str_arg(args, "action").unwrap_or("status") {
+            "confirm_local" => {
+                let (id, _) = self
+                    .pending
+                    .as_ref()
+                    .ok_or("没有等待用户确认的 HTTP 故障")?;
+                if self.workspace.is_none() {
+                    return Err("没有本地工作区，无法降级".into());
+                }
+                if args.get("confirmed").and_then(Value::as_bool) != Some(true)
+                    || str_arg(args, "confirmationId") != Some(id.as_str())
+                {
+                    return Err("只有用户明确同意本次降级后，才能携带对应 confirmationId 和 confirmed=true 确认".into());
+                }
+                self.fallback_confirmed = true;
+                Ok(
+                    json!({ "transport": "local", "confirmed": true, "scope": "当前故障期；HTTP 恢复后自动撤销", "next": "重试原请求；仍会先尝试 HTTP，失败时才使用本地工作区" }),
+                )
+            }
+            "status" => {
+                let probe =
+                    json!({ "jsonrpc": "2.0", "id": "tie-connection-probe", "method": "ping" });
+                match self.remote(&probe) {
+                    Ok(Some(_)) => {
+                        let http = self
+                            .http
+                            .as_ref()
+                            .ok()
+                            .and_then(Option::as_ref)
+                            .expect("remote");
+                        Ok(
+                            json!({ "ok": true, "transport": "http", "endpoint": http.endpoint(), "authorization": http.auth_kind(), "localFallbackAllowed": false }),
+                        )
+                    }
+                    Ok(None) => Ok(
+                        json!({ "ok": self.workspace.is_some(), "transport": "local", "mode": "local_only", "workspaceConfigured": self.workspace.is_some() }),
+                    ),
+                    Err(error) => {
+                        let mut value = self.fallback_error(&error);
+                        value["localFallbackAllowed"] = json!(self.fallback_confirmed);
+                        Ok(value)
+                    }
+                }
+            }
+            _ => Err("action 只能是 status 或 confirm_local".into()),
+        }
+    }
+}
+
+fn initialize(params: &Value) -> Value {
+    json!({
+        "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2025-06-18"),
+        "capabilities": { "tools": { "listChanged": false } },
+        "serverInfo": { "name": "tie", "version": env!("CARGO_PKG_VERSION") }
+    })
+}
+
+fn host_file_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "tie_file_ingest" | "tie_file_open_hint" | "tie_export" | "tie_import"
+    )
 }
 
 fn local_only_request(message: &Value) -> bool {
-    match message.get("method").and_then(Value::as_str) {
-        Some("tools/list") => true,
-        Some("tools/call") => matches!(
+    message.get("method").and_then(Value::as_str) == Some("tools/list")
+        || (message.get("method").and_then(Value::as_str) == Some("tools/call")
+            && host_file_tool(
+                message
+                    .pointer("/params/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            ))
+}
+
+fn local_write_request(message: &Value) -> bool {
+    message.get("method").and_then(Value::as_str) == Some("tools/call")
+        && matches!(
             message.pointer("/params/name").and_then(Value::as_str),
-            Some("tie_file_ingest" | "tie_file_open_hint" | "tie_export" | "tie_import")
-        ),
-        _ => false,
+            Some("tie_write" | "tie_import" | "tie_file_ingest")
+        )
+}
+
+fn tool_ok_error(value: Value) -> Value {
+    let mut result = tool_ok(value);
+    result["isError"] = json!(true);
+    result
+}
+
+fn sync_after_write(ws: &LocalWorkspace) -> Value {
+    if tie_cli::backend_sync::mcp_http_target(ws.root()).is_none() {
+        return json!({ "state": "skipped", "reason": "没有绑定服务器，已保存到本地" });
+    }
+    match tie_cli::backend_sync::sync_workspace(ws) {
+        Ok(report) => {
+            json!({ "state": if report.conflicts.is_empty() { "synced" } else { "pending" }, "report": report })
+        }
+        Err(_) => {
+            json!({ "state": "pending", "reason": "本地写入成功，同步未完成。请检查服务器与登录状态后重试 tie sync。" })
+        }
     }
 }
 
-fn post_mcp(url: &str, session_endpoint: &str, token: &str, workspace_id: &str, message: &Value) -> Result<Value, ForwardFail> {
-    if !tie_cli::backend_sync::same_backend_endpoint(url, session_endpoint) {
-        return Err(ForwardFail::Target);
+fn attach_sync(response: &mut Value, sync: Value) {
+    if let Some(content) = response
+        .pointer_mut("/result/content")
+        .and_then(Value::as_array_mut)
+    {
+        if let Some(text) = content.iter_mut().find_map(|item| item.get_mut("text")) {
+            if let Some(mut value) = text
+                .as_str()
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            {
+                value["sync"] = sync;
+                *text = json!(serde_json::to_string_pretty(&value).unwrap_or_default());
+            }
+        }
     }
-    let endpoint = format!("{}/mcp", url.trim_end_matches('/'));
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .map_err(|_| ForwardFail::Down)?;
-    let response = client
-        .post(endpoint)
-        .bearer_auth(token)
-        .header("x-tie-workspace", workspace_id)
-        .json(message)
-        .send();
-    let response = match response {
-        Ok(response) => response,
-        Err(_) => return Err(ForwardFail::Down),
-    };
-    let status = response.status().as_u16();
-    if status == 401 || status == 403 {
-        return Err(ForwardFail::Auth);
-    }
-    if !(200..300).contains(&status) {
-        return Err(ForwardFail::Down);
-    }
-    response.json().map_err(|_| ForwardFail::Down)
 }
 
 fn dispatch_message(ws: &LocalWorkspace, message: &Value) -> Option<Value> {
@@ -143,11 +325,7 @@ fn dispatch_message(ws: &LocalWorkspace, message: &Value) -> Option<Value> {
 
 fn dispatch(ws: &LocalWorkspace, method: &str, params: &Value) -> Result<Value, String> {
     match method {
-        "initialize" => Ok(json!({
-            "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2024-11-05"),
-            "capabilities": { "tools": { "listChanged": false } },
-            "serverInfo": { "name": "tie", "version": env!("CARGO_PKG_VERSION") }
-        })),
+        "initialize" => Ok(initialize(params)),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_defs() })),
         "tools/call" => {
@@ -178,6 +356,11 @@ fn tool_err(error: String) -> Value {
 
 fn tool_defs() -> Vec<Value> {
     vec![
+        tool("tie_connection", "查看服务器连接。HTTP 异常需要先向用户询问是否降级；仅在用户明确同意后调用 confirm_local，禁止 Agent 自行确认。", obj_props(json!({
+            "action": { "type": "string", "enum": ["status", "confirm_local"] },
+            "confirmationId": { "type": "string" },
+            "confirmed": { "type": "boolean", "description": "仅在用户明确同意当前故障期降级后设为 true" }
+        }))),
         tool("tie_doctor", "诊断本机 tie MCP 与工作区。升级出问题时先调这个。", json!({ "type": "object", "properties": {} })),
         tool("tie_list_recent", "列出最近更新的页面", obj_props(json!({
             "limit": { "type": "integer", "description": "返回条数，默认 20" },
@@ -265,7 +448,9 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
         }
         "tie_get" => {
             let key = required_str(args, "id_or_title")?;
-            let page = ws.resolve(key)?.ok_or_else(|| format!("页面不存在：{key}"))?;
+            let page = ws
+                .resolve(key)?
+                .ok_or_else(|| format!("页面不存在：{key}"))?;
             let mut value = serde_json::to_value(&page).map_err(|error| error.to_string())?;
             value["path"] = json!(format!("pages/{}.md", page.id));
             value["backend"] = json!("tie");
@@ -276,37 +461,62 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
             Ok(serde_json::to_value(ws.related(key)?).map_err(|error| error.to_string())?)
         }
         "tie_write" => write_page(ws, args),
-        "tie_tree" => Ok(serde_json::to_value(ws.tree(str_arg(args, "root"))?).map_err(|e| e.to_string())?),
+        "tie_tree" => {
+            Ok(serde_json::to_value(ws.tree(str_arg(args, "root"))?).map_err(|e| e.to_string())?)
+        }
         "tie_export" => {
             let page = required_str(args, "page")?;
             let depth = int_arg(args, "depth", DEFAULT_EXPORT_DEPTH);
-            let with_children = args.get("withChildren").and_then(Value::as_bool).unwrap_or(true);
-            let out = str_arg(args, "out").map(Path::new).map(|path| path.to_path_buf());
-            let summary = ws.export_closure(page, &ExportOptions { depth, with_children, out })?;
+            let with_children = args
+                .get("withChildren")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let out = str_arg(args, "out")
+                .map(Path::new)
+                .map(|path| path.to_path_buf());
+            let summary = ws.export_closure(
+                page,
+                &ExportOptions {
+                    depth,
+                    with_children,
+                    out,
+                },
+            )?;
             Ok(serde_json::to_value(summary).map_err(|error| error.to_string())?)
         }
         "tie_import" => {
             let path = required_str(args, "path")?;
-            let strategy = str_arg(args, "strategy").unwrap_or("skip").parse::<ImportStrategy>()?;
-            Ok(serde_json::to_value(ws.import_closure(Path::new(path), strategy)?).map_err(|e| e.to_string())?)
+            let strategy = str_arg(args, "strategy")
+                .unwrap_or("skip")
+                .parse::<ImportStrategy>()?;
+            Ok(
+                serde_json::to_value(ws.import_closure(Path::new(path), strategy)?)
+                    .map_err(|e| e.to_string())?,
+            )
         }
         "tie_file_ingest" => {
             let path = required_str(args, "path")?;
             let mode = str_arg(args, "mode").unwrap_or("link");
-            ws.files().ingest(mode, Path::new(path), str_arg(args, "title"))
+            ws.files()
+                .ingest(mode, Path::new(path), str_arg(args, "title"))
         }
         "tie_file_get" => {
             let id = required_str(args, "fileId")?;
-            ws.files().get(id)?.ok_or_else(|| format!("文件资源不存在：{id}"))
+            ws.files()
+                .get(id)?
+                .ok_or_else(|| format!("文件资源不存在：{id}"))
         }
         "tie_file_list" => {
             let limit = int_arg(args, "limit", 50);
-            let results = ws.files().list(str_arg(args, "query"), str_arg(args, "ext"), limit)?;
+            let results = ws
+                .files()
+                .list(str_arg(args, "query"), str_arg(args, "ext"), limit)?;
             Ok(json!({ "workspace": ws.root().display().to_string(), "results": results }))
         }
         "tie_file_open_hint" => {
             let id = required_str(args, "fileId")?;
-            Ok(serde_json::to_value(ws.files().open_hint(id)?).map_err(|error| error.to_string())?)
+            Ok(serde_json::to_value(ws.files().open_hint(id)?)
+                .map_err(|error| error.to_string())?)
         }
         "tie_migration_status" => migration_status(ws, args),
         _ => Err(format!("未知工具：{name}")),
@@ -315,7 +525,9 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
 
 fn doctor(ws: &LocalWorkspace) -> Result<Value, String> {
     let report = ws.check_format()?;
-    let exe = std::env::current_exe().ok().map(|path| path.display().to_string());
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|path| path.display().to_string());
     let ok = report.errors.is_empty();
     Ok(json!({
         "ok": ok,
@@ -341,7 +553,10 @@ fn doctor(ws: &LocalWorkspace) -> Result<Value, String> {
 fn write_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
     let markdown = str_owned(args, "markdown").or_else(|| str_owned(args, "body"));
     let tags = args.get("tags").and_then(Value::as_array).map(|items| {
-        items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect::<Vec<_>>()
+        items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
     });
     let parent_id = match args.get("parentId") {
         None => None,
@@ -356,26 +571,34 @@ fn write_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
         parent_id,
         parent_title: str_owned(args, "parentTitle"),
         kind: str_owned(args, "kind"),
-        match_title: args.get("matchTitle").and_then(Value::as_bool).unwrap_or(false),
+        match_title: args
+            .get("matchTitle")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         icon: str_owned(args, "icon"),
     })?;
-    append_audit(ws.root(), &json!({
-        "type": "write",
-        "actor": resolve_actor(str_arg(args, "actor")),
-        "pageId": saved.page.id,
-        "title": saved.page.title,
-        "status": "applied"
-    }));
+    append_audit(
+        ws.root(),
+        &json!({
+            "type": "write",
+            "actor": resolve_actor(str_arg(args, "actor")),
+            "pageId": saved.page.id,
+            "title": saved.page.title,
+            "status": "applied"
+        }),
+    );
     Ok(serde_json::to_value(saved).map_err(|error| error.to_string())?)
 }
 
 fn flatten_hits(hits: Vec<tie_local::SearchHit>) -> Vec<Value> {
-    hits.into_iter().filter_map(|hit| {
-        let mut page = serde_json::to_value(hit.page).ok()?;
-        page["snippet"] = json!(hit.snippet);
-        page["score"] = json!(hit.score);
-        Some(page)
-    }).collect()
+    hits.into_iter()
+        .filter_map(|hit| {
+            let mut page = serde_json::to_value(hit.page).ok()?;
+            page["snippet"] = json!(hit.snippet);
+            page["score"] = json!(hit.score);
+            Some(page)
+        })
+        .collect()
 }
 
 fn migration_status(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
@@ -413,7 +636,9 @@ fn migration_status(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> 
             if remaining_pages.len() >= limit {
                 break;
             }
-            let Some(page) = ws.resolve(&summary.id)? else { continue };
+            let Some(page) = ws.resolve(&summary.id)? else {
+                continue;
+            };
             let hrefs = file_hrefs(&page.markdown);
             if hrefs.is_empty() {
                 continue;
@@ -459,7 +684,9 @@ fn file_hrefs(markdown: &str) -> Vec<String> {
     while let Some(index) = rest.find("file://") {
         let start = index;
         let tail = &rest[start..];
-        let end = tail.find(|ch: char| ch.is_whitespace() || matches!(ch, ')' | ']' | '>' | '\'' | '"')).unwrap_or(tail.len());
+        let end = tail
+            .find(|ch: char| ch.is_whitespace() || matches!(ch, ')' | ']' | '>' | '\'' | '"'))
+            .unwrap_or(tail.len());
         let href = tail[..end].to_owned();
         if !out.contains(&href) {
             out.push(href);
@@ -481,7 +708,11 @@ fn append_audit(root: &Path, event: &Value) {
         }
     }
     let path = dir.join("events.jsonl");
-    let mut file = match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         Ok(file) => file,
         Err(_) => return,
     };
@@ -490,7 +721,10 @@ fn append_audit(root: &Path, event: &Value) {
 
 fn chrono_stamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     secs.to_string()
 }
 
@@ -498,15 +732,25 @@ fn resolve_actor(explicit: Option<&str>) -> String {
     let raw = explicit.unwrap_or("").trim();
     let generic = raw.is_empty()
         || raw == "我"
-        || matches!(raw.to_ascii_lowercase().as_str(), "me" | "i" | "user" | "myself" | "mcp" | "mcp-http");
+        || matches!(
+            raw.to_ascii_lowercase().as_str(),
+            "me" | "i" | "user" | "myself" | "mcp" | "mcp-http"
+        );
     if !generic {
         return raw.to_owned();
     }
-    std::env::var("TIE_ACTOR").ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()).unwrap_or_else(|| "mcp".into())
+    std::env::var("TIE_ACTOR")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "mcp".into())
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty())
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn str_owned(args: &Value, key: &str) -> Option<String> {
@@ -518,7 +762,11 @@ fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
 }
 
 fn int_arg(args: &Value, key: &str, default: usize) -> usize {
-    args.get(key).and_then(Value::as_u64).map(|value| value as usize).unwrap_or(default).max(1)
+    args.get(key)
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(default)
+        .max(1)
 }
 
 fn write_message(stdout: &mut impl Write, value: &Value) -> Result<(), String> {
@@ -551,7 +799,10 @@ fn read_message(stdin: &mut impl Read, buf: &mut Vec<u8>) -> Result<Option<Value
 }
 
 fn take_message(buf: &mut Vec<u8>) -> Result<Option<Value>, String> {
-    let start = buf.iter().position(|byte| !byte.is_ascii_whitespace()).unwrap_or(buf.len());
+    let start = buf
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(buf.len());
     if start > 0 {
         buf.drain(..start);
     }
@@ -564,31 +815,44 @@ fn take_message(buf: &mut Vec<u8>) -> Result<Option<Value>, String> {
         };
         let line: Vec<u8> = buf.drain(..=end).collect();
         let text = String::from_utf8_lossy(&line);
-        return serde_json::from_str(text.trim()).map(Some).map_err(|error| error.to_string());
+        return serde_json::from_str(text.trim())
+            .map(Some)
+            .map_err(|error| error.to_string());
     }
     let header_end = header_end(buf);
     let Some(header_end) = header_end else {
         return Ok(None);
     };
     let header = String::from_utf8_lossy(&buf[..header_end]).to_string();
-    let length = header.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        if name.eq_ignore_ascii_case("content-length") {
-            value.trim().parse::<usize>().ok()
-        } else {
-            None
-        }
-    }).ok_or_else(|| "MCP 消息缺少 Content-Length".to_owned())?;
+    let length = header
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| "MCP 消息缺少 Content-Length".to_owned())?;
     if buf.len() < header_end + length {
         return Ok(None);
     }
     let body: Vec<u8> = buf.drain(..header_end + length).skip(header_end).collect();
-    serde_json::from_slice(&body).map(Some).map_err(|error| error.to_string())
+    serde_json::from_slice(&body)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 fn header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|window| window == b"\r\n\r\n").map(|index| index + 4)
-        .or_else(|| buf.windows(2).position(|window| window == b"\n\n").map(|index| index + 2))
+    buf.windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .or_else(|| {
+            buf.windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|index| index + 2)
+        })
 }
 
 #[cfg(test)]
@@ -601,14 +865,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let ws = LocalWorkspace::init(&dir, "").expect("init");
         let listed = dispatch(&ws, "tools/list", &json!({})).expect("list");
-        let names = listed["tools"].as_array().expect("tools").iter().filter_map(|item| item["name"].as_str()).collect::<Vec<_>>();
+        let names = listed["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|item| item["name"].as_str())
+            .collect::<Vec<_>>();
         assert!(names.contains(&"tie_doctor"));
         assert!(names.contains(&"tie_search"));
         assert!(names.contains(&"tie_write"));
-        for name in ["tie_file_ingest", "tie_file_open_hint", "tie_export", "tie_import"] {
+        for name in [
+            "tie_file_ingest",
+            "tie_file_open_hint",
+            "tie_export",
+            "tie_import",
+        ] {
             assert!(names.contains(&name));
         }
-        let doctor = dispatch(&ws, "tools/call", &json!({"name": "tie_doctor", "arguments": {}})).expect("doctor");
+        let doctor = dispatch(
+            &ws,
+            "tools/call",
+            &json!({"name": "tie_doctor", "arguments": {}}),
+        )
+        .expect("doctor");
         assert_eq!(doctor["isError"], false);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -616,11 +895,22 @@ mod tests {
     #[test]
     fn host_file_tools_and_tool_list_stay_local() {
         assert!(local_only_request(&json!({"method": "tools/list"})));
-        for name in ["tie_file_ingest", "tie_file_open_hint", "tie_export", "tie_import"] {
+        for name in [
+            "tie_file_ingest",
+            "tie_file_open_hint",
+            "tie_export",
+            "tie_import",
+        ] {
             let message = json!({"method": "tools/call", "params": {"name": name}});
             assert!(local_only_request(&message), "{name}");
         }
-        for name in ["tie_search", "tie_get", "tie_write", "tie_file_list", "tie_file_get"] {
+        for name in [
+            "tie_search",
+            "tie_get",
+            "tie_write",
+            "tie_file_list",
+            "tie_file_get",
+        ] {
             let message = json!({"method": "tools/call", "params": {"name": name}});
             assert!(!local_only_request(&message), "{name}");
         }
@@ -639,32 +929,6 @@ mod tests {
         let parsed = take_message(&mut buf).expect("read").expect("message");
         assert_eq!(parsed, message);
         assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn closed_http_port_is_unavailable() {
-        let error = post_mcp(
-            "http://127.0.0.1:1",
-            "http://127.0.0.1:1",
-            "token",
-            "ws_test",
-            &json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
-        )
-        .expect_err("closed");
-        assert!(matches!(error, ForwardFail::Down));
-    }
-
-    #[test]
-    fn different_backend_is_rejected_before_http() {
-        let error = post_mcp(
-            "http://127.0.0.1:1",
-            "https://backend.example",
-            "unused",
-            "ws_test",
-            &json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
-        )
-        .expect_err("different server");
-        assert!(matches!(error, ForwardFail::Target));
     }
 
     #[test]

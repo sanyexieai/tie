@@ -4,8 +4,9 @@
 
 Agent 怎么接：
 
-- 绑定了后台，且管理员已在「服务」里打开 MCP：客户端配置写 `/health` 里的 `mcp.url`，并使用用户自己的 MCP 令牌。后台把请求交给 Rust `tie-cli mcp`
-- 没绑后台：不写 URL，也不要用 `node` 启动 `server.js`。直接调用本机 `tie`
+- 有本地工作区：客户端配置保留本机 `tie mcp`。绑定服务器后先检查健康状态，正常时通过 HTTP 读写；HTTP 异常需用户明确确认才可降级本地。
+- 没有 Tie 应用或本地登录会话：用户提供 MCP token，可用原生 HTTP Agent 连接 `/health` 里的 `mcp.url`，或给 CLI 桥接配置远程地址和私有 token 文件，无需本地工作区。
+- 纯本地工作区：直接使用本机 `tie mcp`，无需服务器或降级确认。不要用 `node` 启动 `server.js`，也不要在本机另起 HTTP 服务。
 
 桌面端负责按协议渲染并打开本地链接。Skill 在设置里接入时同步到工作区 `.agents/skills/`，以及 `~/.agents/skills`、`~/.claude/skills`、`~/.cursor/skills`。
 
@@ -14,6 +15,7 @@ Agent 怎么接：
 | Tool | 作用 |
 |------|------|
 | `tie_doctor` | 诊断 CLI / 工作区 / `format check`；升级时先调 |
+| `tie_connection` | 查看 HTTP 故障状态；仅在用户明确同意后确认当前故障期的本地降级 |
 | `tie_search` | 关键词 / 标签搜索 |
 | `tie_get` | 按 id 或精确标题读取全文 |
 | `tie_write` | 安全写入（自动 frontmatter；更新前写入 `.tie/history`） |
@@ -29,7 +31,9 @@ Agent 怎么接：
 
 Skill `tie-update`（`packages/tie-mcp/skills/tie-update`）只跟目录里标了 `agentFollowUp` 的 migration；发布说明未点名时不要因「刚更新」启用。
 
-Skill `tie-mcp-connect`：后台 `/health` 给出 `mcp.url` 时用该 HTTP 地址；没绑后台时直接调用本机 `tie` CLI，不在本机再起 HTTP。
+Skill `tie-mcp-connect`：说明登录会话与 MCP token 两种授权、HTTP 健康检查、用户确认降级和本地写入后同步。已有桌面接入保留本机 CLI 桥接；无应用的远程 Agent 允许直接使用 HTTP。
+
+本机 `tie_write`、`tie_import`、`tie_file_ingest` 成功后调用与 `tie sync` 相同的同步核心，尽力对齐一次。结果中的 `sync.state` 为 `synced`、`pending` 或 `skipped`，分别表示本轮成功、仍待同步、未绑定服务器。保存成功不等于同步完成；失败时保留本地数据。后台 HTTP 的 CLI 子进程不反向同步。
 
 ## 正文链接协议
 
@@ -48,8 +52,8 @@ Tie 桌面端 → **存储设置** → **Agent 知识库**：
 
 1. 选择本地或 SMB 工作区
 2. 勾选 Codex / Cursor / Claude Code
-3. 后台 MCP HTTP 在跑时，「接入所选客户端」写入该地址
-4. 没绑后台时，同一按钮去掉旧的 node 启动项，并同步 Skill。Agent 改用本机 `tie`
+3. 「接入所选客户端」写入本机 `tie mcp`；后台地址和登录会话由 CLI 读取
+4. 没绑后台时仍用相同 CLI 入口读写本地工作区，并同步 Skill、替换旧的 node 启动项
 
 **Skill 真相源：** `<工作区>/.agents/skills/<name>/SKILL.md`
 
@@ -60,13 +64,25 @@ npm run mcp:setup -- --workspace /绝对路径/你的工作区 --url http://后�
 npm run mcp:setup -- --workspace /绝对路径/你的工作区 --dry-run
 ```
 
-配置始终写入本机 `tie mcp`。`--url` 只说明后台地址，不会把客户端改成只连 HTTP。
+此脚本写入本机 `tie mcp`；`--url` 保存为 `TIE_MCP_URL`，不会丢弃远程地址或把已有桌面配置替换成仅 HTTP。授权由本地登录会话或用户提供的 MCP token 完成。
 
 ## 手动配置
 
-本地 Agent 始终写本机 `tie mcp`。这个进程先试后台 HTTP，不通再用本地工作区。不要把配置改成只留 `url`。
+已有本地工作区的 Agent 配置保留本机 `tie mcp`。绑定服务器后，实际数据请求先检查健康状态，正常时走 HTTP；异常时使用 `tie_connection` 查看故障，取得用户明确同意后再确认本地降级。HTTP 恢复后撤销降级许可。
 
-Cursor `~/.cursor/mcp.json` 的 `mcpServers.tie` 写 `command` 和 `args: ["mcp"]`，环境变量 `TIE_WORKSPACE` 指向工作区。Codex、Claude Code 同样写这个命令，不要改成只留 HTTP 地址。
+Cursor `~/.cursor/mcp.json` 的 `mcpServers.tie` 写 `command` 和 `args: ["mcp"]`，环境变量 `TIE_WORKSPACE` 指向工作区。Codex、Claude Code 同样写这个命令。
+
+没有本地应用或工作区时，可在支持 HTTP MCP 的 Agent 中填写服务器 `/mcp` 地址，并通过客户端的凭据管理提供用户的 MCP token（Bearer 授权）。已有登录会话优先使用同源会话，401 时可刷新一次；没有会话时向用户索取 MCP token，不尝试无授权访问。
+
+也可以只安装 CLI，再通过私有 token 文件桥接远程 MCP：
+
+```bash
+TIE_MCP_URL="https://后台主机:8787/mcp" \
+TIE_MCP_TOKEN_FILE="/绝对路径/私有mcp-token" \
+/绝对路径/tie mcp
+```
+
+`TIE_MCP_URL` 也接受服务器根地址；此模式无需 `TIE_WORKSPACE`。`TIE_MCP_TOKEN` 可作为临时环境变量传入。不要把 token 明文写入共享配置、命令记录、知识库或仓库；优先使用凭据管理或仅当前用户可读的 token 文件。
 
 直接查本地页面可以用：
 
