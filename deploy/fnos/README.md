@@ -9,6 +9,13 @@
 3. 使用 Ubuntu 22.04 发布构建的 Linux 包，从中提取 `/usr/bin/tie-cli` 放入 `deploy/fnos/bin/tie-cli`。不要直接使用依赖更高 glibc 的开发机产物。
 4. 将 `.env.example` 和 `backend.env.example` 分别复制为 `.env`、`backend.env`，填写版本、飞牛证书和随机 JWT 密钥。保留原 JWT 密钥可避免已有登录会话立即失效。配置文件权限设为 `600`。
 
+同步后将 `dist/` 的目录权限设为 `755`、文件权限设为 `644`，确保 nginx 的非 root 用户可以读取静态网页。不要对整个部署目录递归放开权限，其中的环境配置和迁移导出仍须保持私密权限。
+
+```bash
+find dist -type d -exec chmod 755 {} +
+find dist -type f -exec chmod 644 {} +
+```
+
 `backend.env` 的 CORS 列表按实际客户端来源配置。桌面端常用来源已列在示例中，同站网页无需额外跨站配置。
 
 ## 迁移旧 Rust 后台
