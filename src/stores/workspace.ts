@@ -1,6 +1,6 @@
 import { computed, ref, watch } from 'vue'
 import { acceptHMRUpdate, defineStore } from 'pinia'
-import { backendService, isBackendRemoteSourceId } from '@/services/backend'
+import { backendService, isBackendRemoteSourceId, isBackendSourceId } from '@/services/backend'
 import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageContentEqual, pageSourceIds, pageWriteEqual, prunePageSources, remapPageSourceIds, withPageSources } from '@/services/page-sources'
 import { reconcileSaveAgainstRemote } from '@/services/save-reconcile'
 import { isLocalWinningConflict } from '@/services/storage/sync-merge'
@@ -440,7 +440,15 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function scheduleBackendSync() {
-    if (!backend.connected || !desktopCanSync()) return
+    if (!backend.connected) return
+    if (!desktopCanSync()) {
+      if (backendSyncTimer) window.clearTimeout(backendSyncTimer)
+      backendSyncTimer = window.setTimeout(() => {
+        backendSyncTimer = undefined
+        void reloadWorkspace()
+      }, 400)
+      return
+    }
     if (backendSyncTimer) window.clearTimeout(backendSyncTimer)
     backendSyncTimer = window.setTimeout(() => {
       backendSyncTimer = undefined
@@ -1600,10 +1608,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   function pageBackendSync(pageId: PageId | null | undefined): 'synced' | 'pending' | 'conflict' | null {
     const backend = useBackendStore()
-    if (!pageId || !backend.connected || !desktopCanSync()) return null
+    if (!pageId || !backend.connected) return null
+    const page = pages.value.find((item) => item.id === pageId)
+    if (!desktopCanSync()) return page && isBackendSourceId(page.storageSourceId) ? 'synced' : null
     if (syncConflicts.value.has(pageId)) return 'conflict'
     if (pageHasPendingRemoteSave(pageId)) return 'pending'
-    const page = pages.value.find((item) => item.id === pageId)
     if (!page) return null
     const mark = backendSyncCursor.value[pageId]
     if (!mark) return 'pending'

@@ -5,7 +5,8 @@ import { getPlatformType, isTauriDesktop } from '@/services/platform'
 import { mergePagesById } from '@/services/page-sources'
 import { storageRegistry } from '@/services/storage/registry'
 import type { SavePageOptions } from '@/services/storage/types'
-import { isBackendRemoteSourceId } from '@/services/backend'
+import { backendService, isBackendRemoteSourceId } from '@/services/backend'
+import { loadBackendDocumentSnapshot } from '@/services/browser-backend'
 import { isS3SourceId } from '@/services/s3'
 import type { Page, PageId, PageRevision, StorageKind, WorkspacePreferences, WorkspaceSnapshot } from '@/types'
 
@@ -71,6 +72,8 @@ async function loadFileSnapshot(): Promise<WorkspaceSnapshot> {
     }
     return invoke<WorkspaceSnapshot>('load_workspace')
   }
+  const profile = backendService.loadProfile()
+  if (profile.accessToken && profile.user) return loadBackendDocumentSnapshot(profile)
   return localSnapshot()
 }
 

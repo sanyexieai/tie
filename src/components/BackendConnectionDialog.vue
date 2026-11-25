@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { localBackendEndpoint } from '@/services/backend'
+import { clearTemporaryBrowserPages, pushTemporaryBrowserPages, temporaryBrowserPages } from '@/services/browser-backend'
+import { isTauriDesktop } from '@/services/platform'
 import { useBackendStore } from '@/stores/backend'
 import { useWorkspaceStore } from '@/stores/workspace'
 
-const emit = defineEmits<{ close: [] }>()
-defineProps<{ startupPrompt?: boolean }>()
+const emit = defineEmits<{ close: []; 'temporary-settled': [] }>()
+defineProps<{ startupPrompt?: boolean; offerTemporary?: boolean }>()
 const backend = useBackendStore()
 const store = useWorkspaceStore()
 const mode = ref<'login' | 'register'>('login')
@@ -21,6 +23,12 @@ const email = ref('')
 const password = ref('')
 const name = ref('')
 const notice = ref('')
+const pushingTemporary = ref(false)
+const temporaryTick = ref(0)
+const temporaryCount = computed(() => {
+  void temporaryTick.value
+  return temporaryBrowserPages().length
+})
 const advancedOpen = ref(false)
 const serviceEndpoint = ref(backend.profile.endpoint)
 const accountName = computed(() => backend.profile.user?.name || backend.profile.user?.email || '')
@@ -74,10 +82,41 @@ async function submit() {
     if (!selectedServer.value) throw new Error('请先选择一台服务器')
     await backend.authenticate(mode.value, selectedServer.value.endpoint, email.value.trim(), password.value, name.value.trim())
     password.value = ''
+    if (!isTauriDesktop()) {
+      await store.reloadWorkspace()
+      notice.value = temporaryBrowserPages().length
+        ? '已登录。正文以后台为准，下面可以选择是否保留浏览器里的临时页面。'
+        : '已登录。文档以后台为准。'
+      return
+    }
     await store.syncBackendNow()
     await syncWorkspacePages()
     notice.value = '已绑定服务器，云同步已开启。'
   } catch { /* store exposes message */ }
+}
+async function keepBackendDocuments() {
+  clearTemporaryBrowserPages()
+  temporaryTick.value += 1
+  await store.reloadWorkspace()
+  emit('temporary-settled')
+  notice.value = '已改为以后台文档为准。'
+}
+async function pushTemporaryDocuments() {
+  pushingTemporary.value = true
+  notice.value = ''
+  try {
+    const pages = temporaryBrowserPages()
+    await pushTemporaryBrowserPages(pages)
+    clearTemporaryBrowserPages()
+    temporaryTick.value += 1
+    await store.reloadWorkspace()
+    emit('temporary-settled')
+    notice.value = `已把 ${pages.length} 篇临时页面推到后台。之后以后台为准。`
+  } catch (error) {
+    backend.error = error instanceof Error ? error.message : '推送临时页面失败'
+  } finally {
+    pushingTemporary.value = false
+  }
 }
 async function logout() {
   backend.logout()
@@ -88,7 +127,7 @@ async function logout() {
 <template>
   <div class="backend-dialog-backdrop" @mousedown.self="emit('close')">
       <section class="backend-dialog" role="dialog" aria-modal="true" aria-label="绑定服务器">
-      <header><div><strong>绑定服务器</strong><small>只绑定一台。绑定后进入本地 + 服务器，保存时云同步</small></div><button aria-label="关闭" @click="emit('close')">×</button></header>
+      <header><div><strong>绑定服务器</strong><small>{{ isTauriDesktop() ? '只绑定一台。绑定后进入本地 + 服务器，保存时云同步' : '只绑定一台。登录后网页上的文档以后台为准' }}</small></div><button aria-label="关闭" @click="emit('close')">×</button></header>
 
       <template v-if="!backend.connected">
         <div class="backend-mode-tabs"><button :class="{ selected: mode === 'login' }" @click="mode = 'login'">登录</button><button :class="{ selected: mode === 'register' }" @click="mode = 'register'">注册</button></div>
@@ -108,7 +147,16 @@ async function logout() {
 
       <template v-else>
         <div class="backend-account"><span>●</span><div><strong>{{ accountName }}</strong><small>{{ backend.profile.endpoint }} · 云同步已开启</small></div><button @click="logout">解除绑定</button></div>
-        <p class="backend-notice">本地的每个工作区都会同步到这台服务器。页面仍写在本机，保存后自动对齐。</p>
+        <p v-if="!isTauriDesktop()" class="backend-notice">网页上的文档以后台为准，不再写在浏览器里。</p>
+        <div v-if="!isTauriDesktop() && (offerTemporary || temporaryCount)" class="backend-temp-choice">
+          <strong>浏览器里还有 {{ temporaryCount }} 篇临时页面</strong>
+          <small>它们不会自动混进正文。可以留在浏览器里以后再处理，也可以现在推到后台。</small>
+          <div>
+            <button type="button" :disabled="pushingTemporary" @click="keepBackendDocuments">使用后台文档</button>
+            <button type="button" class="backend-primary-button" :disabled="pushingTemporary || !temporaryCount" @click="pushTemporaryDocuments">{{ pushingTemporary ? '正在推送…' : '保留并推送到后台' }}</button>
+          </div>
+        </div>
+        <p v-if="isTauriDesktop()" class="backend-notice">本地的每个工作区都会同步到这台服务器。页面仍写在本机，保存后自动对齐。</p>
         <div class="backend-service-settings">
           <div class="backend-workspace-heading"><span>服务器</span><button :disabled="backend.loading" @click="testConnection">测试连接</button></div>
           <label>服务地址<input v-model="serviceEndpoint" inputmode="url" /></label>

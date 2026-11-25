@@ -13,6 +13,7 @@ import LibraryView from '@/components/LibraryView.vue'
 import SkillsView from '@/components/SkillsView.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 import BackendConnectionDialog from '@/components/BackendConnectionDialog.vue'
+import { temporaryBrowserPages } from '@/services/browser-backend'
 import StorageSettingsDialog from '@/components/StorageSettingsDialog.vue'
 import AppUpdateDialog from '@/components/AppUpdateDialog.vue'
 import PheromoneLinks from '@/components/PheromoneLinks.vue'
@@ -26,7 +27,7 @@ import { backendService } from '@/services/backend'
 import { checkForAppUpdateOnStartup } from '@/services/app-updater'
 import { installMobileBackHandler, resetMobileBackLeaveArm, uninstallMobileBackHandler } from '@/services/mobile-back'
 import { refreshChangeOrigin } from '@/services/pheromone'
-import { initPlatform, isMobileClient, usesMobileUi } from '@/services/platform'
+import { initPlatform, isMobileClient, isTauriDesktop, usesMobileUi } from '@/services/platform'
 
 const PANEL_WIDTHS_KEY = 'tie:panel-widths'
 const SIDEBAR_DEFAULT = 256
@@ -45,6 +46,7 @@ const usesContextDrawer = ref(false)
 const focusMode = ref(false)
 const mobileContextOpen = ref(false)
 const backendDialogOpen = ref(false)
+const browserTempOffer = ref(false)
 const storageSettingsOpen = ref(false)
 const updateDialogOpen = ref(false)
 const webReadMode = ref(false)
@@ -345,6 +347,7 @@ onMounted(async () => {
     try { await backendService.health(defaultServer.endpoint); backendDialogOpen.value = true } catch { /* 后台未启动时不打扰用户 */ }
   }
   await store.initialize()
+  if (!isTauriDesktop() && backend.connected && temporaryBrowserPages().length) browserTempOffer.value = true
   syncViewportHeight()
   if (usesMobileShell.value) goMobileHome()
   ensureMobileBackHandler()
@@ -500,7 +503,7 @@ onBeforeUnmount(() => {
   </template>
 
     <CommandPalette v-if="store.showingCommandPalette" />
-    <BackendConnectionDialog v-if="backendDialogOpen" :startup-prompt="backend.servers.some((server) => server.defaultPrompt) && !backend.connected" @close="backendDialogOpen = false" />
+    <BackendConnectionDialog v-if="backendDialogOpen || browserTempOffer" :startup-prompt="backend.servers.some((server) => server.defaultPrompt) && !backend.connected" :offer-temporary="browserTempOffer" @close="backendDialogOpen = false; browserTempOffer = false" @temporary-settled="browserTempOffer = false" />
     <StorageSettingsDialog v-if="storageSettingsOpen" @close="storageSettingsOpen = false" @connect-backend="backendDialogOpen = true; storageSettingsOpen = false" />
     <AppUpdateDialog v-if="updateDialogOpen" @close="updateDialogOpen = false" />
     <p v-if="mobileBackHint && usesMobileShell" class="mobile-back-hint" role="status">{{ mobileBackHint }}</p>
