@@ -601,7 +601,7 @@ fn write_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
         None => None,
         Some(Value::Null) => Some(None),
         Some(Value::String(value)) => {
-            Some(Some(value.to_owned()).filter(|id| !id.trim().is_empty()))
+            Some(Some(value.trim().to_owned()).filter(|id| !id.is_empty()))
         }
         Some(_) => return Err("parentId 必须是分类节点 ID 或 null".into()),
     };
@@ -665,7 +665,8 @@ fn flatten_hits(hits: Vec<tie_local::SearchHit>) -> Vec<Value> {
 fn node_arg<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
     match args.get(name) {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.trim()).filter(|value| !value.is_empty())),
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value.trim())),
+        Some(Value::String(_)) => Err(format!("{name} 不能为空，请提供节点 ID 或唯一标题")),
         Some(_) => Err(format!("{name} 必须是节点 ID 或标题字符串")),
     }
 }
@@ -1084,6 +1085,8 @@ mod tests {
         let ws = LocalWorkspace::init(&dir, "src_test").unwrap();
         for args in [
             json!({"root":42}),
+            json!({"root":""}),
+            json!({"root":"   "}),
             json!({"exclude":"wrong"}),
             json!({"exclude":[true]}),
             json!({"exclude":[""]}),
@@ -1119,7 +1122,7 @@ mod tests {
         assert!(write_page(&ws, &json!({"title":"错误分类","parentId":true})).is_err());
         let explicit = write_page(
             &ws,
-            &json!({"title":"正确分类","parentId":first["page"]["id"]}),
+            &json!({"title":"正确分类","parentId":format!(" {} ", first["page"]["id"].as_str().unwrap())}),
         )
         .unwrap();
         assert_eq!(explicit["page"]["parentId"], first["page"]["id"]);
