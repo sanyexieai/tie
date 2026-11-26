@@ -5,14 +5,14 @@ description: "Connect Tie through the local tie mcp bridge or a remote HTTP MCP 
 
 # Tie 接入：检查服务器，再选择授权和通道
 
-已有本地工作区的 Cursor、Codex、Claude Code 保留本机 `tie mcp`（stdio）入口。绑定服务器时，数据请求先检查 `/health`，服务器正常就走 HTTP；纯本地工作区直接在本地处理。
+已有本地工作区的 Cursor、Codex、Claude Code 默认保留本机 `tie mcp`（stdio）入口。绑定服务器时，数据请求先检查 `/health`，服务器正常就走 HTTP；纯本地工作区直接在本地处理。用户明确选择只通过 HTTP 访问服务器时，即使本机已有应用或工作区，也可改用原生 HTTP MCP，不要求保留本地入口。
 
-没有 Tie 应用或本地工作区的 Agent，可以用原生 HTTP MCP 直接连接服务器 `/mcp`，也可只安装 CLI 做远程桥接。本机不另起 HTTP 端口，不使用 `node` 或 `server.js`。
+原生 HTTP MCP 客户端只需服务器地址与用户 MCP token，无需本机 Tie、CLI 或工作区。需要 stdio 的客户端也可只安装 CLI 做远程桥接。本机不另起 HTTP 端口，不使用 `node` 或 `server.js`。
 
 ## 授权
 
-1. 有本地登录会话：CLI 从应用数据目录的 `backend-session.json` 读取同一服务器的会话，从工作区 `.tie/sync.json` 读取绑定。401 时可刷新一次，不要求用户重复提供 token。
-2. 没有本地登录会话或没有应用：请用户主动提供该服务器签发的 MCP token。它已绑定用户和工作区，纯远程访问无需本地工作区。
+1. 本机桥接有本地登录会话时：CLI 从应用数据目录的 `backend-session.json` 读取同一服务器的会话，从工作区 `.tie/sync.json` 读取绑定。401 时可刷新一次，不要求用户重复提供 token。
+2. 原生 HTTP 客户端或本机桥接没有本地登录会话时：请用户主动提供该服务器签发的 MCP token。它已绑定用户和工作区，纯远程访问无需本地工作区。
 
 token 只能通过客户端的凭据管理、临时环境变量或私有 token 文件提供。禁止写入知识库页面、提交仓库或打印到日志。MCP token 不替代本地工作区同步所需的账号登录。
 
@@ -24,21 +24,25 @@ token 只能通过客户端的凭据管理、临时环境变量或私有 token �
 - Codex：`~/.codex/config.toml` 的 `[mcp_servers.tie]` 和 `[mcp_servers.tie.env]`
 - Claude Code：`~/.claude.json` 的 `mcpServers.tie`，`type: "stdio"`
 
-远程桥接可设置 `TIE_MCP_URL`（服务器根地址或 `/mcp`）和 `TIE_MCP_TOKEN_FILE`（仅当前用户可读的 token 文件路径）；也支持临时 `TIE_MCP_TOKEN`。纯远程 token 模式无需 `TIE_WORKSPACE`。不要将现有桌面桥接配置改成仅 HTTP。
+远程桥接可设置 `TIE_MCP_URL`（服务器根地址或 `/mcp`）和 `TIE_MCP_TOKEN_FILE`（仅当前用户可读的 token 文件路径）；也支持临时 `TIE_MCP_TOKEN`。纯远程 token 模式无需 `TIE_WORKSPACE`。未经用户明确选择，不将现有桌面桥接配置改成仅 HTTP。
 
 ## 原生 HTTP Agent
 
-无本地应用时，使用 `/health` 返回的 `mcp.url`，在客户端凭据管理中设置 `Authorization: Bearer <MCP token>`。不要在共享配置、示例或知识库中填入真实 token。后台不提供本机文件登记、打开提示和导入导出能力。
+用户选择 HTTP 直连时，先检查 `/health`，确认 `mcp.enabled`、`mcp.running`，使用返回的 `mcp.url`。在客户端凭据管理中设置 `Authorization: Bearer <MCP token>`；不配置本地 command、args 或工作区路径，不要求安装 CLI。不要在共享配置、示例或知识库中填入真实 token。后台不提供本机文件登记、打开提示和导入导出能力。
 
 ## HTTP 异常时
 
 HTTP 故障、未开启或授权不可用时，不得自行改用本地，也不能通过换配置绕过确认。
 
+原生 HTTP 客户端仅报告连接或授权故障，等待服务器恢复或用户提供有效 token；不安装本地工具，不切换本地，也不调用 `tie_connection`。该工具仅由本机桥接提供。
+
+以下降级流程仅适用于已有本地副本的本机桥接：
+
 1. 调用 `tie_connection`，参数 `action: "status"`，取得故障原因和 `confirmationId`。
 2. 向用户说明故障，以及将改用哪份本地副本；等待用户明确同意。用户没有回答不算同意。
 3. 用户同意后才调用 `tie_connection`，参数 `action: "confirm_local"`、步骤 1 的 `confirmationId`、`confirmed: true`。
 
-许可仅在当前故障期有效；HTTP 成功后撤销。纯本地工作区不需要降级确认。没有本地副本的远程 Agent 只能报告故障，不能伪造本地降级。
+许可仅在当前故障期有效；HTTP 成功后撤销。纯本地工作区不需要降级确认。没有本地副本的远程桥接只能报告故障，不能伪造本地降级。
 
 宿主文件登记、打开提示、导入和导出始终在本机执行，不把本机路径发送给服务器。存在服务器绑定时，它们也先检查服务器；HTTP 异常时同样受上述确认流程约束，不得绕过门控直接执行本机操作。
 
@@ -56,4 +60,4 @@ HTTP 故障、未开启或授权不可用时，不得自行改用本地，也不
 
 写入前尽量沿树复用最细且稳定的已有分类，通过 `parentId` 指定父节点。分类不是必填项，没有合适节点仍可直接写入；不自动搬动旧页面，不为每条知识强造多层分类，用户明确需要时才新建分类页。完整检索与写入约定见 `tie-memory`。
 
-找不到 CLI 时按 Skill `tie-upgrade-cli` 构建。页面内容只用 `tie_*` 工具读写，不手改 frontmatter。
+仅本机桥接需要本机 CLI；缺少时按 Skill `tie-upgrade-cli` 安装或构建。HTTP MCP 使用服务器部署的 CLI，若 `/health` 报告服务端缺少 CLI，请管理员处理，不要求远程用户构建。页面内容只用 `tie_*` 工具读写，不手改 frontmatter。

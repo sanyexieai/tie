@@ -22,7 +22,7 @@ import { suggestTags } from './ai.js'
 import { assertProductionReady, createCorsMiddleware, resolveJwtSecret } from './config.js'
 import { handleMcpRequest, mcpStatus, mcpUrlForRequest } from './mcp-http.js'
 import { applySettingsPatch, detectCli, loadSettings, publicSettings } from './settings.js'
-import { createMcpToken, deleteMcpToken, deleteMcpTokensForWorkspace, listMcpTokens } from './mcp-tokens.js'
+import { createMcpToken, deleteMcpToken, deleteMcpTokensForWorkspace, listMcpTokens, revealMcpToken } from './mcp-tokens.js'
 import { assertUniqueUserIdentity, findUserByLogin, publicUser, roleForNewUser, userRole, verifyPassword } from './accounts.js'
 import { issueSession, revokeSession, rotateSession } from './sessions.js'
 import { mountAdmin } from './admin.js'
@@ -203,17 +203,33 @@ app.put('/api/v1/admin/settings', auth, adminOnly, (req, res) => {
   res.json(publicSettings(settings, detectCli(settings.mcp.cliPath)))
 })
 
+app.use('/api/v1/me/mcp-tokens', (_req, res, next) => {
+  res.set('Cache-Control', 'no-store')
+  next()
+})
+
 app.get('/api/v1/me/mcp-tokens', auth, (req, res) => {
   res.json(listMcpTokens(req.user.sub))
 })
 
 app.post('/api/v1/me/mcp-tokens', auth, (req, res) => {
+  if (req.body?.reveal !== undefined && typeof req.body.reveal !== 'boolean') {
+    return res.status(400).json({ message: 'reveal 必须为布尔值' })
+  }
   const workspaceId = String(req.body.workspaceId ?? '').trim()
   const workspace = findWorkspace(workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   const name = String(req.body.name ?? '').trim() || workspace.name
-  const created = createMcpToken({ userId: req.user.sub, name, workspaceId })
-  res.status(201).json(created)
+  const created = createMcpToken({ userId: req.user.sub, name, workspaceId }, jwtSecret)
+  res.status(201).json(req.body.reveal === false ? { record: created.record } : created)
+})
+
+app.get('/api/v1/me/mcp-tokens/:tokenId/secret', auth, (req, res) => {
+  try {
+    const token = revealMcpToken(req.user.sub, req.params.tokenId, jwtSecret)
+    if (!token) return res.status(404).json({ message: '令牌不存在' })
+    res.json({ token })
+  } catch (error) { handleError(res, error) }
 })
 
 app.delete('/api/v1/me/mcp-tokens/:tokenId', auth, (req, res) => {

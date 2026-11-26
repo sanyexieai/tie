@@ -120,20 +120,27 @@ const selectedClients = ref<AgentClientId[]>(initialPref.clients ?? ['codex', 'c
 const codexBusy = ref(false)
 const codexError = ref('')
 const codexNotice = ref('')
+const mcpMode = ref<'http' | 'local'>(supportsAgentSkills.value ? 'local' : 'http')
+const mcpModeOptions: { value: 'http' | 'local'; label: string }[] = [
+  { value: 'local', label: '本机桥接' },
+  { value: 'http', label: 'HTTP 直连' },
+]
 const mcpHandoffCopied = ref(false)
+const mcpCopying = ref(false)
 const tieCliPath = ref<string | null>(null)
 let mcpHandoffTimer = 0
 
 const remoteMcpUrl = computed(() => (
-  backend.connected && backend.mcp?.running && backend.mcp.url ? backend.mcp.url : ''
+  backend.connected && backend.mcp?.enabled && backend.mcp.running && backend.mcp.url ? backend.mcp.url : ''
 ))
 const mcpStatusText = computed(() => {
   if (backend.connected) {
-    if (remoteMcpUrl.value) return `本机 tie mcp · 先试后台 HTTP · ${remoteMcpUrl.value}`
+    if (remoteMcpUrl.value) return `HTTP 直连可用 · ${remoteMcpUrl.value}`
+    if (!backend.mcp) return '无法确认服务器 MCP 状态，请检查服务器连接后重试'
     if (backend.mcp?.enabled) return `后台 HTTP 未启动${backend.mcp.error ? ` · ${backend.mcp.error}` : ''}`
     return '后台 MCP HTTP · 未开启。请管理员在后台「服务」里打开'
   }
-  return tieCliPath.value ? `本地 MCP · tie mcp · ${tieCliPath.value}` : '本地 MCP · 未找到 tie CLI'
+  return 'HTTP 直连需要先绑定服务器并开启 MCP'
 })
 const agentClientOptions = AGENT_CLIENT_OPTIONS
 const appVersion = ref('—')
@@ -294,8 +301,8 @@ const codexSourceOptions = computed(() => {
   }))
 })
 const codexStatusSummary = computed(() => {
-  if (!isDesktop) return '仅桌面端可用'
-  if (remoteMcpUrl.value) return `本机 tie mcp · 先试后台 HTTP · ${remoteMcpUrl.value}`
+  if (remoteMcpUrl.value) return `HTTP 直连可用 · ${remoteMcpUrl.value}`
+  if (!isDesktop) return 'HTTP 直连需要后台开启 MCP'
   const stale = agentMcpStatus.value?.clients.find((item) => item.error)
   if (stale?.error) return stale.error
   if (tieCliPath.value) return '本地 MCP · tie mcp'
@@ -327,15 +334,17 @@ async function refreshCodexStatus() {
 }
 
 async function refreshLocalMcp() {
-  tieCliPath.value = await locateTieCli()
+  if (supportsAgentSkills.value) tieCliPath.value = await locateTieCli()
   if (backend.connected) await backend.refreshMcp()
 }
 
 function toggleCodexForm() {
   codexFormOpen.value = !codexFormOpen.value
   if (codexFormOpen.value) {
-    ensureCodexSourceSelection()
-    void refreshCodexStatus()
+    if (supportsAgentSkills.value) {
+      ensureCodexSourceSelection()
+      void refreshCodexStatus()
+    }
     void refreshLocalMcp()
   }
 }
@@ -346,9 +355,16 @@ function onCodexSourceChange() {
   codexNotice.value = ''
 }
 
-function mcpHandoffText() {
+const mcpHandoff = computed(() => {
+  if (mcpMode.value === 'http') {
+    return {
+      prompt: remoteMcpUrl.value ? buildMcpHandoffPrompt({ mode: 'http', mcpUrl: remoteMcpUrl.value }) : '',
+      message: mcpStatusText.value,
+    }
+  }
   const source = selectedMcpSource.value
-  if (!source?.path) return ''
+  if (!source?.path) return { prompt: '', message: '请选择一个可用的本地工作区' }
+  if (!tieCliPath.value) return { prompt: '', message: '未找到 tie CLI，本机桥接暂不可用' }
   const selected = new Set(selectedClients.value)
   const known = agentMcpStatus.value?.clients ?? []
   const clients = AGENT_CLIENT_OPTIONS.filter((item) => selected.has(item.id)).map((item) => ({
@@ -356,35 +372,43 @@ function mcpHandoffText() {
     label: item.label,
     configPath: known.find((status) => status.id === item.id)?.configPath,
   }))
-  return buildMcpHandoffPrompt({
+  return { prompt: buildMcpHandoffPrompt({
     mode: 'local',
     workspaceName: source.name,
     workspacePath: source.path,
-    mcpUrl: remoteMcpUrl.value,
     cliPath: tieCliPath.value,
     clients,
-  })
-}
+  }), message: '本机桥接已就绪，服务器连接和授权由 MCP 进程处理' }
+})
 
 async function copyMcpHandoff() {
-  const text = mcpHandoffText()
-  if (!text) return
+  if (mcpCopying.value) return
+  mcpCopying.value = true
+  mcpHandoffCopied.value = false
+  codexError.value = ''
   try {
-    await navigator.clipboard.writeText(text)
-  } catch {
-    const area = document.createElement('textarea')
-    area.value = text
-    area.setAttribute('readonly', '')
-    area.style.position = 'fixed'
-    area.style.left = '-9999px'
-    document.body.appendChild(area)
-    area.select()
-    document.execCommand('copy')
-    area.remove()
+    if (mcpMode.value === 'http') await backend.refreshMcp()
+    const { prompt, message } = mcpHandoff.value
+    if (!prompt) { codexError.value = message; return }
+    try {
+      await navigator.clipboard.writeText(prompt)
+    } catch {
+      const area = document.createElement('textarea')
+      area.value = prompt
+      area.setAttribute('readonly', '')
+      area.style.position = 'fixed'
+      area.style.left = '-9999px'
+      document.body.appendChild(area)
+      area.select()
+      document.execCommand('copy')
+      area.remove()
+    }
+    mcpHandoffCopied.value = true
+    window.clearTimeout(mcpHandoffTimer)
+    mcpHandoffTimer = window.setTimeout(() => { mcpHandoffCopied.value = false }, 2000)
+  } finally {
+    mcpCopying.value = false
   }
-  mcpHandoffCopied.value = true
-  window.clearTimeout(mcpHandoffTimer)
-  mcpHandoffTimer = window.setTimeout(() => { mcpHandoffCopied.value = false }, 2000)
 }
 
 function toggleAgentClient(id: AgentClientId) {
@@ -431,7 +455,7 @@ async function applyCodexMcp() {
     const labels = selectedClients.value
       .map((id) => AGENT_CLIENT_OPTIONS.find((item) => item.id === id)?.label ?? id)
       .join('、')
-    codexNotice.value = `已为 ${labels} 写入本机 tie mcp。后台 HTTP 通的时候会先走后台，不通再用本地工作区。请新开一个对话。`
+    codexNotice.value = `已为 ${labels} 写入本机 tie mcp。后台正常时优先使用 HTTP，异常降级须用户明确确认。请新开一个对话。`
     window.setTimeout(() => { codexNotice.value = '' }, 8000)
   } catch (error) {
     codexError.value = error instanceof Error ? error.message : String(error)
@@ -683,7 +707,7 @@ function closeAiModeMenu(event: MouseEvent) {
 
 onMounted(() => {
   document.addEventListener('click', closeAiModeMenu)
-  ensureCodexSourceSelection()
+  if (supportsAgentSkills.value) ensureCodexSourceSelection()
   void refreshCodexStatus()
   void refreshLocalMcp()
   void refreshAppVersion()
@@ -1082,7 +1106,7 @@ function restoreDefaultUpdateEndpoints() {
           @click="toggleAiForm"
         >AI 标签提取</button>
         <button
-          v-if="supportsAgentSkills"
+          v-if="supportsAgentSkills || backend.connected"
           type="button"
           :class="{ active: codexFormOpen }"
           :aria-expanded="codexFormOpen"
@@ -1251,9 +1275,15 @@ function restoreDefaultUpdateEndpoints() {
       </form>
       <p v-if="!aiFormOpen && aiNotice" class="minio-config-notice">{{ aiNotice }}</p>
 
-      <form v-if="supportsAgentSkills && codexFormOpen" class="minio-config-form codex-mcp-form" @submit.prevent="applyCodexMcp">
+      <form v-if="(supportsAgentSkills || backend.connected) && codexFormOpen" class="minio-config-form codex-mcp-form" @submit.prevent="applyCodexMcp">
         <strong>Agent 知识库</strong>
-        <small>{{ codexStatusSummary }}。写入的始终是本机 `tie mcp`。这个进程先试后台 HTTP，不通再用本地工作区。Skill 仍会同步。</small>
+        <label v-if="supportsAgentSkills">
+          <span>接入方式</span>
+          <TieSelect v-model="mcpMode" :options="mcpModeOptions" aria-label="MCP 接入方式" :disabled="mcpCopying || codexBusy" @change="mcpHandoffCopied = false; codexError = ''; codexNotice = ''" />
+        </label>
+        <small v-if="mcpMode === 'http'">HTTP 直连只需要服务器地址和 MCP 令牌，令牌在服务器「我的账号」页签发。</small>
+        <small v-else>使用本机桥接接入本地工作区并同步 Skills，服务器连接和授权由 MCP 进程处理。</small>
+        <template v-if="mcpMode === 'local'">
         <label>
           <span>工作区</span>
           <TieSelect
@@ -1284,20 +1314,20 @@ function restoreDefaultUpdateEndpoints() {
             </span>
           </label>
         </div>
+        </template>
         <div class="mcp-handoff">
           <div>
-            <strong>给 Agent 的接入提示词</strong>
-            <small>{{ mcpStatusText }}。提示词只写本机 `tie mcp`，由它决定先走后台还是本地。</small>
+            <strong>{{ mcpMode === 'http' ? 'HTTP 直连' : '本机桥接' }}</strong>
+            <small>{{ mcpHandoff.message }}</small>
           </div>
-          <button type="button" :disabled="!selectedMcpSource" @click="copyMcpHandoff">{{ mcpHandoffCopied ? '已复制' : '复制提示词' }}</button>
+          <button type="button" :disabled="mcpCopying || !mcpHandoff.prompt" @click="copyMcpHandoff">{{ mcpCopying ? '正在检查…' : mcpHandoffCopied ? '已复制' : '复制接入提示词' }}</button>
         </div>
-        <small v-if="!tieCliPath" class="backend-error">未找到 tie CLI，无法交给 Agent。请先构建 tie。</small>
         <p v-if="codexError" class="backend-error">{{ codexError }}</p>
         <div>
           <button type="button" :disabled="codexBusy" @click="codexFormOpen = false">取消</button>
-          <button type="button" :disabled="!selectedMcpSource" @click="openSkillsWorkspace">管理 Skills</button>
-          <button type="submit" :disabled="codexBusy || !selectedMcpSource || !selectedClients.length || !tieCliPath">
-            {{ codexBusy ? '正在接入…' : (anySelectedConfigured ? '更新接入' : '接入所选客户端') }}
+          <button v-if="mcpMode === 'local'" type="button" :disabled="!selectedMcpSource" @click="openSkillsWorkspace">管理 Skills</button>
+          <button v-if="mcpMode === 'local'" type="submit" :disabled="codexBusy || !selectedMcpSource || !selectedClients.length || !tieCliPath">
+            {{ codexBusy ? '正在接入…' : (anySelectedConfigured ? '更新本机桥接' : '接入本机桥接') }}
           </button>
         </div>
         <p v-if="codexNotice" class="minio-config-notice">{{ codexNotice }}</p>

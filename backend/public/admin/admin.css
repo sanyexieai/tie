@@ -158,6 +158,9 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; ma
 }
 .panel h3 { margin: 0 0 10px; font-size: 15px; }
 .stack { display: grid; gap: 12px; margin: 12px 0 20px; }
+.token-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.mcp-token-actions code:not([hidden]), #issued code { display: block; margin-top: 8px; overflow-wrap: anywhere; white-space: normal; }
+.mcp-token-actions [data-token-feedback]:empty { display: none; }
 .panel button.link { display: block; width: 100%; text-align: left; margin: 0 0 8px; }
 button.link { background: none; border: 0; padding: 0; color: inherit; font: inherit; text-align: left; }
 button.link:hover { text-decoration: underline; }

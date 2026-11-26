@@ -159,7 +159,7 @@ export async function handleMcpRequest(req, res, jwtSecret) {
   if (message.method === 'tools/call' && LOCAL_FILE_TOOLS.has(message.params?.name)) {
     res.json({
       jsonrpc: '2.0', id: message.id ?? null,
-      result: { isError: true, content: [{ type: 'text', text: '本机文件操作请通过本机 tie mcp 执行，后台 HTTP 不提供宿主文件访问。' }] },
+      result: { isError: true, content: [{ type: 'text', text: '此 HTTP MCP 连接不提供本机文件操作，包括文件登记、打开提示及导入导出。请使用此连接提供的知识库工具。' }] },
     })
     return
   }

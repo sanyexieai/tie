@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { localBackendEndpoint } from '@/services/backend'
+import { backendService, localBackendEndpoint, type BackendMcpToken } from '@/services/backend'
 import { clearTemporaryBrowserPages, pushTemporaryBrowserPages, temporaryBrowserPages } from '@/services/browser-backend'
 import { isTauriDesktop } from '@/services/platform'
 import { useBackendStore } from '@/stores/backend'
@@ -33,6 +33,71 @@ const advancedOpen = ref(false)
 const serviceEndpoint = ref(backend.profile.endpoint)
 const accountName = computed(() => backend.profile.user?.name || backend.profile.user?.email || '')
 const selectedServer = computed(() => backend.servers.find((item) => item.id === selectedServerId.value) ?? null)
+const mcpTokensOpen = ref(false)
+const mcpTokens = ref<BackendMcpToken[]>([])
+const mcpTokensBusy = ref(false)
+const mcpTokensError = ref('')
+const mcpTokensNotice = ref('')
+const mcpTokenName = ref('')
+const mcpTokenWorkspace = ref('')
+const mcpAccountUrl = computed(() => `${backend.profile.endpoint.replace(/\/+$/, '')}/me/`)
+
+async function toggleMcpTokens() {
+  mcpTokensOpen.value = !mcpTokensOpen.value
+  if (mcpTokensOpen.value) await loadMcpTokens()
+}
+async function loadMcpTokens() {
+  mcpTokensBusy.value = true
+  mcpTokensError.value = ''
+  try {
+    mcpTokens.value = await backendService.listMcpTokens(backend.profile)
+    if (!backend.workspaces.some((item) => item.id === mcpTokenWorkspace.value)) {
+      mcpTokenWorkspace.value = backend.workspaces.find((item) => item.default)?.id ?? backend.workspaces[0]?.id ?? ''
+    }
+  } catch (error) {
+    mcpTokensError.value = error instanceof Error ? error.message : '无法读取 MCP 令牌'
+  } finally { mcpTokensBusy.value = false }
+}
+async function issueMcpToken() {
+  mcpTokensBusy.value = true
+  mcpTokensError.value = ''
+  mcpTokensNotice.value = ''
+  try {
+    const created = await backendService.createMcpToken(backend.profile, {
+      name: mcpTokenName.value.trim(), workspaceId: mcpTokenWorkspace.value,
+    })
+    mcpTokens.value.push(created)
+    mcpTokenName.value = ''
+    mcpTokensNotice.value = '已签发。请前往“我的账号”查看和复制令牌。'
+  } catch (error) {
+    mcpTokensError.value = error instanceof Error ? error.message : '签发 MCP 令牌失败'
+  } finally { mcpTokensBusy.value = false }
+}
+async function revokeMcpToken(token: BackendMcpToken) {
+  mcpTokensBusy.value = true
+  mcpTokensError.value = ''
+  mcpTokensNotice.value = ''
+  try {
+    await backendService.revokeMcpToken(backend.profile, token.id)
+    mcpTokens.value = mcpTokens.value.filter((item) => item.id !== token.id)
+    mcpTokensNotice.value = '令牌已作废，使用它的 Agent 将无法继续连接。'
+  } catch (error) {
+    mcpTokensError.value = error instanceof Error ? error.message : '作废 MCP 令牌失败'
+  } finally { mcpTokensBusy.value = false }
+}
+async function openMcpAccount() {
+  try {
+    if (isTauriDesktop()) {
+      const { openUrl } = await import('@tauri-apps/plugin-opener')
+      await openUrl(mcpAccountUrl.value)
+    } else window.open(mcpAccountUrl.value, '_blank', 'noopener,noreferrer')
+  } catch (error) {
+    mcpTokensError.value = error instanceof Error ? error.message : '无法打开我的账号'
+  }
+}
+function tokenWorkspaceName(workspaceId: string) {
+  return backend.workspaces.find((item) => item.id === workspaceId)?.name ?? workspaceId
+}
 function addServer() { if (!newServerEndpoint.value.trim()) return; const server = backend.addServer(newServerEndpoint.value); selectedServerId.value = server.id; endpoint.value = server.endpoint; newServerEndpoint.value = '' }
 function useLocalServer() {
   const server = backend.addServer(localBackendEndpoint)
@@ -119,6 +184,10 @@ async function pushTemporaryDocuments() {
   }
 }
 async function logout() {
+  mcpTokensOpen.value = false
+  mcpTokens.value = []
+  mcpTokensNotice.value = ''
+  mcpTokensError.value = ''
   backend.logout()
   await syncWorkspacePages()
 }
@@ -162,8 +231,45 @@ async function logout() {
           <label>服务地址<input v-model="serviceEndpoint" inputmode="url" /></label>
           <button class="backend-link-button" :disabled="backend.loading || !serviceEndpoint.trim()" @click="saveServiceEndpoint">保存服务器地址</button>
         </div>
+        <div class="backend-mcp-tokens">
+          <button type="button" class="backend-mcp-toggle" :aria-expanded="mcpTokensOpen" aria-controls="backend-mcp-token-panel" @click="toggleMcpTokens">MCP 令牌 <span aria-hidden="true">{{ mcpTokensOpen ? '⌃' : '⌄' }}</span></button>
+          <div v-if="mcpTokensOpen" id="backend-mcp-token-panel" class="backend-mcp-token-panel" role="group" aria-label="MCP 令牌管理">
+            <small>给 Agent 授权访问指定工作区。此处可签发和作废；令牌内容只在“我的账号”页查看和复制。</small>
+            <div class="backend-mcp-issue">
+              <label>令牌名称<input v-model="mcpTokenName" placeholder="例如 我的 Agent" :disabled="mcpTokensBusy" /></label>
+              <label>授权工作区<select v-model="mcpTokenWorkspace" :disabled="mcpTokensBusy"><option v-for="workspace in backend.workspaces" :key="workspace.id" :value="workspace.id">{{ workspace.name }}</option></select></label>
+              <button type="button" class="backend-primary-button" :disabled="mcpTokensBusy || !mcpTokenWorkspace" @click="issueMcpToken">签发令牌</button>
+            </div>
+            <p v-if="mcpTokensBusy" class="backend-empty" role="status">正在处理…</p>
+            <ul v-if="mcpTokens.length" class="backend-mcp-token-list">
+              <li v-for="token in mcpTokens" :key="token.id">
+                <div><strong>{{ token.name }}</strong><small>{{ tokenWorkspaceName(token.workspaceId) }} · {{ token.canReveal ? '有效' : '旧版令牌，原授权仍有效' }}</small><small>{{ token.lastUsedAt ? `最近使用 ${new Date(token.lastUsedAt).toLocaleString()}` : '尚未使用' }}</small></div>
+                <button type="button" :aria-label="`作废 ${token.name}`" :disabled="mcpTokensBusy" @click="revokeMcpToken(token)">作废</button>
+              </li>
+            </ul>
+            <p v-else-if="!mcpTokensBusy && !mcpTokensError" class="backend-empty">还没有 MCP 令牌</p>
+            <button type="button" class="backend-link-button" @click="openMcpAccount">前往我的账号查看与复制</button>
+            <p v-if="mcpTokensError" class="backend-error" role="alert">{{ mcpTokensError }}</p>
+            <p v-else-if="mcpTokensNotice" class="backend-notice" role="status">{{ mcpTokensNotice }}</p>
+          </div>
+        </div>
       </template>
       <button v-if="selectedServer?.defaultPrompt" class="backend-link-button" @click="dismissDefaultPrompt">以后不再弹出登录框</button><p v-if="backend.error" class="backend-error">{{ backend.error }}</p><p v-else-if="notice" class="backend-notice">{{ notice }}</p>
     </section>
   </div>
 </template>
+
+<style scoped>
+.backend-mcp-tokens { border-top: 1px solid var(--border); padding-top: 10px; }
+.backend-mcp-toggle { display: flex; justify-content: space-between; width: 100%; border: 0; padding: 3px 0; color: var(--text-muted); background: transparent; font-size: 12px; text-align: left; }
+.backend-mcp-token-panel, .backend-mcp-issue { display: grid; gap: 9px; }
+.backend-mcp-token-panel { margin-top: 10px; }
+.backend-mcp-token-panel > small, .backend-mcp-token-list small { color: var(--text-subtle); font-size: 11px; line-height: 1.5; }
+.backend-mcp-issue select { width: 100%; border: 1px solid var(--border-strong); border-radius: 6px; padding: 8px; color: var(--text-secondary); background: var(--bg-elevated); font: inherit; }
+.backend-mcp-token-list { display: grid; gap: 7px; max-height: 190px; overflow: auto; padding: 0; margin: 0; list-style: none; }
+.backend-mcp-token-list li { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+.backend-mcp-token-list li > div { display: grid; min-width: 0; flex: 1; gap: 2px; overflow-wrap: anywhere; }
+.backend-mcp-token-list strong { color: var(--text-secondary); font-size: 12px; }
+.backend-mcp-token-list button { flex-shrink: 0; border: 0; border-radius: 4px; padding: 4px; color: var(--danger, #a15e58); background: transparent; font-size: 11px; }
+.backend-mcp-token-panel > .backend-link-button { margin-top: 0; }
+</style>

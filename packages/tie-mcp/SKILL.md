@@ -11,9 +11,10 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 
 ## 连接与授权
 
-- 有本地工作区时保留本机 `tie mcp` 入口；后台正常时数据请求走 HTTP。无应用的原生 HTTP Agent 可直接连接服务器 `/mcp`。
-- 优先读取同源的本地登录会话；没有登录会话时，由用户主动提供 MCP token。CLI 远程模式可用 `TIE_MCP_URL` + `TIE_MCP_TOKEN_FILE`，无需本地工作区。密钥不得写进页面或提交仓库。
-- HTTP 异常不得自动转本地。先调用 `tie_connection`（`action: "status"`）查看故障与 `confirmationId`，说明故障及本地副本位置，并取得用户明确同意；再调用 `action: "confirm_local"`、该 `confirmationId` 与 `confirmed: true`。许可仅覆盖当前故障期，HTTP 成功后撤销。纯本地工作区无需确认。
+- 有本地工作区时默认保留本机 `tie mcp` 入口；后台正常时数据请求走 HTTP。用户明确选择 HTTP 直连时，即使本机已有应用或工作区，也可只连接服务器 `/mcp`，无需本机 Tie、CLI 或工作区。
+- 本机桥接优先读取同源的本地登录会话；原生 HTTP 客户端或没有登录会话的桥接，由用户主动提供 MCP token。HTTP 直连使用 `/health` 返回的 `mcp.url` 和客户端凭据管理中的 `Authorization: Bearer <MCP token>`。CLI 远程模式可用 `TIE_MCP_URL` + `TIE_MCP_TOKEN_FILE`，无需本地工作区。密钥不得写进页面或提交仓库。
+- HTTP 异常不得自动转本地。原生 HTTP 客户端只报告故障或请求有效 token，不安装本地工具，不降级本地。`tie_connection` 仅由本机桥接提供：已有本地副本时先用 `action: "status"` 查看故障与 `confirmationId`，说明故障及本地副本位置，并取得用户明确同意；再调用 `action: "confirm_local"`、该 `confirmationId` 与 `confirmed: true`。许可仅覆盖当前故障期，HTTP 成功后撤销。纯本地工作区无需确认。
+- HTTP MCP 的 CLI 运行于服务器，部署异常由管理员处理，不要求远程用户构建或安装 CLI。
 - 接入细节见 `tie-mcp-connect`；验证时用 `tie_doctor.transport` 确认实际通道，不能仅看工具列表。
 
 ## 何时写入
@@ -22,7 +23,7 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 - 排障结论、坑点 → `kind: "bug"`
 - 用户长期偏好 → `kind: "preference"`
 - 一般备忘 → `kind: "note"`
-- PDF/书籍/其它外部文件 → 先 `tie_file_ingest`，再用 `tie_write` 整理摘要与笔记
+- PDF/书籍/其它外部文件 → 本机桥接先 `tie_file_ingest`，再用 `tie_write` 整理摘要与笔记；原生 HTTP 仅引用工作区内已登记资源，不提供本机文件导入
 
 会话里临时推理、一次性命令输出：**不要**入库。
 
@@ -32,7 +33,7 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 2. 在选定分类内用 `tie_search` 的 `root` 检索，按需用 `exclude` 排除无关分支；可叠加 `tag: "memory"` / `resource`，用于查找知识及避免重复页
 3. 需要全文时用 `tie_get`；关联上下文用 `tie_related`
 4. 新知识尽量选定合适的已有分类，通过 `parentId` 写入；更新已有页使用 `pageId`，不顺便重排分类
-5. 外部文件用 `tie_file_ingest` / `tie_file_list` / `tie_file_get`；正文与笔记通过 `tie_write` 写入（不要手写 frontmatter）
+5. 本机桥接用 `tie_file_ingest` 登记外部文件；原生 HTTP 仅用 `tie_file_list` / `tie_file_get` 查看已登记资源。正文与笔记通过 `tie_write` 写入（不要手写 frontmatter）
 
 ## 按树检索与分类
 
@@ -90,6 +91,8 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 ## 外部文件 / 目录
 
 主入口是 MCP，不是桌面「文件库」页。区外文件/目录必须先 `tie_file_ingest`，再用返回的 `url` 写入正文。
+
+此节的登记、导入和打开流程仅适用于本机桥接。原生 HTTP 不提供这些工具，也不要求为此安装本地 CLI；可以使用 `tie_file_list` / `tie_file_get` 读取已有登记，或直接将用户提供的文本笔记写入页面。
 
 ### 选 mode
 

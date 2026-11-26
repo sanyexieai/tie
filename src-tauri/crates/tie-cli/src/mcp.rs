@@ -85,7 +85,7 @@ impl McpRuntime {
             );
             if let Some(result) = response.get_mut("result") {
                 let connection_instructions = if self.server {
-                    "当前由服务器 HTTP MCP 提供服务。请用 tie_doctor 确认 transport=http；本机文件导入与导出请由本地 CLI 执行。"
+                    "当前由服务器 HTTP MCP 提供服务。客户端只需连接 HTTP MCP，无需安装本机 Tie 或 CLI；请用 tie_doctor 确认 transport=http。HTTP 异常只报告故障，不降级到本地。本机文件登记、打开提示及导入导出不在此 HTTP 连接的能力范围内。"
                 } else {
                     "有服务器绑定时，内容请求优先使用 HTTP。HTTP 异常不会自动切换本地；调用 tie_connection 查看原因，并先向用户确认，获准后才能 confirm_local。无本地登录会话时请用户提供 MCP token。工具列表成功不代表 HTTP 已连通，请看 tie_doctor.transport。"
                 };
@@ -381,7 +381,7 @@ fn tool_defs() -> Vec<Value> {
             "confirmationId": { "type": "string" },
             "confirmed": { "type": "boolean", "description": "仅在用户明确同意当前故障期降级后设为 true" }
         }))),
-        tool("tie_doctor", "诊断本机 tie MCP 与工作区。升级出问题时先调这个。", json!({ "type": "object", "properties": {} })),
+        tool("tie_doctor", "诊断当前 MCP 通道与工作区，检查 transport 和格式状态。升级出问题时先调这个。", json!({ "type": "object", "properties": {} })),
         tool("tie_list_recent", "列出最近更新的页面，可限定分类子树并排除无关分支。先用 tie_tree 按层选择分类。", obj_props(json!({
             "limit": { "type": "integer", "description": "返回条数，默认 20" },
             "tag": { "type": "string", "description": "按标签精确过滤" },

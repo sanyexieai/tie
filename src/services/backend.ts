@@ -35,6 +35,15 @@ export interface BackendMcpStatus {
   transport?: string
 }
 
+export interface BackendMcpToken {
+  id: string
+  name: string
+  workspaceId: string
+  createdAt: string
+  lastUsedAt: string | null
+  canReveal: boolean
+}
+
 export interface BackendHealth {
   ok: boolean
   service?: string
@@ -482,6 +491,18 @@ export const backendService = {
     return request<AuthResponse>(profile, '/api/v1/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
   },
   async me(profile: BackendProfile) { return request<BackendUser>(profile, '/api/v1/me') },
+  async listMcpTokens(profile: BackendProfile) {
+    return request<BackendMcpToken[]>(profile, '/api/v1/me/mcp-tokens', { cache: 'no-store' })
+  },
+  async createMcpToken(profile: BackendProfile, input: { name: string; workspaceId: string }) {
+    const created = await request<{ record: BackendMcpToken }>(profile, '/api/v1/me/mcp-tokens', {
+      method: 'POST', body: JSON.stringify({ ...input, reveal: false }),
+    })
+    return created.record
+  },
+  async revokeMcpToken(profile: BackendProfile, tokenId: string) {
+    await request<null>(profile, `/api/v1/me/mcp-tokens/${encodeURIComponent(tokenId)}`, { method: 'DELETE' })
+  },
   async listWorkspaces(profile: BackendProfile) { return request<BackendWorkspace[]>(profile, '/api/v1/workspaces') },
   async createWorkspace(profile: BackendProfile, name: string) {
     return request<BackendWorkspace>(profile, '/api/v1/workspaces', { method: 'POST', body: JSON.stringify({ name }) })

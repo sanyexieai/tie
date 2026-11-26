@@ -42,6 +42,7 @@ async function api(pathname, options = {}) {
     method: options.method || 'GET',
     headers,
     body: options.json !== undefined ? JSON.stringify(options.json) : undefined,
+    cache: options.cache,
   })
   if (response.status === 204) return null
   const payload = await response.json().catch(() => ({}))
@@ -66,6 +67,7 @@ async function api(pathname, options = {}) {
 
 function showLogin(message = '') {
   shellEl.classList.remove('on')
+  mainEl.replaceChildren()
   loginEl.style.display = ''
   loginError.textContent = message
 }
@@ -92,13 +94,19 @@ async function render() {
   const tokenRows = tokens.length ? tokens.map((item) => `
     <tr>
       <td>${esc(item.name)}<div class="hint">${esc(item.workspaceId)}</div></td>
-      <td>${esc(item.createdAt?.replace('T', ' ').slice(0, 19) || '')}</td>
-      <td><button class="danger" data-revoke="${esc(item.id)}" type="button">作废</button></td>
+      <td>${esc(item.createdAt?.replace('T', ' ').slice(0, 19) || '')}<div class="hint">${item.lastUsedAt ? `最近使用 ${esc(item.lastUsedAt.replace('T', ' ').slice(0, 19))}` : '尚未使用'}</div></td>
+      <td class="mcp-token-actions">
+        <div class="token-actions">
+          ${item.canReveal ? `<button data-view-token="${esc(item.id)}" type="button">查看</button><button data-copy-token="${esc(item.id)}" type="button">复制</button>` : '<span class="hint">旧令牌无法恢复，请重新签发；原授权仍有效。</span>'}
+          <button class="danger" data-revoke="${esc(item.id)}" type="button">作废</button>
+        </div>
+        <code data-token-secret hidden></code><p class="hint" data-token-feedback role="status"></p>
+      </td>
     </tr>`).join('') : '<tr><td colspan="3" class="empty">还没有 MCP 令牌</td></tr>'
   mainEl.innerHTML = `
     <h2>工作区</h2>
     <p class="lead">注册后已有默认工作区，页面保存在这台服务器的磁盘上。</p>
-    <p class="lead">${mcpOn ? `MCP 地址是 ${esc(health.mcp.url || location.origin + '/mcp')}。令牌只在签发时显示一次。` : '管理员还没有打开 HTTP MCP。令牌可以先签发，打开之后再用。'}</p>
+    <p class="lead">${mcpOn ? `MCP 地址是 ${esc(health.mcp.url || location.origin + '/mcp')}。在下方查看和复制本人签发的令牌。` : '管理员还没有打开 HTTP MCP。令牌可以先签发，打开之后再用。'}</p>
     <div id="issued"></div>
     <form id="workspace" class="toolbar">
       <input name="name" placeholder="再新建一个工作区" required>
@@ -111,6 +119,7 @@ async function render() {
       <select name="workspaceId">${workspaceOptions}</select>
       <button class="primary" type="submit">签发</button>
     </form>
+    <p id="token-notice" class="hint" role="status"></p>
     <div class="table-wrap"><table>
       <thead><tr><th>令牌</th><th>签发时间</th><th></th></tr></thead>
       <tbody>${tokenRows}</tbody>
@@ -124,18 +133,62 @@ async function render() {
   document.querySelector('#token').onsubmit = async (event) => {
     event.preventDefault()
     const data = new FormData(event.currentTarget)
-    const created = await api('/api/v1/me/mcp-tokens', {
-      method: 'POST',
-      json: { name: data.get('name'), workspaceId: data.get('workspaceId') },
-    })
-    await render()
-    const box = document.querySelector('#issued')
-    if (box) box.innerHTML = `<div class="notice">新令牌只显示这一次：<code>${esc(created.token)}</code></div>`
+    const button = event.currentTarget.querySelector('button[type="submit"]')
+    button.disabled = true
+    try {
+      const created = await api('/api/v1/me/mcp-tokens', {
+        method: 'POST',
+        json: { name: data.get('name'), workspaceId: data.get('workspaceId') },
+      })
+      await render()
+      const box = document.querySelector('#issued')
+      if (box) box.innerHTML = `<div class="notice">已签发新令牌：<code>${esc(created.token)}</code><p class="hint">刷新后可在令牌列表中查看和复制。</p></div>`
+    } catch (error) {
+      document.querySelector('#token-notice').textContent = error.message
+    } finally { button.disabled = false }
   }
+  mainEl.querySelectorAll('[data-view-token], [data-copy-token]').forEach((button) => {
+    button.onclick = async () => {
+      const row = button.closest('tr')
+      const secret = row.querySelector('[data-token-secret]')
+      const feedback = row.querySelector('[data-token-feedback]')
+      const viewing = Boolean(button.dataset.viewToken)
+      if (viewing && !secret.hidden) {
+        secret.textContent = ''
+        secret.hidden = true
+        button.textContent = '查看'
+        feedback.textContent = ''
+        return
+      }
+      button.disabled = true
+      feedback.textContent = ''
+      const account = state.me
+      try {
+        const tokenId = button.dataset.viewToken || button.dataset.copyToken
+        const result = await api(`/api/v1/me/mcp-tokens/${encodeURIComponent(tokenId)}/secret`, { cache: 'no-store' })
+        if (!state.token || state.me !== account || !row.isConnected) return
+        if (viewing) {
+          secret.textContent = result.token
+          secret.hidden = false
+          button.textContent = '隐藏'
+        } else {
+          await navigator.clipboard.writeText(result.token)
+          feedback.textContent = '令牌已复制。'
+        }
+      } catch (error) {
+        feedback.textContent = error.message
+      } finally { button.disabled = false }
+    }
+  })
   mainEl.querySelectorAll('[data-revoke]').forEach((button) => {
     button.onclick = async () => {
-      await api(`/api/v1/me/mcp-tokens/${button.dataset.revoke}`, { method: 'DELETE' })
-      await render()
+      button.disabled = true
+      try {
+        await api(`/api/v1/me/mcp-tokens/${encodeURIComponent(button.dataset.revoke)}`, { method: 'DELETE' })
+        await render()
+      } catch (error) {
+        button.closest('tr').querySelector('[data-token-feedback]').textContent = error.message
+      } finally { button.disabled = false }
     }
   })
 }
@@ -194,6 +247,7 @@ document.querySelector('#logout').onclick = () => {
   sessionStorage.removeItem(tokenKey)
   state.token = ''
   state.refreshToken = ''
+  state.me = null
   if (refreshToken) {
     void fetch('/api/v1/auth/logout', {
       method: 'POST',
