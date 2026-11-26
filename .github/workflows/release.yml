@@ -131,7 +131,7 @@ jobs:
         run: cargo test -p tie-local --manifest-path src-tauri/Cargo.toml solution::tests -- --nocapture
 
       - name: Build Tauri app (Windows)
-        run: npm run tauri:build:windows
+        run: npm run tauri:build:windows -- --verbose
         env:
           CI: true
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
