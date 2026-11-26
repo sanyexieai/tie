@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { store } from './store.js'
-import { indexEntryFromMeta, normalizeFileMeta, resourceFromMeta } from '../../shared/file-meta.js'
+import { indexEntryFromMeta, mergeFileMetadata, normalizeFileMeta, resourceFromMeta } from '../../shared/file-meta.js'
 
 const MAX_REMOTE_COPY_BYTES = 20 * 1024 * 1024
 
@@ -98,7 +98,8 @@ export function getWorkspaceFile(workspaceId, fileId) {
 export function upsertWorkspaceFileMeta(workspaceId, raw) {
   const id = sanitizeFileId(raw.id)
   const now = new Date().toISOString()
-  const meta = normalizeFileMeta({ ...raw, id }, { now })
+  const incoming = normalizeFileMeta({ ...raw, id }, { now })
+  const meta = mergeFileMetadata(readMeta(workspaceId, id), incoming)
   const dir = path.join(filesRoot(workspaceId), id)
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(metaPath(workspaceId, id), `${JSON.stringify(meta, null, 2)}\n`)

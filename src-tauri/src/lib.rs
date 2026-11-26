@@ -16,6 +16,8 @@ mod credentials;
 mod desktop;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod skills;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod launch_files;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::Manager;
@@ -36,7 +38,22 @@ fn set_desktop_window_icon(app: &tauri::App) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let builder = builder
+        .manage(launch_files::PendingOpenFiles::default())
+        .manage(desktop::temporary::TemporaryWorkspaces::default())
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            launch_files::enqueue(app, &args, std::path::Path::new(&cwd));
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
+
+    let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -51,10 +68,15 @@ pub fn run() {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             {
                 set_desktop_window_icon(_app);
+                let args = std::env::args().collect::<Vec<_>>();
+                let cwd = std::env::current_dir()?;
+                launch_files::enqueue(_app.handle(), &args, &cwd);
             }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            launch_files::consume_open_file_paths,
             update::download_update_file,
             load_mobile_workspace,
             s3::load_s3_provider_metadata,
@@ -162,6 +184,12 @@ pub fn run() {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             desktop::backend_sync::add_page_opinion,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::backend_sync::merge_page_reviews,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            desktop::backend_sync::resolve_page_opinion,
+            common::settings::get_device_identity,
+            common::settings::get_change_origin,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             ai_cli::ai_cli_status,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             ai_cli::ai_cli_suggest_tags,
@@ -195,6 +223,16 @@ pub fn run() {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             skills::write_skill_file,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Tie app");
+        .build(tauri::generate_context!())
+        .expect("error while building Tie app")
+        .run(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = _event {
+                let mut args = vec![String::new()];
+                args.extend(urls.into_iter().map(|url| url.to_string()));
+                if let Ok(cwd) = std::env::current_dir() {
+                    launch_files::enqueue(_app, &args, &cwd);
+                }
+            }
+        });
 }

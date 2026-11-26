@@ -1,3 +1,4 @@
+import { currentBackendProfile } from '@/services/backend-profile'
 import type { Page, StorageSource } from '@/types'
 import { backendService, backendWorkspaceSource, isBackendSourceId, parseBackendWorkspaceId } from '@/services/backend'
 import { isRetryableStorageError, queueFailureMessage } from '@/services/storage/retry'
@@ -28,7 +29,7 @@ export const backendStorageAdapter: StorageAdapter = {
     return []
   },
   async loadPages(sourceId) {
-    const profile = backendService.loadProfile()
+    const profile = currentBackendProfile()
     if (!profile.accessToken) return { pages: [], error: '请先连接自定义后台' }
     try {
       const workspaceId = parseBackendWorkspaceId(sourceId)
@@ -39,7 +40,7 @@ export const backendStorageAdapter: StorageAdapter = {
     }
   },
   async savePage(page, options?: SavePageOptions) {
-    const profile = backendService.loadProfile()
+    const profile = currentBackendProfile()
     if (!profile.accessToken) throw new Error('请先连接自定义后台')
     const writeId = options?.writeSourceId ?? page.storageSourceId
     try {
@@ -60,7 +61,7 @@ export const backendStorageAdapter: StorageAdapter = {
     }
   },
   async permanentlyDeletePages(sourceId, pages) {
-    const profile = backendService.loadProfile()
+    const profile = currentBackendProfile()
     if (!profile.accessToken) throw new Error('请先连接自定义后台')
     const pageIds = pages.map((page) => page.id)
     try {
@@ -75,18 +76,18 @@ export const backendStorageAdapter: StorageAdapter = {
     }
   },
   async listPageRevisions(page) {
-    const profile = backendService.loadProfile()
+    const profile = currentBackendProfile()
     if (!profile.accessToken) throw new Error('请先连接自定义后台')
     return backendService.listPageRevisions(profile, parseBackendWorkspaceId(page.storageSourceId), page.id)
   },
   async readPageRevision(page, revisionId) {
-    const profile = backendService.loadProfile()
+    const profile = currentBackendProfile()
     if (!profile.accessToken) throw new Error('请先连接自定义后台')
     const revision = await backendService.readPageRevision(profile, parseBackendWorkspaceId(page.storageSourceId), page.id, revisionId)
     return { ...revision, storageSourceId: page.storageSourceId }
   },
   async readLatestPage(page) {
-    const profile = backendService.loadProfile()
+    const profile = currentBackendProfile()
     if (!profile.accessToken) throw new Error('请先连接自定义后台')
     const remote = await backendService.getPage(profile, parseBackendWorkspaceId(page.storageSourceId), page.id)
     return { ...remote, storageSourceId: page.storageSourceId }
@@ -109,7 +110,7 @@ export async function loadAllBackendPages(_localPages: Page[] = []): Promise<Syn
 }
 
 export async function listBackendSources(): Promise<StorageSource[]> {
-  const profile = backendService.loadProfile()
+  const profile = currentBackendProfile()
   if (!profile.accessToken) return []
   const workspaces = await backendService.listWorkspaces(profile)
   return workspaces.map((workspace) => backendWorkspaceSource(workspace, profile.endpoint))

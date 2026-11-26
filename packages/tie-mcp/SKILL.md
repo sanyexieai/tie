@@ -46,6 +46,14 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 
 `tie_restore` 是单页整页恢复：正文和旧版中的标题、图标、标签、父节点、排序等会一起恢复，恢复前会保留当前版本。页面 ID、创建时间、当前回收站状态和存储绑定保持不变；它不是局部正文合并，也不回滚子页面或附件。不要直接改写 `.tie/history` 或手拼 frontmatter。只读查看、对比不会恢复内容。
 
+## 变更与信息素沟通
+
+`tie_changes({id_or_title})` 查看页面真实保存的变更及客户端、设备、操作者。历史来源缺失时保留未知；不要根据正文中的路径猜测作者设备。
+
+需要讨论而尚不宜修改正文时，用 `tie_signal_list({id_or_title})` 读取已有意见，避免重复。用 `tie_signal_add({id_or_title, opinionKind: "support"|"objection"|"correction", quote?, body, baseUpdatedAt, replyTo?})` 留下支持、异议、修正或回复，`baseUpdatedAt` 来自刚读取的 `tie_get.updatedAt`。这些信息素持久保存并跨端同步，纯 HTTP MCP 同样可用。
+
+实际处理后用 `tie_signal_resolve({id_or_title, id, status, resolutionNote?, appliedUpdatedAt?})`：`resolved` 表示已解决，`withdrawn` 表示撤回并保留记录。`adopted` 必须先修改并保存正文，再传当前已保存的 `appliedUpdatedAt`；不能仅标记采用而不保存实际修改。它不会自动替换正文。已处理状态不回退为待处理，新讨论创建新 ID。
+
 ## 按树检索与分类
 
 树节点就是页面，父子关系表达知识分类。`tie_tree` 只返回节点摘要，不返回正文：
@@ -116,7 +124,7 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 ### 选 mode
 
 - `copy`：导入工作区副本（`.tie/files/{id}/original…`），正文用返回的 **相对** `tie://path/…`；适合要跟知识库一起走的小中型文件
-- `link`：只登记本机原路径，正文用 **绝对** `tie://file/…`；适合大文件、已有书库目录。换机器会显示「找不到」，可重新绑定
+- `link`：登记当前设备的原路径，正文用 `tie://file/…`；适合源码目录、大文件、已有书库目录。只有当前设备绑定可以打开，其他设备同名路径不会自动打开；在另一设备显式绑定后，各设备分别保留自己的路径。旧无设备信息的登记需要显式绑定，不能自动认领
 
 目录资源 `kind: "directory"`，点击由系统文件管理器打开。
 

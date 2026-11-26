@@ -6,6 +6,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3'
 import { indexEntryFromMeta, normalizeFileMeta, resourceFromMeta, sanitizeBlobName, sanitizeFileId } from './workspace-files.js'
+import { mergeFileMetadata } from '../../shared/file-meta.js'
 
 const PAGE_PREFIX = 'tie/pages/'
 const HISTORY_PREFIX = 'tie/history/'
@@ -271,7 +272,7 @@ export async function getProviderFile(client, bucket, fileId) {
 export async function upsertProviderFileMeta(client, bucket, raw) {
   const id = sanitizeFileId(raw.id)
   const now = new Date().toISOString()
-  const meta = normalizeFileMeta({ ...raw, id }, { now })
+  const meta = mergeFileMetadata(await getJson(client, bucket, fileMetaKey(id)), normalizeFileMeta({ ...raw, id }, { now }))
   await putJson(client, bucket, fileMetaKey(id), meta)
   const index = await getJson(client, bucket, filesIndexKey())
   const entries = Array.isArray(index) ? index.filter((item) => item.id !== id) : []

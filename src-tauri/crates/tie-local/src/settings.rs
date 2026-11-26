@@ -47,6 +47,7 @@ pub fn source_from_path(path: PathBuf, kind: String) -> StorageSource {
         kind,
         path: path.display().to_string(),
         available: true,
+        temporary: false,
     }
 }
 

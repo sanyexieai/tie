@@ -32,6 +32,7 @@ const usesTouchReorder = computed(() => props.touchReorder || Boolean(dragCtx))
 const expanded = computed(() => !store.collapsedPageIds.includes(props.node.id))
 const hasChildren = computed(() => props.node.children.length > 0)
 const livePage = computed(() => store.pages.find((page) => page.id === props.node.id) ?? props.node)
+const temporary = computed(() => Boolean(props.sourcesById[livePage.value.storageSourceId]?.temporary))
 const boundSourceIds = computed(() => {
   const known = new Set(store.allSources.map((source) => source.id))
   return pageSourceIds(livePage.value).filter((id) => known.has(id))
@@ -81,7 +82,7 @@ let swipeGesture = false
 let suppressRowClick = false
 
 function startDrag(event: DragEvent) {
-  if (usesTouchReorder.value) return
+  if (usesTouchReorder.value || temporary.value) { event.preventDefault(); return }
   event.dataTransfer?.setData('text/plain', props.node.id)
   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
   draggingSelf.value = true
@@ -99,12 +100,14 @@ function onDragHandlePointerDown(event: PointerEvent) {
 }
 
 function updateDropPosition(event: DragEvent) {
+  if (temporary.value) return
   const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
   const relativeY = (event.clientY - bounds.top) / bounds.height
   dropPosition.value = relativeY < .27 ? 'before' : relativeY > .73 ? 'after' : 'inside'
 }
 
 function dropOnPage(event: DragEvent) {
+  if (temporary.value) return
   const pageId = event.dataTransfer?.getData('text/plain')
   const position = dropPosition.value
   dropPosition.value = null
@@ -326,10 +329,10 @@ onBeforeUnmount(() => {
         role="group"
         aria-label="页面操作"
       >
-        <button type="button" class="swipe-action" @click.stop="onSwipeAction('create')">子页</button>
+        <button v-if="!temporary" type="button" class="swipe-action" @click.stop="onSwipeAction('create')">子页</button>
         <button type="button" class="swipe-action" @click.stop="onSwipeAction('rename')">重命名</button>
-        <button type="button" class="swipe-action" @click.stop="onSwipeAction('duplicate')">复制</button>
-        <button type="button" class="swipe-action danger" @click.stop="onSwipeAction('remove')">删除</button>
+        <button v-if="!temporary" type="button" class="swipe-action" @click.stop="onSwipeAction('duplicate')">复制</button>
+        <button type="button" class="swipe-action danger" @click.stop="onSwipeAction('remove')">{{ temporary ? '关闭工作区' : '删除' }}</button>
       </div>
       <div
         class="tree-row"
@@ -346,7 +349,7 @@ onBeforeUnmount(() => {
           paddingLeft: `${12 + (depth ?? 0) * 16}px`,
           transform: compact ? `translateX(${swipeOffset}px)` : undefined,
         }"
-        :draggable="!usesTouchReorder"
+        :draggable="!usesTouchReorder && !temporary"
         :data-page-tree-id="node.id"
         role="treeitem"
         :aria-level="(depth ?? 0) + 1"
@@ -366,7 +369,7 @@ onBeforeUnmount(() => {
         @drop.prevent="dropOnPage"
       >
         <button
-          v-if="usesTouchReorder"
+          v-if="usesTouchReorder && !temporary"
           type="button"
           class="tree-drag-handle"
           aria-label="拖动调整层级"
@@ -399,10 +402,10 @@ onBeforeUnmount(() => {
               :style="menuStyle"
               @click.stop
             >
-              <button type="button" title="新建子页面" @click="actionsOpen = false; emit('create', node.id)">+ 新建子页面</button>
+              <button v-if="!temporary" type="button" title="新建子页面" @click="actionsOpen = false; emit('create', node.id)">+ 新建子页面</button>
               <button type="button" title="重命名页面" @click="actionsOpen = false; emit('rename', node.id)">✎ 重命名</button>
-              <button type="button" title="复制页面" @click="actionsOpen = false; emit('duplicate', node.id)">⧉ 复制页面</button>
-              <button type="button" class="danger" title="删除页面" @click="actionsOpen = false; emit('remove', node.id)">× 删除页面</button>
+              <button v-if="!temporary" type="button" title="复制页面" @click="actionsOpen = false; emit('duplicate', node.id)">⧉ 复制页面</button>
+              <button type="button" class="danger" :title="temporary ? '关闭工作区' : '删除页面'" @click="actionsOpen = false; emit('remove', node.id)">× {{ temporary ? '关闭工作区' : '删除页面' }}</button>
             </div>
           </Teleport>
         </span>

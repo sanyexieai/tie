@@ -1,12 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { Page, PageRevision, StorageSource, WorkspaceSnapshot } from '@/types'
-import { isBackendRemoteSourceId } from '@/services/backend'
+import { isBackendRemoteSourceId, isBackendSourceId } from '@/services/backend'
 import { copyPageAssets as copyPageAssetsBetweenSources, ensurePageAssetsOnSource } from '@/services/attachments'
 import { mergePagesById, normalizePageSources, pageForStorageWrite, pageSourceIds, pageWriteEqual, remapPageSourceIds, withPageSources } from '@/services/page-sources'
 import { canTransferBetweenSources, transferBlockedMessage } from '@/services/transfer-policy'
 import { isS3SourceId, s3ConnectionForSource, buildS3SourceIdHealingRemap } from '@/services/s3'
 import { migratePageWorkspaceHrefs } from '@/services/link-runtime'
-import { isCloudStorageSourceId } from '@/services/storage-identity'
+import { isCloudStorageSourceId, isTemporaryStorageSourceId } from '@/services/storage-identity'
 import { backendStorageAdapter, loadAllBackendPages } from '@/services/storage/backend-adapter'
 import { backendS3StorageAdapter } from '@/services/storage/backend-s3-adapter'
 import { browserStorageAdapter, loadBrowserSnapshot } from '@/services/storage/browser-adapter'
@@ -119,7 +119,9 @@ export const storageRegistry = {
   },
 
   async savePage(page: Page, options?: SavePageOptions): Promise<Page> {
-    const normalized = migratePageWorkspaceHrefs(normalizePageSources(page))
+    const normalized = isTemporaryStorageSourceId(page.storageSourceId)
+      ? normalizePageSources(page)
+      : migratePageWorkspaceHrefs(normalizePageSources(page))
     const primaryWrite = options?.writeSourceId ?? normalized.storageSourceId
     if (!options?.force) {
       const latest = await this.readLatestPage({
@@ -245,11 +247,18 @@ export const storageRegistry = {
   },
 
   async transferPageCrossAdapter(page: Page, targetSourceId: string): Promise<Page> {
+    const { listPageReviews, mergePageReviews } = await import('@/services/review-service')
+    const reviews = isFileSourceId(page.storageSourceId) || isBackendSourceId(page.storageSourceId)
+      ? await listPageReviews(page) : { entries: [] }
+    if (reviews.entries.length && !isFileSourceId(targetSourceId) && !isBackendSourceId(targetSourceId)) {
+      throw new Error('目标存储源不支持共享变更与讨论，请选择本地工作区或服务器')
+    }
     const targetAdapter = this.resolve(targetSourceId)
     const transferred = withPageSources(page, targetSourceId, [targetSourceId])
     await targetAdapter.savePage(transferred, { writeSourceId: targetSourceId, force: true })
     await this.copyPageHistory(page, page.storageSourceId, targetSourceId)
     await this.copyPageAssets(page, page.storageSourceId, targetSourceId)
+    if (reviews.entries.length) await mergePageReviews(transferred, reviews.entries)
     for (const sourceId of pageSourceIds(page).filter((id) => id !== targetSourceId)) {
       try {
         await this.resolve(sourceId).permanentlyDeletePages(sourceId, [{ ...page, storageSourceId: sourceId }])

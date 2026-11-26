@@ -2,6 +2,17 @@
 
 All notable changes to Tie are documented in this file.
 
+## [1.0.60] - 2026-11-26
+
+- 修复表格、段落等位置的 Wiki 页面链接显示为纯文本，以及带竖线的表格内容编辑后列错位的问题。
+- 支持从软件内或系统直接打开 Markdown 文件，作为临时工作区显示；编辑保存回原文件，关闭后不登记为正式工作区。
+- 页面实际创建、修改、移动、回收、恢复和永久删除统一记录客户端、版本、设备与操作者；同步保留原始事件来源，不重复记为另一端编辑。
+- 外部文件和源码目录按设备分别绑定，其他设备的同名路径不会自动打开；重新绑定保留各设备路径，旧无归属的路径需显式绑定。
+- 信息素改为共享持久记录，支持支持、异议、修正、回复、解决、关联已保存版本采纳及撤回；旧本机意见成功保存后迁移，撤回不会被旧同步复活。
+- MCP 新增变更查询与信息素读写、处理工具，支持纯 HTTP；本机信息素写入后也尝试同步并返回同步状态。
+- 修复并发写入遗漏记录、快速连续保存复用版本时间、桌面恢复和删除来源标记错误，以及跨工作区移动丢失讨论的问题。
+- 后台页面、附件和远程文件复用当前登录会话，避免桌面已经登录却被误判为未连接；保留本地首屏优先和后台延迟加载。
+
 ## [1.0.59] - 2026-11-26
 
 - MCP 新增页面历史查询、历史版本读取、正文与元数据差异对比，以及整页恢复；恢复前保留当前版本，并支持当前版本校验与本地恢复后同步。
@@ -241,7 +252,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.59...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.60...HEAD
+[1.0.60]: https://github.com/sanyexieai/tie/releases/tag/v1.0.60
 [1.0.59]: https://github.com/sanyexieai/tie/releases/tag/v1.0.59
 [1.0.49]: https://github.com/sanyexieai/tie/releases/tag/v1.0.49
 [1.0.42]: https://github.com/sanyexieai/tie/releases/tag/v1.0.42

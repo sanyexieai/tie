@@ -34,7 +34,7 @@ describe('mcp http from settings', { concurrency: 1 }, () => {
       "process.stdin.on('end', () => {",
       '  const message = JSON.parse(raw)',
       "  if (message.method.startsWith('notifications/')) return",
-      "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { ok: true, method: message.method, tools: [{ name: 'tie_get' }, { name: 'tie_file_ingest' }, { name: 'tie_export' }] } }) + '\\n')",
+      "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { ok: true, method: message.method, origin: JSON.parse(process.env.TIE_CHANGE_ORIGIN || '{}'), tools: ['tie_get', 'tie_file_ingest', 'tie_export', 'tie_changes', 'tie_signal_list', 'tie_signal_add', 'tie_signal_resolve'].map(name => ({name})) } }) + '\\n')",
       '})',
       '',
     ].join('\n'))
@@ -147,7 +147,22 @@ describe('mcp http from settings', { concurrency: 1 }, () => {
     assert.equal(called.response.status, 200)
     assert.equal(called.body.result.ok, true)
     assert.equal(called.body.result.method, 'tools/list')
-    assert.deepEqual(called.body.result.tools.map(tool => tool.name), ['tie_get', 'tie_secret_search', 'tie_secret_use', 'tie_secret_usage'])
+    assert.deepEqual(called.body.result.tools.map(tool => tool.name), ['tie_get', 'tie_changes', 'tie_signal_list', 'tie_signal_add', 'tie_signal_resolve', 'tie_secret_search', 'tie_secret_use', 'tie_secret_usage'])
+    assert.equal(called.body.result.origin.actor, '成员')
+    assert.equal(called.body.result.origin.clientName, '我的 Agent')
+    assert.equal(called.body.result.origin.deviceId, '')
+    assert.equal(called.body.result.origin.deviceName, '')
+
+    const suppliedOrigin = { clientId: 'test-agent', clientName: '测试 Agent', clientVersion: '1', deviceId: 'dev_windows', deviceName: 'Windows 测试机', platform: 'windows', actor: 'Agent', userId: 'forged' }
+    const signal = await request('/mcp', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${mcpToken}`, 'x-tie-origin': encodeURIComponent(JSON.stringify(suppliedOrigin)) },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'tie_signal_add', arguments: { id_or_title: 'pg_test', body: '建议', opinionKind: 'correction' } } }),
+    })
+    assert.equal(signal.response.status, 200)
+    assert.equal(signal.body.result.origin.deviceName, suppliedOrigin.deviceName)
+    assert.equal(signal.body.result.origin.clientId, suppliedOrigin.clientId)
+    assert.notEqual(signal.body.result.origin.userId, 'forged')
 
     for (const name of ['tie_file_ingest', 'tie_file_open_hint', 'tie_export', 'tie_import']) {
       const localOnly = await request('/mcp', {

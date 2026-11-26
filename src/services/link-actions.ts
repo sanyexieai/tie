@@ -29,7 +29,7 @@ export function isCrossSourceLink(linkSourceId: string | null | undefined, pageS
 
 export function linkableSources(sources: StorageSource[], pageSourceId?: string | null) {
   const list = sources.filter((source) => {
-    if (source.available === false) return false
+    if (source.temporary || source.available === false) return false
     return Boolean(fileRootForSource(source) || blobStoreFor(source).canRegister)
   })
   return [...list].sort((left, right) => {

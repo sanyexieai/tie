@@ -471,6 +471,9 @@ pub struct WorkspaceFileResource {
     pub open_path: String,
     pub exists: bool,
     pub updated_at: String,
+    pub device_bindings: serde_json::Value,
+    pub binding_state: String,
+    pub current_device_id: Option<String>,
 }
 
 pub fn s3_files_index_object() -> &'static str {
@@ -614,13 +617,10 @@ fn resource_from_file_meta(meta: &serde_json::Value) -> Option<WorkspaceFileReso
         .and_then(|item| item.as_str())
         .unwrap_or("")
         .to_owned();
-    let open_path = if mode == "copy" {
+    let open_path = if mode == "copy" && tie_local::portable_copy_path(std::path::Path::new("."), &stored_path).is_some() {
         stored_path.clone()
-    } else if stored_path.trim().is_empty() {
-        source_path.clone()
-    } else {
-        stored_path.clone()
-    };
+    } else { String::new() };
+    let binding_state = tie_local::file_binding_state(meta, None).to_owned();
     Some(WorkspaceFileResource {
         id,
         title,
@@ -634,6 +634,9 @@ fn resource_from_file_meta(meta: &serde_json::Value) -> Option<WorkspaceFileReso
         open_path,
         exists: false,
         updated_at,
+        device_bindings: meta.get("deviceBindings").cloned().unwrap_or_else(|| serde_json::json!({})),
+        binding_state,
+        current_device_id: None,
     })
 }
 
@@ -761,7 +764,9 @@ pub async fn upsert_s3_workspace_file_meta(
     credential_payload: &str,
     meta: serde_json::Value,
 ) -> Result<WorkspaceFileResource, String> {
-    let meta = file_meta::normalize_file_meta(&meta, None);
+    let id = sanitize_file_id(meta.get("id").and_then(serde_json::Value::as_str).ok_or("文件资源 id 无效")?)?;
+    let existing = read_s3_json(connection, credential_payload, &s3_file_meta_object(&id)).await?.unwrap_or(serde_json::Value::Null);
+    let meta = tie_local::merge_file_metadata(&existing, &meta);
     let resource =
         resource_from_file_meta(&meta).ok_or_else(|| "文件资源元数据无效".to_string())?;
     let id = sanitize_file_id(&resource.id)?;

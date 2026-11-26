@@ -2,9 +2,10 @@ pub(crate) mod backend_session;
 pub(crate) mod backend_sync;
 pub(crate) mod git_sync;
 pub(crate) mod tie_bundle;
+pub(crate) mod temporary;
 
 use crate::common::{
-    app_data_dir, copy_page_assets, copy_page_history, find_page_file, load_settings,
+    copy_page_assets, copy_page_history, find_page_file, load_settings, load_workspace_snapshot,
     is_tie_document, normalize_page_sources, open_or_adopt, page_asset_dir, parse_page,
     remove_page_assets, revision_dir, sanitize_asset_name, save_page_to_root, save_settings,
     source_from_path, workspace_sources, Page,
@@ -21,13 +22,13 @@ use std::{
     path::{Path, PathBuf},
 };
 use tauri::AppHandle;
-use tie_storage::local::load_file_workspace;
 use tie_storage::s3::{
     list_s3_object_keys, s3_asset_object, s3_asset_prefix, s3_history_object, s3_history_prefix,
     trim_s3_history, S3Connection,
 };
 
 pub(crate) fn source_root(app: &AppHandle, storage_source_id: &str) -> Result<PathBuf, String> {
+    if temporary::is_temporary(storage_source_id) { return Err(temporary::unsupported()); }
     let (sources, _) = workspace_sources(app)?;
     let source = sources
         .iter()
@@ -83,46 +84,8 @@ fn path_is_markdown(path: &Path) -> bool {
         })
 }
 
-fn infer_workspace_root_for_file(file: &Path) -> PathBuf {
-    let parent = file
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    if parent
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("pages"))
-    {
-        if let Some(root) = parent.parent() {
-            return root.to_path_buf();
-        }
-    }
-    let mut cursor = parent.clone();
-    for _ in 0..5 {
-        if cursor.join("pages").is_dir() {
-            return cursor;
-        }
-        match cursor.parent() {
-            Some(next) => cursor = next.to_path_buf(),
-            None => break,
-        }
-    }
-    parent
-}
-
-fn find_source_covering_path<'a>(
-    sources: &'a [StorageSource],
-    file: &Path,
-) -> Option<&'a StorageSource> {
-    sources.iter().find(|source| {
-        let root = PathBuf::from(&source.path);
-        let Ok(root) = root.canonicalize() else {
-            return file.starts_with(Path::new(&source.path));
-        };
-        let root = tie_storage::fs_path::strip_extended_length_prefix(&root);
-        let file = tie_storage::fs_path::canonicalize(file);
-        tie_storage::fs_path::is_under_root(&file, &root)
-    })
+fn existing_registered_page(sources: &[StorageSource], file: &Path) -> Option<String> {
+    sources.iter().find_map(|source| existing_page_in_workspace(Path::new(&source.path), file, &source.id))
 }
 
 pub(crate) fn ensure_local_source_at(
@@ -169,77 +132,6 @@ fn existing_page_in_workspace(root: &Path, file: &Path, source_id: &str) -> Opti
     }
     // 已经在工作区里的原文只登记元数据，不另存一份、不改字节。
     open_or_adopt(root, file, source_id).ok().map(|page| page.id)
-}
-
-fn import_single_markdown_file(
-    root: &Path,
-    source_id: &str,
-    file: &Path,
-    created_at: &str,
-) -> Result<String, String> {
-    if let Some(existing_id) = existing_page_in_workspace(root, file, source_id) {
-        return Ok(existing_id);
-    }
-
-    let pages_dir = root.join("pages");
-    fs::create_dir_all(&pages_dir).map_err(|error| error.to_string())?;
-    let sort_key = fs::read_dir(&pages_dir)
-        .map_err(|error| error.to_string())?
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "md")
-        })
-        .count() as i64;
-
-    let page_id = imported_page_id(file, source_id);
-    if find_page_file(root, &page_id).is_some() {
-        return Ok(page_id);
-    }
-
-    let content = fs::read_to_string(file).map_err(|error| error.to_string())?;
-    let fallback_title = file
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("打开的页面")
-        .to_owned();
-    let parsed = if is_tie_document(&content) {
-        parse_page(&content).ok()
-    } else {
-        None
-    };
-    let (title, icon, markdown, tags, parent_id, page_sort_key) = if let Some(original) = parsed {
-        (
-            original.title,
-            original.icon,
-            original.markdown,
-            original.tags,
-            None,
-            sort_key,
-        )
-    } else {
-        let (title, markdown, tags) = importable_page(content, fallback_title);
-        (title, String::new(), markdown, tags, None, sort_key)
-    };
-
-    let page = Page {
-        id: page_id.clone(),
-        title,
-        icon,
-        parent_id,
-        sort_key: page_sort_key,
-        markdown,
-        tags,
-        created_at: created_at.to_owned(),
-        updated_at: created_at.to_owned(),
-        deleted_at: None,
-        storage_source_id: source_id.to_owned(),
-        storage_source_ids: vec![source_id.to_owned()],
-    };
-    save_page_to_root(root, page, None)?;
-    Ok(page_id)
 }
 
 #[derive(serde::Deserialize)]
@@ -335,7 +227,10 @@ pub(crate) fn transfer_page_storage(
         storage_source_ids: vec![target_source_id],
         ..page
     });
-    let target_path = match save_page_to_root(&target_root, transferred.clone(), None) {
+    let target_path = match tie_storage::local::changes::with_change_context(
+        crate::common::settings::app_change_origin(&app)?, Some("move"), false,
+        || save_page_to_root(&target_root, transferred.clone(), None),
+    ) {
         Ok(_) => find_page_file(&target_root, &transferred.id),
         Err(error) => return Err(error),
     };
@@ -349,6 +244,12 @@ pub(crate) fn transfer_page_storage(
         if let Some(path) = &target_path {
             let _ = fs::remove_file(path);
         }
+        let _ = fs::remove_dir_all(revision_dir(&target_root, &transferred.id));
+        let _ = remove_page_assets(&target_root, &transferred.id);
+        return Err(error);
+    }
+    if let Err(error) = copy_page_reviews(&source_root, &target_root, &transferred.id) {
+        if let Some(path) = &target_path { let _ = fs::remove_file(path); }
         let _ = fs::remove_dir_all(revision_dir(&target_root, &transferred.id));
         let _ = remove_page_assets(&target_root, &transferred.id);
         return Err(error);
@@ -369,6 +270,12 @@ pub(crate) fn transfer_page_storage(
     Ok(transferred)
 }
 
+fn copy_page_reviews(source_root: &Path, target_root: &Path, page_id: &str) -> Result<(), String> {
+    let file = tie_storage::local::changes::list_reviews(source_root, page_id)?;
+    if file.entries.is_empty() { return Ok(()); }
+    tie_storage::local::changes::merge_review_file(target_root, page_id, file).map(|_| ())
+}
+
 #[tauri::command]
 pub(crate) fn import_markdown_files(
     app: AppHandle,
@@ -376,6 +283,8 @@ pub(crate) fn import_markdown_files(
     target_source_id: String,
     created_at: String,
 ) -> Result<WorkspaceSnapshot, String> {
+    tie_storage::local::changes::with_change_context(crate::common::settings::app_change_origin(&app)?, Some("import"), false, || {
+    if temporary::is_temporary(&target_source_id) { return Err(temporary::unsupported()); }
     let (sources, _) = workspace_sources(&app)?;
     let target = sources
         .iter()
@@ -486,7 +395,8 @@ pub(crate) fn import_markdown_files(
         };
         save_page_to_root(&target_root, page, None)?;
     }
-    load_file_workspace(&app_data_dir(&app)?, "tie-workspace")
+    load_workspace_snapshot(&app)
+    })
 }
 
 #[derive(Serialize)]
@@ -498,11 +408,16 @@ pub(crate) struct OpenMarkdownFilesResult {
 }
 
 #[tauri::command]
-pub(crate) fn open_markdown_files(
+pub(crate) async fn open_markdown_files(
     app: AppHandle,
     paths: Vec<String>,
     created_at: String,
 ) -> Result<OpenMarkdownFilesResult, String> {
+    tauri::async_runtime::spawn_blocking(move || open_markdown_files_blocking(&app, paths, &created_at))
+        .await.map_err(|error| error.to_string())?
+}
+
+fn open_markdown_files_blocking(app: &AppHandle, paths: Vec<String>, created_at: &str) -> Result<OpenMarkdownFilesResult, String> {
     let mut opened_page_ids = Vec::new();
     let mut created_source_ids = Vec::new();
 
@@ -516,18 +431,13 @@ pub(crate) fn open_markdown_files(
         }
 
         let (sources, _) = workspace_sources(&app)?;
-        let (source, created) = if let Some(existing) = find_source_covering_path(&sources, &file) {
-            (existing.clone(), false)
+        let page_id = if let Some(page_id) = existing_registered_page(&sources, &file) {
+            page_id
         } else {
-            let root = infer_workspace_root_for_file(&file);
-            ensure_local_source_at(&app, root)?
+            let (page_id, source_id, created) = temporary::open_file(app, &file, created_at)?;
+            if created { created_source_ids.push(source_id); }
+            page_id
         };
-        if created {
-            created_source_ids.push(source.id.clone());
-        }
-
-        let page_id =
-            import_single_markdown_file(Path::new(&source.path), &source.id, &file, &created_at)?;
         if !opened_page_ids.contains(&page_id) {
             opened_page_ids.push(page_id);
         }
@@ -538,13 +448,14 @@ pub(crate) fn open_markdown_files(
     }
 
     Ok(OpenMarkdownFilesResult {
-        snapshot: load_file_workspace(&app_data_dir(&app)?, "tie-workspace")?,
+        snapshot: load_workspace_snapshot(&app)?,
         opened_page_ids,
         created_source_ids,
     })
 }
 
 fn file_source_root(app: &AppHandle, source_id: &str) -> Result<PathBuf, String> {
+    if temporary::is_temporary(source_id) { return Err(temporary::unsupported()); }
     let (sources, _) = workspace_sources(app)?;
     let source = sources
         .iter()
@@ -731,5 +642,61 @@ pub(crate) fn copy_page_sidecars(
     let to_root = source_root(&app, &to_source_id)?;
     copy_page_history(&from_root, &to_root, &page_id)?;
     copy_page_assets(&from_root, &to_root, &page_id)?;
+    copy_page_reviews(&from_root, &to_root, &page_id)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod markdown_open_tests {
+    use super::*;
+
+    #[test]
+    fn registered_workspace_file_keeps_its_page_identity_and_original_bytes() {
+        let root = std::env::temp_dir().join(format!("tie-registered-open-{}", tie_storage::local::new_page_id()));
+        fs::create_dir_all(root.join("pages")).unwrap();
+        let file = root.join("pages/existing.md");
+        let markdown = "# Already registered\n\nKeep these bytes.\n";
+        fs::write(&file, markdown).unwrap();
+        let root = tie_storage::fs_path::canonicalize(&root);
+        let file = tie_storage::fs_path::canonicalize(&file);
+        let source = source_from_path(root.clone(), "local".to_owned());
+        let sources = vec![source.clone()];
+        assert!(!source.temporary);
+        let first = existing_registered_page(&sources, &file).unwrap();
+        let again = existing_registered_page(&sources, &file).unwrap();
+        assert_eq!(first, again);
+        assert_eq!(fs::read_to_string(&file).unwrap(), markdown);
+        assert_eq!(fs::read_dir(root.join("pages")).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transfer_review_copy_keeps_source_discussion_origins_and_merges_target_changes() {
+        use tie_storage::local::changes::{list_reviews, merge_review_file, ReviewEntry, ReviewFile};
+        use tie_storage::identity::ChangeOrigin;
+        let root = std::env::temp_dir().join(format!("tie-transfer-reviews-{}", tie_storage::local::new_page_id()));
+        let source = root.join("source");
+        let target = root.join("target");
+        let origin = ChangeOrigin { device_id:"dev_source".into(), device_name:"Source device".into(),
+            client_id:"fixture-agent".into(), actor:"Codex".into(), ..Default::default() };
+        let source_file = ReviewFile { entries: vec![
+            ReviewEntry { id:"change_original".into(), kind:"change".into(), page_id:"pg_transfer".into(),
+                origin:Some(origin.clone()), event_type:"create".into(), at:"2026-01-01T00:00:00Z".into(), ..Default::default() },
+            ReviewEntry { id:"op_original".into(), kind:"opinion".into(), page_id:"pg_transfer".into(),
+                body:"Keep this discussion".into(), origin:Some(origin), at:"2026-01-01T00:00:01Z".into(), ..Default::default() },
+        ] };
+        merge_review_file(&source, "pg_transfer", source_file.clone()).unwrap();
+        merge_review_file(&target, "pg_transfer", ReviewFile { entries:vec![
+            ReviewEntry { id:"change_target".into(), kind:"change".into(), page_id:"pg_transfer".into(),
+                event_type:"move".into(), origin:Some(ChangeOrigin { device_id:"dev_current".into(), client_id:"tie-desktop".into(), ..Default::default() }),
+                at:"2026-01-01T00:00:02Z".into(), ..Default::default() },
+        ] }).unwrap();
+        copy_page_reviews(&source, &target, "pg_transfer").unwrap();
+        copy_page_reviews(&source, &target, "pg_transfer").unwrap();
+        assert_eq!(list_reviews(&source, "pg_transfer").unwrap(), source_file);
+        let copied = list_reviews(&target, "pg_transfer").unwrap();
+        assert_eq!(copied.entries.len(), 3);
+        for entry in source_file.entries { assert_eq!(copied.entries.iter().find(|item| item.id == entry.id), Some(&entry)); }
+        fs::remove_dir_all(root).unwrap();
+    }
 }

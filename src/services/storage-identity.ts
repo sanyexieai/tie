@@ -12,6 +12,10 @@ export function isLocalStorageSourceId(sourceId: string | null | undefined) {
   return Boolean(id) && !isCloudStorageSourceId(id)
 }
 
+export function isTemporaryStorageSourceId(sourceId: string | null | undefined) {
+  return sourceId?.startsWith('src_temporary_') ?? false
+}
+
 /** 规范化后参与指纹，保证同 endpoint+bucket 跨机同 id。 */
 export function normalizeS3Endpoint(endpoint: string) {
   return endpoint.trim().replace(/\/+$/, '').toLowerCase()

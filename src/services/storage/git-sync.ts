@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isFileSourceId } from '@/services/storage/types'
+import { isTemporaryStorageSourceId } from '@/services/storage-identity'
 
 export interface GitSyncResult {
   mode: 'skipped' | 'committed' | 'synced'
@@ -62,7 +63,7 @@ export async function ensureGitRuntime(): Promise<GitRuntimeStatus> {
 
 /** 保存成功后静默对齐；无 remote / 未配置时 skipped。失败不抛给保存主路径。 */
 export async function syncAfterSave(sourceId: string | null | undefined): Promise<GitSyncResult | null> {
-  if (!sourceId || !isFileSourceId(sourceId) || !isTauri()) return null
+  if (!sourceId || isTemporaryStorageSourceId(sourceId) || !isFileSourceId(sourceId) || !isTauri()) return null
   try {
     return await syncWorkspaceWithGit(sourceId)
   } catch (error) {

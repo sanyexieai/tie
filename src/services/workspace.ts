@@ -224,9 +224,9 @@ export const workspaceService = {
     if (!paths.length) return null
     return invoke<WorkspaceSnapshot>('import_markdown_files', { paths, targetSourceId, createdAt: now() })
   },
-  async openMarkdownFiles(): Promise<{ snapshot: WorkspaceSnapshot; openedPageIds: string[]; createdSourceIds: string[] } | null> {
+  async openMarkdownFiles(inputPaths?: string[]): Promise<{ snapshot: WorkspaceSnapshot; openedPageIds: string[]; createdSourceIds: string[] } | null> {
     if (!await isTauri()) return null
-    const selected = await open({
+    const selected = inputPaths ?? await open({
       multiple: true,
       title: '从文件打开',
       filters: [

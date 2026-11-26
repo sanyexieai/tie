@@ -2,6 +2,7 @@
 //!
 //! Pure filesystem operations — no Tauri dependency.
 
+pub mod changes;
 pub mod api;
 pub mod backend_session;
 pub mod export;

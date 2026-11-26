@@ -31,6 +31,7 @@ struct McpRuntime {
     fallback_confirmed: bool,
     pending: Option<(String, String)>,
     confirmation_number: u64,
+    origin: tie_local::identity::ChangeOrigin,
 }
 
 impl McpRuntime {
@@ -64,6 +65,7 @@ impl McpRuntime {
             fallback_confirmed: false,
             pending: None,
             confirmation_number: 0,
+            origin: tie_local::changes::current_origin(),
         })
     }
 
@@ -82,6 +84,13 @@ impl McpRuntime {
         let id = message["id"].clone();
         // Keep discovery available so an Agent can ask for authorization or fallback approval.
         if method == "initialize" {
+            if !self.server {
+                if let Some(name) = params.pointer("/clientInfo/name").and_then(Value::as_str) {
+                    self.origin.client_id = name.to_owned(); self.origin.client_name = name.to_owned();
+                    self.origin.actor = name.to_owned();
+                    self.origin.client_version = params.pointer("/clientInfo/version").and_then(Value::as_str).unwrap_or("").to_owned();
+                }
+            }
             let mut response = self.remote(message).ok().flatten().unwrap_or_else(
                 || json!({ "jsonrpc": "2.0", "id": id, "result": initialize(&params) }),
             );
@@ -91,7 +100,7 @@ impl McpRuntime {
                 } else {
                     "有服务器绑定时，内容请求优先使用 HTTP。HTTP 异常不会自动切换本地；调用 tie_connection 查看原因，并先向用户确认，获准后才能 confirm_local。无本地登录会话时请用户提供 MCP token。工具列表成功不代表 HTTP 已连通，请看 tie_doctor.transport。"
                 };
-                result["instructions"] = json!(format!("{connection_instructions} 检索知识先用 tie_tree 按层选择分类，再用 tie_search 的 root/exclude 缩小范围，必要时 tie_get 读全文。写入尽量用 parentId 归入合适的已有分类，分类非必填，不自动重排旧树。"));
+                result["instructions"] = json!(format!("{connection_instructions} 检索知识先用 tie_tree 按层选择分类，再用 tie_search 的 root/exclude 缩小范围，必要时 tie_get 读全文。写入尽量用 parentId 归入合适的已有分类，分类非必填，不自动重排旧树。需要讨论先用 tie_signal_list，再用 tie_signal_add 留下支持/异议/修正；tie_signal_resolve 处理意见，采用前须先保存正文。"));
             }
             return Some(response);
         }
@@ -150,7 +159,7 @@ impl McpRuntime {
             }
         }
         let ws = self.workspace.as_ref().expect("local workspace opened");
-        let mut response = dispatch_message(ws, message)?;
+        let mut response = tie_local::changes::with_change_context(self.origin.clone(), None, false, || Ok(dispatch_message(ws, message))).ok()??;
         if !self.server
             && local_write_request(message)
             && response.pointer("/result/isError").and_then(Value::as_bool) == Some(false)
@@ -175,11 +184,12 @@ impl McpRuntime {
             }
             self.http = updated;
         }
-        let response = match &self.http {
+        if matches!(&self.http, Ok(None)) { return Ok(None); }
+        let response = tie_local::changes::with_change_context(self.origin.clone(), None, false, || match &self.http {
             Ok(Some(http)) => http.request(message),
-            Ok(None) => return Ok(None),
+            Ok(None) => unreachable!(),
             Err(error) => Err(error.clone()),
-        };
+        }).map(|value| value);
         match response {
             Ok(response) => {
                 self.fallback_confirmed = false;
@@ -306,7 +316,7 @@ fn local_write_request(message: &Value) -> bool {
     message.get("method").and_then(Value::as_str) == Some("tools/call")
         && matches!(
             message.pointer("/params/name").and_then(Value::as_str),
-            Some("tie_write" | "tie_restore" | "tie_import" | "tie_file_ingest")
+            Some("tie_write" | "tie_restore" | "tie_import" | "tie_file_ingest" | "tie_signal_add" | "tie_signal_resolve")
         )
 }
 
@@ -396,7 +406,7 @@ fn tool_err(error: String) -> Value {
 }
 
 fn tool_defs() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         tool("tie_connection", "查看服务器连接。HTTP 异常需要先向用户询问是否降级；仅在用户明确同意后调用 confirm_local，禁止 Agent 自行确认。", obj_props(json!({
             "action": { "type": "string", "enum": ["status", "confirm_local"] },
             "confirmationId": { "type": "string" },
@@ -466,6 +476,10 @@ fn tool_defs() -> Vec<Value> {
         tool("tie_related", "查看出链、入链、子页和同标签页面", obj_props(json!({
             "id_or_title": { "type": "string" }
         }))),
+        tool("tie_changes", "列出页面真实持久化变更及客户端/设备来源。", obj_props(json!({"id_or_title":{"type":"string"}}))),
+        tool("tie_signal_list", "列出页面讨论、回复及处理状态。", obj_props(json!({"id_or_title":{"type":"string"}}))),
+        tool("tie_signal_add", "添加页面意见或回复；使用当前页面updatedAt作为baseUpdatedAt，不自动改正文。", obj_props(json!({"id_or_title":{"type":"string"},"id":{"type":"string"},"body":{"type":"string"},"quote":{"type":"string"},"opinionKind":{"type":"string","enum":["objection","correction","support"]},"baseUpdatedAt":{"type":"string"},"replyTo":{"type":"string"}}))),
+        tool("tie_signal_resolve", "处理意见：resolved/adopted/withdrawn。adopted必须先保存实际修改并传当前appliedUpdatedAt，不自动替换正文。", obj_props(json!({"id_or_title":{"type":"string"},"id":{"type":"string"},"status":{"type":"string","enum":["resolved","adopted","withdrawn"]},"resolutionNote":{"type":"string"},"appliedUpdatedAt":{"type":"string"}}))),
         tool("tie_write", "写入知识。尽量先用 tie_tree 逐级选择最合适的已有分类，通过 parentId 归类；分类非必填，没有合适分类可直接写入，不自动重排旧树。不要手写 frontmatter，不要写「我」当 actor。", obj_props(json!({
             "title": { "type": "string" },
             "markdown": { "type": "string" },
@@ -509,7 +523,12 @@ fn tool_defs() -> Vec<Value> {
             "migrationId": { "type": "string" },
             "limit": { "type": "integer" }
         }))),
-    ]
+    ];
+    for tool in &mut tools {
+        let required = match tool["name"].as_str() { Some("tie_signal_add") => Some(json!(["id_or_title","body","baseUpdatedAt","opinionKind"])), Some("tie_signal_resolve") => Some(json!(["id_or_title","id","status"])), Some("tie_changes" | "tie_signal_list") => Some(json!(["id_or_title"])), _ => None };
+        if let Some(required) = required { tool["inputSchema"]["required"] = required; }
+    }
+    tools
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -584,6 +603,26 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
             optional_string_arg(args, "compareTo")?,
         ),
         "tie_restore" => restore_page(ws, args),
+        "tie_changes" | "tie_signal_list" | "tie_signal_add" | "tie_signal_resolve" => {
+            let key = required_str(args, "id_or_title")?;
+            let page_id = if let Some(page) = ws.get_by_id(key)? { page.id } else {
+                let mut matches = ws.load_all(false)?.into_iter().filter(|page| page.title.eq_ignore_ascii_case(key));
+                if let Some(page) = matches.next() { if matches.next().is_some() { return Err("页面标题不唯一，请使用页面ID".into()); } page.id }
+                else if matches!(name, "tie_changes" | "tie_signal_list") && !tie_local::changes::list_reviews(ws.root(), key)?.entries.is_empty() { key.to_owned() }
+                else { return Err("页面不存在".into()); }
+            };
+            let mut file = if name == "tie_signal_add" {
+                let id = str_owned(args, "id").unwrap_or_else(|| format!("op_{}", tie_local::revision_id()));
+                let origin = tie_local::changes::current_origin();
+                if !matches!(required_str(args,"opinionKind")?, "objection" | "correction" | "support") { return Err("意见类型无效".into()); }
+                tie_local::changes::add_signal(ws.root(), &page_id, &id, &origin.actor.clone(), required_str(args,"opinionKind")?, optional_string_arg(args,"quote")?.unwrap_or(""), required_str(args,"body")?, required_str(args,"baseUpdatedAt")?, optional_string_arg(args,"replyTo")?, Some(origin), None)?
+            } else if name == "tie_signal_resolve" {
+                tie_local::changes::resolve_signal(ws.root(), &page_id, required_str(args,"id")?, required_str(args,"status")?, optional_string_arg(args,"resolutionNote")?, optional_string_arg(args,"appliedUpdatedAt")?, Some(tie_local::changes::current_origin()))?
+            } else { tie_local::changes::list_reviews(ws.root(), &page_id)? };
+            if name == "tie_changes" { file.entries.retain(|entry| entry.kind == "change"); }
+            if name == "tie_signal_list" { file.entries.retain(|entry| entry.kind == "opinion"); }
+            Ok(json!(file))
+        }
         "tie_write" => write_page(ws, args),
         "tie_tree" => {
             let root = optional_string_arg(args, "root")?;
@@ -712,7 +751,9 @@ fn write_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
         }
         parent_id = Some(Some(parent.page.id));
     }
-    let saved = ws.write_page(WritePageInput {
+    let mut origin = tie_local::changes::current_origin();
+    origin.actor = resolve_actor(str_arg(args, "actor"));
+    let saved = tie_local::changes::with_change_context(origin, None, false, || ws.write_page(WritePageInput {
         title: str_owned(args, "title"),
         markdown,
         page_id: str_owned(args, "pageId"),
@@ -725,17 +766,8 @@ fn write_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         icon: str_owned(args, "icon"),
-    })?;
-    append_audit(
-        ws.root(),
-        &json!({
-            "type": "write",
-            "actor": resolve_actor(str_arg(args, "actor")),
-            "pageId": saved.page.id,
-            "title": saved.page.title,
-            "status": "applied"
-        }),
-    );
+    }))?;
+
     Ok(serde_json::to_value(saved).map_err(|error| error.to_string())?)
 }
 
@@ -743,18 +775,10 @@ fn restore_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
     let key = required_str(args, "id_or_title")?;
     let revision_id = required_str(args, "revisionId")?;
     let expected = optional_string_arg(args, "expectedUpdatedAt")?;
-    let saved = ws.restore_revision_checked(key, revision_id, expected)?;
-    append_audit(
-        ws.root(),
-        &json!({
-            "type": "restore",
-            "actor": resolve_actor(str_arg(args, "actor")),
-            "pageId": saved.id,
-            "title": saved.title,
-            "revisionId": revision_id,
-            "status": "applied"
-        }),
-    );
+    let mut origin = tie_local::changes::current_origin();
+    origin.actor = resolve_actor(str_arg(args, "actor"));
+    let saved = tie_local::changes::with_change_context(origin, Some("restore"), false, || ws.restore_revision_checked(key, revision_id, expected))?;
+
     Ok(json!({ "restored": true, "revisionId": revision_id, "page": saved }))
 }
 
@@ -898,38 +922,6 @@ fn file_hrefs(markdown: &str) -> Vec<String> {
     out
 }
 
-fn append_audit(root: &Path, event: &Value) {
-    let dir = root.join(".tie").join("audit");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let mut line = json!({ "at": chrono_stamp() });
-    if let (Some(obj), Some(extra)) = (line.as_object_mut(), event.as_object()) {
-        for (key, value) in extra {
-            obj.insert(key.clone(), value.clone());
-        }
-    }
-    let path = dir.join("events.jsonl");
-    let mut file = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(_) => return,
-    };
-    let _ = writeln!(file, "{line}");
-}
-
-fn chrono_stamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    secs.to_string()
-}
-
 fn resolve_actor(explicit: Option<&str>) -> String {
     let raw = explicit.unwrap_or("").trim();
     let generic = raw.is_empty()
@@ -941,6 +933,8 @@ fn resolve_actor(explicit: Option<&str>) -> String {
     if !generic {
         return raw.to_owned();
     }
+    let origin_actor = tie_local::changes::current_origin().actor;
+    if !origin_actor.is_empty() { return origin_actor; }
     std::env::var("TIE_ACTOR")
         .ok()
         .map(|value| value.trim().to_owned())
@@ -1282,4 +1276,39 @@ mod tests {
         assert_eq!(target.workspace_id, "ws_demo");
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn runtime_origin_signals_versions_and_purged_changes_are_real_and_device_scoped() {
+        let dir = std::env::temp_dir().join(format!("tie-mcp-change-{}", tie_local::revision_id()));
+        let ws = LocalWorkspace::init(&dir, "src_test").unwrap();
+        let origin = tie_local::identity::ChangeOrigin { device_id: "device-test".into(), device_name: "Test Device".into(), ..Default::default() };
+        let mut runtime = McpRuntime { root: Some(dir.clone()), source_id: Some("src_test".into()), workspace: Some(ws.clone()), http: Ok(None), server: false, fallback_confirmed: false, pending: None, confirmation_number: 0, origin };
+        runtime.handle(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"Test Agent","version":"42"}}})).unwrap();
+        fn request(runtime: &mut McpRuntime, name: &str, args: Value) -> Value {
+            let response = runtime.handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap();
+            assert_ne!(response.pointer("/result/isError"),Some(&json!(true)),"{response}");
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+        }
+        let created = request(&mut runtime,"tie_write",json!({"title":"Changes","markdown":"# Changes\n\nfirst"}));
+        let id = created["page"]["id"].as_str().unwrap(); let initial = created["page"]["updatedAt"].as_str().unwrap();
+        let changes = request(&mut runtime,"tie_changes",json!({"id_or_title":id}));
+        assert_eq!(changes["entries"][0]["origin"]["clientName"], "Test Agent");
+        assert_eq!(changes["entries"][0]["origin"]["clientVersion"], "42");
+        assert_eq!(changes["entries"][0]["origin"]["deviceId"], "device-test");
+        assert_eq!(changes["entries"][0]["origin"]["deviceName"], "Test Device");
+        let signal = request(&mut runtime,"tie_signal_add",json!({"id_or_title":id,"id":"op_test","opinionKind":"correction","body":"change it","baseUpdatedAt":initial}));
+        assert_eq!(signal["sync"]["state"], "skipped");
+        let changed = request(&mut runtime,"tie_write",json!({"pageId":id,"markdown":"# Changes\n\nsecond"}));
+        let current = changed["page"]["updatedAt"].as_str().unwrap(); assert_ne!(current,initial);
+        request(&mut runtime,"tie_signal_resolve",json!({"id_or_title":id,"id":"op_test","status":"adopted","appliedUpdatedAt":current}));
+        request(&mut runtime,"tie_signal_resolve",json!({"id_or_title":id,"id":"op_test","status":"withdrawn"}));
+        assert!(call_tool(&ws,"tie_signal_resolve",&json!({"id_or_title":id,"id":"op_test","status":"resolved"})).is_err());
+        assert!(call_tool(&ws,"tie_signal_add",&json!({"id_or_title":id,"opinionKind":"note","body":"invalid","baseUpdatedAt":current})).is_err());
+        ws.soft_delete(id).unwrap(); ws.purge_page(id,false).unwrap();
+        let history = request(&mut runtime,"tie_changes",json!({"id_or_title":id}));
+        assert!(history["entries"].as_array().unwrap().iter().any(|event|event["type"]=="purge"));
+        assert!(local_write_request(&json!({"method":"tools/call","params":{"name":"tie_signal_add"}})));
+        assert!(local_write_request(&json!({"method":"tools/call","params":{"name":"tie_signal_resolve"}})));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
 }

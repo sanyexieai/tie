@@ -1310,6 +1310,7 @@ body.storage-source-reordering * { cursor: grabbing !important; user-select: non
 .tiptap-content pre .hljs-comment, .tiptap-content pre .hljs-quote { color: #9a938b; }.tiptap-content pre .hljs-keyword, .tiptap-content pre .hljs-selector-tag, .tiptap-content pre .hljs-literal { color: #d79587; }.tiptap-content pre .hljs-string, .tiptap-content pre .hljs-attr, .tiptap-content pre .hljs-template-variable { color: #b9cb91; }.tiptap-content pre .hljs-number, .tiptap-content pre .hljs-symbol, .tiptap-content pre .hljs-bullet { color: #d6b677; }.tiptap-content pre .hljs-title, .tiptap-content pre .hljs-function, .tiptap-content pre .hljs-type { color: #89b8c2; }
 .tiptap-content code { padding: .12em .3em; border-radius: 4px; background: var(--bg-hover); color: var(--accent-strong); font: .88em ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 .tiptap-content pre code { padding: 0; background: transparent; color: inherit; }
+.tiptap-content a.wiki-link-unresolved { color: var(--text-muted); text-decoration: underline dotted; cursor: help; }
 .tiptap-content a.child-page-card {
   display: inline-flex;
   align-items: center;

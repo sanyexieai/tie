@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
+import type { ChangeOrigin } from '@/services/change-origin'
 
 export interface AuditEvent {
+  id?: string
   at: string
   type: string
   actor?: string
@@ -8,6 +10,8 @@ export interface AuditEvent {
   title?: string
   status?: string
   note?: string
+  origin?: ChangeOrigin | null
+  changedFields?: string[]
 }
 
 function isTauri() {

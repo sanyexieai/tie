@@ -32,6 +32,12 @@ describe('link-actions source helpers', () => {
     await expect(rebindLinkedResource(local, 'file_ab')).rejects.toThrow(/不能重新绑定/)
   })
 
+  it('keeps temporary file directories out of resource registration targets', () => {
+    const temporary = source({ id: 'src_temporary_file', kind: 'local', path: '/tmp/external', temporary: true })
+    const formal = source({ id: 'src_local_formal', kind: 'local', path: '/tmp/formal' })
+    expect(linkableSources([temporary, formal], temporary.id)).toEqual([formal])
+  })
+
   it('rejects directory pick in the browser', async () => {
     const demo = source({ id: 'source-demo-local', kind: 'local' })
     await expect(pickLinkedResource('directory', demo)).rejects.toThrow(/不能选择目录/)

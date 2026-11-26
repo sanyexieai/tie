@@ -136,7 +136,7 @@ const activeSource = computed(() => pairedLocalSource.value ?? rawActiveSource.v
 const workspaceBadgeTitle = computed(() => {
   const source = activeSource.value
   if (!source) return ''
-  const mode = backend.connected ? '本地 + 服务器，保存后云同步' : '本地工作区'
+  const mode = source.temporary ? '临时工作区，修改保存到原文件' : backend.connected ? '本地 + 服务器，保存后云同步' : '本地工作区'
   return `${source.name}\n${source.path}\n${mode}`
 })
 const hasRemoteSaveConflict = computed(() => {
@@ -814,7 +814,9 @@ function saveWhenHidden() {
   if (document.visibilityState === 'hidden' && hasUnsavedChanges.value) void saveNow()
 }
 
+let unregisterEditorSave: (() => void) | undefined
 onMounted(() => {
+  unregisterEditorSave = store.registerEditorSaveHandler(async () => !hasUnsavedChanges.value || await saveNow())
   window.addEventListener('keydown', onShortcut)
   document.addEventListener('visibilitychange', saveWhenHidden)
   window.addEventListener('tie:find-in-page', onWorkspaceCommand)
@@ -824,6 +826,7 @@ onMounted(() => {
   window.addEventListener('tie:mobile-back', onMobileBack)
 })
 onBeforeUnmount(() => {
+  unregisterEditorSave?.()
   if (hasUnsavedChanges.value) void saveNow()
   window.removeEventListener('keydown', onShortcut)
   document.removeEventListener('visibilitychange', saveWhenHidden)

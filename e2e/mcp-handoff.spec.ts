@@ -64,6 +64,7 @@ async function openBrowserAgentSettings(page: Page, mcp: McpStatus) {
     else if (url.pathname === '/api/v1/providers' || url.pathname === '/api/v1/me/mcp-tokens' || url.pathname === `/api/v1/workspaces/${workspace.id}/sources`) body = []
     else if (url.pathname === `/api/v1/workspaces/${workspace.id}/pages`) body = [remotePage]
     else if (url.pathname === `/api/v1/workspaces/${workspace.id}/pages/${remotePage.id}`) body = remotePage
+    else if (url.pathname === `/api/v1/workspaces/${workspace.id}/pages/${remotePage.id}/reviews`) body = { entries: [] }
     else if (url.pathname === `/api/v1/workspaces/${workspace.id}/files`) body = { files: [] }
     else {
       unexpectedRequests.push(request.url())

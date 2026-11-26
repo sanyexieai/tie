@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { StorageSource } from '@/types'
 import { fileRootForSource } from '@/services/link-runtime'
+import type { DeviceFileBinding, FileBindingState } from '@/services/storage/file-meta'
 import { backendS3BlobStore, backendWorkspaceBlobStore, s3BlobStore } from '@/services/storage/blobs-remote'
 import { browserBlobStore } from '@/services/storage/blobs-browser'
 import {
@@ -27,6 +28,9 @@ export interface WorkspaceFileResource {
   openPath: string
   exists: boolean
   updatedAt: string
+  deviceBindings?: Record<string, DeviceFileBinding>
+  bindingState?: FileBindingState
+  currentDeviceId?: string | null
 }
 
 export interface IngestBytesOptions {

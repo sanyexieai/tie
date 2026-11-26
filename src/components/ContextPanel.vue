@@ -21,8 +21,9 @@ import { isCrossSourceLink, rebindLinkedResource, sourceChipLabel } from '@/serv
 import { openLocalLink } from '@/services/local-links'
 import { auditActorLabel, CHANGE_AGENTS } from '@/services/change-origin'
 import { listPageAuditEvents, type AuditEvent } from '@/services/audit'
-import { invoke } from '@tauri-apps/api/core'
-import { cancelPheromoneDraft, commitPheromoneDraft, focusPheromone, PHEROMONE_KIND_LABEL, pheromoneActorLabel, pheromoneState, pheromonesFor, removePheromone, setPheromonePanelOpen } from '@/services/pheromone'
+import { cancelPheromoneDraft, commitPheromoneDraft, focusPheromone, loadPheromones, PHEROMONE_KIND_LABEL, PHEROMONE_STATUS_LABEL, pheromoneActorLabel, pheromoneState, pheromonesFor, setPheromonePanelOpen, startPheromoneDraft, type Pheromone, type PheromoneKind } from '@/services/pheromone'
+import { CHANGE_FIELD_LABEL, CHANGE_TYPE_LABEL, resolvePageOpinion, reviewOriginDetails, reviewOriginLabel, reviewsForPage, type OpinionStatus } from '@/services/review-service'
+import { isBackendSourceId } from '@/services/backend'
 
 const store = useWorkspaceStore()
 const CONTEXT_TAB_KEY = 'tie.context-tab'
@@ -39,37 +40,22 @@ function loadContextTab(): ContextTab {
 
 const tab = ref<ContextTab>(loadContextTab())
 const emit = defineEmits<{ close: [] }>()
-const pheromones = computed(() => store.activePage ? pheromonesFor(store.activePage.id) : [])
+const pheromones = computed(() => store.activePage ? pheromonesFor(store.activePage.id, store.activePage.storageSourceId) : [])
 const auditEvents = ref<AuditEvent[]>([])
-interface ReviewEntry {
-  id: string
-  at: string
-  actor: string
-  kind: string
-  status: string
-  markdown?: string
-  quote?: string
-  body?: string
-  opinionKind?: string
-}
-const reviewEntries = ref<ReviewEntry[]>([])
+const reviewEntries = computed(() => store.activePage ? reviewsForPage(store.activePage.id, store.activePage.storageSourceId) : [])
 const reviewVersions = computed(() => reviewEntries.value.filter((item) => item.kind === 'version'))
 const finalVersion = computed(() => reviewVersions.value.find((item) => item.status === 'final') ?? null)
-const syncedOpinions = computed(() => {
-  const known = new Set(pheromones.value.map((item) => item.id))
-  return reviewEntries.value.filter((item) => item.kind === 'opinion' && !known.has(item.id))
-})
-const visibleAuditEvents = computed(() => auditEvents.value.filter((event) => event.type !== 'opinion'))
+const changes = computed(() => reviewEntries.value.filter((item) => item.kind === 'change').sort((a, b) => b.at.localeCompare(a.at)))
+const visibleAuditEvents = computed(() => auditEvents.value.filter((event) => event.type !== 'opinion' && !changes.value.some((change) => change.id === event.id || (change.at === event.at && change.type === event.type))))
+const showWithdrawn = ref(false)
+const visiblePheromones = computed(() => pheromones.value.filter((item) => showWithdrawn.value || item.status !== 'withdrawn'))
+const withdrawnCount = computed(() => pheromones.value.filter((item) => item.status === 'withdrawn').length)
+const reviewError = ref('')
+const reviewBusy = ref(false)
+const resolutionNotes = ref<Record<string, string>>({})
 function reviewExcerpt(markdown: string | undefined) {
   const text = (markdown ?? '').replace(/\s+/g, ' ').trim()
   return text.length > 80 ? `${text.slice(0, 80)}…` : text || '（空）'
-}
-function opinionLabel(kind: string | undefined) {
-  if (kind === 'correction' || kind === 'support' || kind === 'objection') return PHEROMONE_KIND_LABEL[kind]
-  return '意见'
-}
-function desktopSync() {
-  return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 }
 const pheromoneDraft = computed(() => {
   const draft = pheromoneState.draft
@@ -127,6 +113,8 @@ const outgoingFiles = computed(() => {
       exists: resource?.exists ?? false,
       availability,
       canRebind: canRebindRegisteredFile(resource),
+      bindingState: resource?.bindingState,
+      bindingNames: Object.values(resource?.deviceBindings ?? {}).map((binding) => binding.deviceName || binding.deviceId),
       sourceLabel: sourceChipLabel(source),
       crossSource: isCrossSourceLink(sourceId, page.storageSourceId),
     }
@@ -149,6 +137,8 @@ const outgoingFiles = computed(() => {
       exists: availability === 'ready',
       availability,
       canRebind: false,
+      bindingState: undefined,
+      bindingNames: [] as string[],
       sourceLabel: sourceChipLabel(source),
       crossSource: isCrossSourceLink(sourceId, page.storageSourceId),
     }
@@ -260,49 +250,61 @@ function quoteStillPresent(quote: string) {
   return markdown.replace(/\s+/g, ' ').includes(quote)
 }
 
+let reviewLoad = 0
 async function loadAuditEvents() {
+  const request = ++reviewLoad
   const page = store.activePage
-  if (!store.backgroundStarted || !page || tab.value !== 'audit') {
+  if (!store.backgroundStarted || !page) {
     auditEvents.value = []
-    reviewEntries.value = []
-    return
-  }
-  const events = await listPageAuditEvents(page.storageSourceId, page.id)
-  if (tab.value !== 'audit' || store.activePage?.id !== page.id) return
-  auditEvents.value = events
-  if (!desktopSync()) {
-    reviewEntries.value = []
     return
   }
   try {
-    const file = await invoke<{ entries?: ReviewEntry[] }>('list_page_reviews', { sourceId: page.storageSourceId, pageId: page.id })
-    if (tab.value !== 'audit' || store.activePage?.id !== page.id) return
-    reviewEntries.value = file.entries ?? []
-  } catch {
-    reviewEntries.value = []
+    const [, events] = await Promise.all([loadPheromones(page), tab.value === 'audit' ? listPageAuditEvents(page.storageSourceId, page.id) : Promise.resolve([])])
+    if (request !== reviewLoad) return
+    auditEvents.value = events
+    reviewError.value = ''
+  } catch (error) {
+    if (request === reviewLoad) reviewError.value = error instanceof Error ? error.message : '变更记录读取失败'
   }
 }
 
 async function leaveOpinion() {
-  const draft = pheromoneState.draft
   const page = store.activePage
-  if (!draft || !page) return
-  commitPheromoneDraft()
-  const item = pheromonesFor(draft.pageId)[0]
-  if (!item || !desktopSync()) return
+  if (!pheromoneDraft.value || !page || reviewBusy.value) return
+  reviewBusy.value = true
+  reviewError.value = ''
   try {
-    await invoke('add_page_opinion', {
-      sourceId: page.storageSourceId,
-      pageId: item.pageId,
-      id: item.id,
-      actor: item.actor,
-      opinionKind: item.kind,
-      quote: item.quote,
-      body: item.body,
-    })
-    await store.syncBackendNow()
-  } catch { /* 意见已留在本机，下次对齐再送出 */ }
-  await loadAuditEvents()
+    await commitPheromoneDraft(page)
+    if (!isBackendSourceId(page.storageSourceId)) await store.syncBackendNow()
+    await loadAuditEvents()
+  } catch (error) {
+    reviewError.value = error instanceof Error ? error.message : '意见保存失败'
+  } finally { reviewBusy.value = false }
+}
+
+function replyOpinion(item: Pheromone, kind: PheromoneKind) {
+  if (store.activePage) startPheromoneDraft(store.activePage.id, item.quote, kind, item.id)
+}
+function canAdopt(item: Pheromone) {
+  return Boolean(item.baseUpdatedAt && store.activePage?.updatedAt !== item.baseUpdatedAt)
+}
+async function resolveOpinion(item: Pheromone, status: Exclude<OpinionStatus, 'open'>) {
+  const page = store.activePage
+  const entry = reviewEntries.value.find((entry) => entry.id === item.id)
+  if (!page || !entry || reviewBusy.value) return
+  reviewBusy.value = true
+  reviewError.value = ''
+  try {
+    await resolvePageOpinion(page, entry, status, resolutionNotes.value[item.id] ?? '')
+    if (!isBackendSourceId(page.storageSourceId)) await store.syncBackendNow()
+    await loadAuditEvents()
+  } catch (error) {
+    reviewError.value = error instanceof Error ? error.message : '意见状态保存失败'
+  } finally { reviewBusy.value = false }
+}
+function onReviewsChanged(event: Event) {
+  const detail = (event as CustomEvent<{ sourceId: string; pageId: string }>).detail
+  if (detail?.sourceId === store.activePage?.storageSourceId && detail.pageId === store.activePage?.id && !reviewBusy.value) void loadAuditEvents()
 }
 
 watch(tab, (value) => {
@@ -310,15 +312,20 @@ watch(tab, (value) => {
   setPheromonePanelOpen(value === 'audit')
 }, { immediate: true })
 watch(
-  [() => store.backgroundStarted, tab, () => store.activePage?.id, () => store.backendSyncMode],
+  [() => store.backgroundStarted, tab, () => store.activePage?.id, () => store.activePage?.storageSourceId, () => store.activePage?.updatedAt, () => store.backendSyncMode],
   () => { void loadAuditEvents() },
   { immediate: true },
 )
 watch(() => pheromoneState.openRequest, () => { tab.value = 'audit' })
 onMounted(() => {
+  window.addEventListener('tie:reviews-changed', onReviewsChanged)
   if (pheromoneState.draft || pheromoneState.openRequest > 0) tab.value = 'audit'
 })
-onBeforeUnmount(() => setPheromonePanelOpen(false))
+onBeforeUnmount(() => {
+  reviewLoad += 1
+  window.removeEventListener('tie:reviews-changed', onReviewsChanged)
+  setPheromonePanelOpen(false)
+})
 </script>
 
 <template>
@@ -374,14 +381,15 @@ onBeforeUnmount(() => setPheromonePanelOpen(false))
             :title="fileLinkTitle(file.mode, file.kind, file.availability)"
           >{{ fileLinkLabel(file.mode, file.kind, file.availability) }}</em>
           <small v-if="file.crossSource && file.sourceLabel" class="file-source-badge" :title="file.sourceLabel">{{ file.sourceLabel }}</small>
+          <small v-if="file.bindingNames.length" class="resource-device-label">已绑定设备：{{ file.bindingNames.join('、') }}</small>
           <button
             v-if="file.canRebind"
             class="mention-link-action"
             type="button"
             :disabled="rebindingId === file.id"
-            title="选择新的本机路径，保持原来的链接 id"
+            title="选择本机路径；保留其他设备的绑定和原链接 id"
             @click="rebindOutgoingFile(file)"
-          >{{ rebindingId === file.id ? '绑定中…' : '重新绑定' }}</button>
+          >{{ rebindingId === file.id ? '绑定中…' : (file.bindingState === 'other-device' || file.bindingState === 'unbound' ? '绑定到本机' : '重新绑定') }}</button>
         </div>
       </section>
       <section>
@@ -404,9 +412,21 @@ onBeforeUnmount(() => setPheromonePanelOpen(false))
       <p v-else class="muted">打开页面后显示局部图谱。</p>
     </div>
     <div v-else class="context-content audit-panel">
+      <p v-if="reviewError" class="review-error" role="alert">{{ reviewError }} <button type="button" @click="loadAuditEvents">重试</button></p>
+      <section v-if="changes.length" aria-label="保存变更">
+        <h3>保存变更</h3>
+        <article v-for="item in changes" :key="item.id" class="audit-event" :data-change-id="item.id">
+          <header>
+            <strong>{{ CHANGE_TYPE_LABEL[item.type || ''] || item.type || '保存修改' }}</strong>
+            <time>{{ item.at.slice(0, 16).replace('T', ' ') }}</time>
+          </header>
+          <p :title="reviewOriginDetails(item.origin)">{{ reviewOriginLabel(item.origin, item.actor) }}</p>
+          <p v-if="item.changedFields?.length">{{ item.changedFields.map((field) => CHANGE_FIELD_LABEL[field] || field).join('、') }}</p>
+        </article>
+      </section>
       <section v-if="reviewVersions.length">
         <h3>最终版本</h3>
-        <p class="muted">{{ finalVersion ? `正文已采用较新的修改（${finalVersion.actor}）。另一份留在下面。` : '两边都改过时，较新的修改会写入正文，另一份留在这里。' }}</p>
+        <p class="muted">{{ finalVersion ? `正文已采用选定版本（${finalVersion.actor}）。另一份留在下面。` : '两边都改过时会保留双方版本，正文不会自动覆盖，请先比较后处理。' }}</p>
         <article v-for="item in reviewVersions" :key="item.id" class="audit-event">
           <header>
             <strong>{{ item.status === 'final' ? '最终版本' : (item.status === 'dropped' ? '未采用' : '待选') }}</strong>
@@ -417,7 +437,7 @@ onBeforeUnmount(() => setPheromonePanelOpen(false))
         </article>
       </section>
       <form v-if="pheromoneDraft" class="pheromone-draft" @submit.prevent="leaveOpinion">
-        <header><em :class="pheromoneDraft.kind">{{ PHEROMONE_KIND_LABEL[pheromoneDraft.kind] }}</em><span>针对这段原文</span></header>
+        <header><em :class="pheromoneDraft.kind">{{ PHEROMONE_KIND_LABEL[pheromoneDraft.kind] }}</em><span>{{ pheromoneDraft.replyTo ? '回复这条意见' : '针对这段原文' }}</span></header>
         <blockquote>{{ pheromoneDraft.quote }}</blockquote>
         <div class="pheromone-origin">
           <span :title="pheromoneState.clientLabel">{{ pheromoneState.clientLabel }}</span>
@@ -428,13 +448,14 @@ onBeforeUnmount(() => setPheromonePanelOpen(false))
         </div>
         <textarea v-model="pheromoneDraft.body" rows="3" autofocus :placeholder="pheromoneDraft.kind === 'correction' ? '写下修正' : (pheromoneDraft.kind === 'objection' ? '写下异议' : '写下支持的理由')"></textarea>
         <div>
-          <button type="submit" :disabled="!pheromoneDraft.body.trim()">留下</button>
+          <button type="submit" :disabled="reviewBusy || !pheromoneDraft.body.trim()">{{ reviewBusy ? '保存中…' : '留下' }}</button>
           <button type="button" @click="cancelPheromoneDraft">取消</button>
         </div>
       </form>
       <p v-if="!pheromones.length && !pheromoneDraft" class="muted">这一页还没有信息素。</p>
+      <label v-if="withdrawnCount" class="review-withdrawn-toggle"><input v-model="showWithdrawn" type="checkbox"> 显示已撤回（{{ withdrawnCount }}）</label>
       <article
-        v-for="item in pheromones"
+        v-for="item in visiblePheromones"
         :key="item.id"
         class="pheromone-card"
         :class="[item.kind, { active: pheromoneState.activeId === item.id, orphan: !quoteStillPresent(item.quote) }]"
@@ -444,26 +465,33 @@ onBeforeUnmount(() => setPheromonePanelOpen(false))
       >
         <header>
           <em>{{ PHEROMONE_KIND_LABEL[item.kind] }}</em>
-          <strong :title="pheromoneActorLabel(item)">{{ pheromoneActorLabel(item) }}</strong>
+          <strong :title="reviewOriginDetails(item.origin)">{{ pheromoneActorLabel(item) }}</strong>
           <time>{{ item.createdAt.slice(0, 16).replace('T', ' ') }}</time>
         </header>
+        <small>{{ PHEROMONE_STATUS_LABEL[item.status || 'open'] }}{{ item.replyTo ? ' · 回复意见' : '' }}{{ item.durable ? '' : ' · 尚未导入共享记录' }}</small>
         <p class="pheromone-quote">{{ item.quote }}</p>
         <p class="pheromone-body">{{ item.body }}</p>
         <small v-if="!quoteStillPresent(item.quote)">原文已不在页面中</small>
-        <button type="button" @click.stop="store.activePage && removePheromone(store.activePage.id, item.id)">撤回</button>
-      </article>
-      <article v-for="item in syncedOpinions" :key="item.id" class="pheromone-card" :class="item.opinionKind || 'objection'">
-        <header>
-          <em>{{ opinionLabel(item.opinionKind) }}</em>
-          <strong>{{ item.actor || '另一端' }}</strong>
-          <time>{{ item.at.slice(0, 16).replace('T', ' ') }}</time>
-        </header>
-        <p v-if="item.quote" class="pheromone-quote">{{ item.quote }}</p>
-        <p class="pheromone-body">{{ item.body }}</p>
+        <template v-if="item.status !== 'withdrawn' && item.durable">
+          <div class="review-actions" @click.stop>
+            <button type="button" :disabled="reviewBusy" @click="replyOpinion(item, 'support')">回复支持</button>
+            <button type="button" :disabled="reviewBusy" @click="replyOpinion(item, 'correction')">回复修正</button>
+            <button type="button" :disabled="reviewBusy" @click="replyOpinion(item, 'objection')">回复异议</button>
+          </div>
+          <input v-if="item.status === 'open'" v-model="resolutionNotes[item.id]" class="review-resolution-note" aria-label="处理说明" placeholder="处理说明（可选）" @click.stop>
+          <div class="review-actions" @click.stop>
+            <button v-if="item.status === 'open'" type="button" :disabled="reviewBusy" @click="resolveOpinion(item, 'resolved')">已处理</button>
+            <button v-if="item.status === 'open'" type="button" :disabled="reviewBusy || !canAdopt(item)" title="修改并保存正文后，将此意见关联到已保存的版本" @click="resolveOpinion(item, 'adopted')">采用已保存修改</button>
+            <button type="button" :disabled="reviewBusy" @click="resolveOpinion(item, 'withdrawn')">撤回</button>
+          </div>
+        </template>
+        <small v-if="item.resolutionOrigin" :title="reviewOriginDetails(item.resolutionOrigin)">处理：{{ reviewOriginLabel(item.resolutionOrigin) }}</small>
+        <small v-if="item.resolutionNote">{{ item.resolutionNote }}</small>
+        <small v-if="item.appliedUpdatedAt">采用版本：{{ item.appliedUpdatedAt.slice(0, 19).replace('T', ' ') }}</small>
       </article>
       <article v-for="(event, index) in visibleAuditEvents" :key="`${event.at}-${index}`" class="audit-event">
         <header>
-          <strong :title="auditActorLabel(event.actor)">{{ auditActorLabel(event.actor) }}</strong>
+          <strong :title="reviewOriginDetails(event.origin)">{{ event.origin ? reviewOriginLabel(event.origin, event.actor) : auditActorLabel(event.actor) }}</strong>
           <time>{{ event.at.slice(0, 16).replace('T', ' ') }}</time>
         </header>
         <p>{{ event.title || event.note || event.type }}</p>
@@ -471,3 +499,13 @@ onBeforeUnmount(() => setPheromonePanelOpen(false))
     </div>
   </aside>
 </template>
+
+<style scoped>
+.review-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.review-actions button, .review-error button { border: 1px solid var(--border); border-radius: 5px; padding: 3px 5px; color: var(--text-muted); background: var(--bg-elevated); font-size: 11px; cursor: pointer; }
+.review-actions button:disabled { opacity: .45; cursor: default; }
+.review-resolution-note { min-width: 0; width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 5px; padding: 5px; color: var(--text); background: var(--bg-main); font-size: 12px; }
+.review-withdrawn-toggle { display: flex; align-items: center; gap: 4px; color: var(--text-muted); font-size: 11px; }
+.review-error { color: var(--text-muted); font-size: 12px; }
+.resource-device-label { flex-basis: 100%; color: var(--text-faint); font-size: 10px; overflow-wrap: anywhere; }
+</style>

@@ -10,9 +10,10 @@ import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import StarterKit from '@tiptap/starter-kit'
 import Link from '@tiptap/extension-link'
 import { TieCodeBlock } from '@/extensions/code-block'
+import { WikiLink, wikiPageHref } from '@/extensions/wiki-link'
 import Placeholder from '@tiptap/extension-placeholder'
 import Image from '@tiptap/extension-image'
-import { Table } from '@tiptap/extension-table'
+import { TieTable } from '@/extensions/table'
 import TableCell from '@tiptap/extension-table-cell'
 import TableHeader from '@tiptap/extension-table-header'
 import TableRow from '@tiptap/extension-table-row'
@@ -140,7 +141,16 @@ function decorateFileLinks() {
   const context = linkContext()
   const dom = editor.value?.view.dom
   if (!dom) return
-  for (const anchor of dom.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+  for (const anchor of dom.querySelectorAll<HTMLAnchorElement>('a[href], a[data-wiki-title]')) {
+    const wikiTitle = anchor.getAttribute('data-wiki-title')
+    if (wikiTitle !== null) {
+      // Page metadata can arrive later; resolving a title must not save or reset the document.
+      const href = wikiPageHref(wikiTitle, props.pages)
+      if (href) anchor.setAttribute('href', href)
+      else anchor.removeAttribute('href')
+      anchor.classList.toggle('wiki-link-unresolved', !href)
+      anchor.title = href ? wikiTitle : `未找到唯一页面：${wikiTitle}`
+    }
     const href = anchor.getAttribute('href') ?? ''
     // Strip legacy target=_blank so in-app schemes never spawn a browser tab.
     if (href.startsWith('tie://') || /^file:/i.test(href)) {
@@ -1017,7 +1027,7 @@ function createPheromoneExtension() {
             decorations(state) {
               if (!props.enablePheromone) return DecorationSet.empty
               const decorations = []
-              for (const item of pheromonesFor(props.pageId)) {
+              for (const item of pheromonesFor(props.pageId, props.pages.find((page) => page.id === props.pageId)?.storageSourceId ?? '').filter((item) => item.status !== 'withdrawn')) {
                 const range = findQuoteRange(state.doc, item.quote)
                 if (!range || range.from >= range.to) continue
                 decorations.push(Decoration.inline(range.from, range.to, {
@@ -1053,6 +1063,7 @@ const editor = useEditor({
       link: false,
     }),
     TieLink,
+    WikiLink.configure({ resolveHref: (title) => wikiPageHref(title, props.pages) }),
     Markdown,
     TieCodeBlock.configure({ lowlight }),
     createAssetImageExtension().configure({ allowBase64: false, inline: true }),
@@ -1060,7 +1071,7 @@ const editor = useEditor({
     Placeholder.configure({ placeholder: '开始写作，支持 Markdown 快捷输入…' }),
     TaskList,
     TaskItem.configure({ nested: true }),
-    Table.configure({ resizable: true }),
+    TieTable.configure({ resizable: true }),
     TableRow,
     TableHeader,
     TableCell,
@@ -1254,7 +1265,7 @@ watch(() => props.pages.map((page) => `${page.id}:${page.parentId ?? ''}:${page.
 watch(() => props.spellcheck, (enabled) => editor.value?.view.dom.setAttribute('spellcheck', String(enabled)))
 watch(() => props.pageId, () => scheduleDecorateFileLinks())
 watch(() => props.backgroundStarted, (ready) => { if (ready) scheduleDecorateFileLinks() })
-watch(() => pheromoneRevision(props.pageId), () => {
+watch(() => pheromoneRevision(props.pageId, props.pages.find((page) => page.id === props.pageId)?.storageSourceId ?? ''), () => {
   const current = editor.value
   if (!current || current.isDestroyed) return
   current.view.dispatch(current.state.tr.setMeta('pheromone', true))

@@ -52,26 +52,42 @@ pub(crate) async fn sync_backend_workspace(
 #[tauri::command]
 pub(crate) async fn list_page_reviews(app: AppHandle, source_id: String, page_id: String) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        if super::temporary::is_temporary(&source_id) { return serde_json::to_value(super::temporary::list_reviews(&app, &source_id, &page_id)?).map_err(|error| error.to_string()); }
         let ws = open_workspace(&app, &source_id)?;
-        Ok(backend_sync::read_review_file(ws.root(), &page_id))
+        serde_json::to_value(tie_storage::local::changes::list_reviews(ws.root(), &page_id)?).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub(crate) fn add_page_opinion(
-    app: AppHandle,
-    source_id: String,
-    page_id: String,
-    id: String,
-    actor: String,
-    opinion_kind: String,
-    quote: String,
-    body: String,
-) -> Result<(), String> {
+pub(crate) async fn merge_page_reviews(app: AppHandle, source_id: String, page_id: String, entries: Vec<tie_storage::local::changes::ReviewEntry>) -> Result<tie_storage::local::changes::ReviewFile, String> {
+    tauri::async_runtime::spawn_blocking(move || { let ws = open_workspace(&app, &source_id)?; tie_storage::local::changes::merge_review_file(ws.root(), &page_id, tie_storage::local::changes::ReviewFile { entries }) }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn add_page_opinion(
+    app: AppHandle, source_id: String, page_id: String, id: String, actor: String,
+    opinion_kind: String, quote: String, body: String, base_updated_at: Option<String>,
+    reply_to: Option<String>, origin: Option<tie_storage::identity::ChangeOrigin>, at: Option<String>,
+) -> Result<tie_storage::local::changes::ReviewFile, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     let ws = open_workspace(&app, &source_id)?;
-    backend_sync::add_opinion(ws.root(), &page_id, &id, &actor, &opinion_kind, &quote, &body)
+    tie_storage::local::changes::add_signal(ws.root(), &page_id, &id, &actor, &opinion_kind, &quote, &body,
+        base_updated_at.as_deref().unwrap_or(""), reply_to.as_deref(), origin, at.as_deref())
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn resolve_page_opinion(
+    app: AppHandle, source_id: String, page_id: String, id: String, status: String,
+    resolution_note: Option<String>, applied_updated_at: Option<String>, origin: Option<tie_storage::identity::ChangeOrigin>,
+) -> Result<tie_storage::local::changes::ReviewFile, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+    let ws = open_workspace(&app, &source_id)?;
+    tie_storage::local::changes::resolve_signal(ws.root(), &page_id, &id, &status,
+        resolution_note.as_deref(), applied_updated_at.as_deref(), origin)
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

@@ -178,6 +178,7 @@ impl HttpTransport {
             .post(format!("{}/mcp", self.endpoint))
             .header("Accept", "application/json, text/event-stream")
             .header("MCP-Protocol-Version", "2025-06-18")
+            .header("x-tie-origin", tie_local::changes::origin_header(&tie_local::changes::current_origin())?)
             .bearer_auth(token)
             .json(message);
         if let Some(workspace_id) = workspace_id {

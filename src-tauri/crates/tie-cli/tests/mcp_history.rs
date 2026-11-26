@@ -126,8 +126,8 @@ fn history_diff_and_restore_roundtrip_preserves_both_versions_and_audits_restore
     assert_eq!(identical["changed"], false);
     assert_eq!(identical["metadataChanges"], json!([]));
     assert_eq!(identical["diff"], "");
-    let audit = fs::read_to_string(agent.workspace.root().join(".tie/audit/events.jsonl")).unwrap();
-    let event: Value = serde_json::from_str(audit.lines().last().unwrap()).unwrap();
+    let audit = agent.call("tie_changes", json!({"id_or_title":id}));
+    let event = audit["entries"].as_array().unwrap().iter().find(|event| event["type"] == "restore").unwrap();
     assert_eq!(event["type"], "restore");
     assert_eq!(event["actor"], "Restore tester");
     assert_eq!(event["pageId"], id);
@@ -143,7 +143,7 @@ fn rejected_history_requests_do_not_modify_page_revisions_or_restore_audit() {
     let history = agent.call("tie_history", json!({"id_or_title":id}));
     let revision = history[0]["id"].as_str().unwrap();
     let before = agent.call("tie_get", json!({"id_or_title":id}));
-    let audit_path = agent.workspace.root().join(".tie/audit/events.jsonl");
+    let audit_path = agent.workspace.root().join(".tie/reviews").join(format!("{id}.json"));
     let audit_before = fs::read(&audit_path).unwrap();
     agent.rejected("tie_restore", json!({"id_or_title":id, "revisionId":revision, "expectedUpdatedAt":"stale"}));
     for invalid in ["../other/123", "C:\\history", "other\\123"] {

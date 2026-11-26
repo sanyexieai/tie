@@ -24,6 +24,10 @@ Agent 怎么接：
 | `tie_revision_get` | 读取指定历史版本的整页内容 |
 | `tie_diff` | 对比历史版本与当前页或另一历史版本，返回正文 diff 和元数据变化 |
 | `tie_restore` | 将指定历史版本恢复为新的当前页；恢复前留史，可校验 `expectedUpdatedAt` |
+| `tie_changes` | 查看页面保存记录及客户端、设备、操作者 |
+| `tie_signal_list` | 查看共享信息素、回复和处理状态 |
+| `tie_signal_add` | 关联页面版本留下支持、异议、修正或回复 |
+| `tie_signal_resolve` | 标记已解决、已采用或已撤回；采用须关联实际保存版本 |
 | `tie_secret_search` | 在服务器凭据库检索说明、服务、环境等元数据，不返回密钥 |
 | `tie_secret_use` | 使用所有者已有授权，执行凭据绑定的固定 HTTP 操作，不返回密钥 |
 | `tie_secret_usage` | 查看服务器凭据的使用记录 |

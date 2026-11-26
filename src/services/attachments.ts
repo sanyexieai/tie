@@ -1,3 +1,4 @@
+import { currentBackendProfile } from '@/services/backend-profile'
 import { invoke } from '@tauri-apps/api/core'
 import type { Page } from '@/types'
 import {
@@ -18,6 +19,7 @@ import { isS3SourceId, loadLocalS3Providers, s3ConnectionForSource, s3SourceId }
 import { pageCloudSourceIds, pageSourceIds } from '@/services/page-sources'
 import { blobStoreFor } from '@/services/storage/blobs'
 import { isFileSourceId, sourceStubFromId } from '@/services/storage/types'
+import { isTemporaryStorageSourceId } from '@/services/storage-identity'
 
 export {
   ASSET_URL_PREFIX,
@@ -144,8 +146,9 @@ export function canStorePageAssets(page: Page) {
 }
 
 function canStoreAssetsOnSource(sourceId: string) {
+  if (isTemporaryStorageSourceId(sourceId)) return false
   if (isBackendSourceId(sourceId) || isBackendManagedS3SourceId(sourceId)) {
-    return Boolean(backendService.loadProfile().accessToken)
+    return Boolean(currentBackendProfile().accessToken)
   }
   if (sourceId === 'source-demo-local') return true
   if (!('__TAURI_INTERNALS__' in window)) return false
@@ -251,13 +254,13 @@ export async function ensurePageAssetsOnSource(page: Page, targetSourceId: strin
 async function listPageAssetNames(page: Page, sourceId: string) {
   const names = new Set(collectAssetNamesFromMarkdown(page.markdown, page.id))
   if (isBackendSourceId(sourceId)) {
-    const profile = backendService.loadProfile()
+    const profile = currentBackendProfile()
     if (profile.accessToken) {
       const listed = await backendService.listWorkspacePageAssets(profile, parseBackendWorkspaceId(sourceId), page.id)
       listed.forEach((name) => names.add(name))
     }
   } else if (isBackendManagedS3SourceId(sourceId)) {
-    const profile = backendService.loadProfile()
+    const profile = currentBackendProfile()
     if (profile.accessToken) {
       const listed = await backendService.listProviderPageAssets(profile, parseBackendProviderId(sourceId), page.id)
       listed.forEach((name) => names.add(name))

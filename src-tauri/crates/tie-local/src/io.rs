@@ -33,14 +33,17 @@ pub fn save_page_to_root(
     page.markdown = repair_utf8_mojibake(&page.markdown);
     fs::create_dir_all(root.join("pages")).map_err(|error| error.to_string())?;
     let previous_path = find_page_file(root, &page.id);
+    let mut previous_page = None;
     if let Some(path) = &previous_path {
         if let Ok(previous) = read_stored_page(root, path) {
+            previous_page = Some(previous.clone());
             if let Some(expected) = expected_updated_at {
                 if previous.updated_at != expected {
                     return Err("页面文件已在磁盘上被修改，请重新载入后再保存".to_owned());
                 }
             }
             if page_has_changed(&previous, &page) {
+                if !crate::changes::is_replication() && page.updated_at <= previous.updated_at { page.updated_at = crate::api::next_updated_at(Some(&previous.updated_at)); }
                 archive_page_revision(root, &previous)?;
             }
         }
@@ -57,6 +60,8 @@ pub fn save_page_to_root(
             let _ = fs::remove_file(previous);
         }
     }
+    crate::changes::record_change(root, previous_page.as_ref(), Some(&page), None)
+        .map_err(|error| format!("页面已保存，但变更记录写入失败：{error}"))?;
     Ok(page)
 }
 
@@ -218,7 +223,7 @@ pub fn restore_page_revision(
         updated_at: page.updated_at,
         ..revision
     };
-    save_page(sources, restored, None, None)
+    crate::changes::with_revision_context(revision_id, || save_page(sources, restored, None, None))
 }
 
 pub fn permanently_delete_pages(sources: &[StorageSource], pages: &[Page]) -> Result<(), String> {
@@ -236,6 +241,7 @@ pub fn permanently_delete_pages(sources: &[StorageSource], pages: &[Page]) -> Re
             fs::remove_dir_all(history).map_err(|error| format!("无法移除页面历史：{error}"))?;
         }
         remove_page_assets(&root, &page.id)?;
+        crate::changes::record_change(&root, Some(page), None, Some("purge"))?;
     }
     Ok(())
 }
@@ -334,7 +340,7 @@ mod tests {
         let root = env::temp_dir().join(format!("tie-history-io-{}", crate::page::new_page_id()));
         let sources = vec![StorageSource {
             id: "src".into(), name: "Fixture".into(), kind: "local_folder".into(),
-            path: root.to_string_lossy().into_owned(), available: true,
+            path: root.to_string_lossy().into_owned(), available: true, temporary: false,
         }];
         let mut current = sample("pg_history_io", "History");
         save_page_to_root(&root, current.clone(), None).unwrap();

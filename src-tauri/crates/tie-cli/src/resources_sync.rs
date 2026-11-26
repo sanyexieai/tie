@@ -5,7 +5,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tie_local::{page_asset_dir, LocalWorkspace};
+use tie_local::{merge_file_metadata, page_asset_dir, LocalWorkspace};
 use crate::backend_sync::{report_progress, BackendSyncProgress, BackendSyncStage};
 
 pub(crate) fn sync_resources(
@@ -138,6 +138,8 @@ fn upload_file(
     root: &Path,
     meta: &Value,
 ) -> Result<(), String> {
+    let clean = merge_file_metadata(&Value::Null, meta);
+    let meta = &clean;
     let id = field(meta, "id");
     let url = format!("{base}/files/{id}");
     if field(meta, "mode") == "copy" {
@@ -221,6 +223,17 @@ fn sync_files(
     for local in local_files {
         let id = check_file(&local)?;
         if let Some(other) = remote.remove(id) {
+            if field(&local, "mode") == "link" && field(other, "mode") == "link" {
+                let merged = merge_file_metadata(&local, other);
+                if merged != merge_file_metadata(&Value::Null, &local) { ws.files().upsert_metadata(&merged)?; }
+                if merged != merge_file_metadata(&Value::Null, other) || other.get("preview").is_some() {
+                    upload_file(client, base, token, ws.root(), &merged)?;
+                }
+                if completed.insert(id.to_owned()) {
+                    report_progress(observe, BackendSyncStage::Files, completed.len(), total);
+                }
+                continue;
+            }
             let local_stamp = field(&local, "updatedAt");
             let remote_stamp = field(other, "updatedAt");
             if local_stamp > remote_stamp {
@@ -407,5 +420,44 @@ pub(crate) mod tests {
             .is_file());
         drop(server);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn device_bindings_converge_in_both_directions_without_transmitting_link_previews() {
+        let dir = std::env::temp_dir().join(format!("tie-resource-device-sync-{}", tie_local::new_page_id()));
+        fs::create_dir_all(dir.join("local/pages")).unwrap();
+        fs::create_dir_all(dir.join("remote/pages")).unwrap();
+        let local = LocalWorkspace::open(&dir.join("local"), None).unwrap();
+        let remote = LocalWorkspace::open(&dir.join("remote"), None).unwrap();
+        let a = tie_local::identity::DeviceIdentity { id:"dev_a".into(), name:"A".into(), platform:"linux".into() };
+        let b = tie_local::identity::DeviceIdentity { id:"dev_b".into(), name:"B".into(), platform:"windows".into() };
+        let mut left = json!({ "id":"file_device", "mode":"link", "kind":"directory", "updatedAt":"2026-01-01T00:00:01Z", "preview":"private excerpt" });
+        tie_local::bind_file_to_device(&mut left, &a, "/same/source", json!({ "type":"desktop", "desktopPath":"/same/source" }), "2026-01-01T00:00:01Z");
+        let mut right = json!({ "id":"file_device", "mode":"link", "kind":"directory", "updatedAt":"2026-01-01T00:00:02Z" });
+        tie_local::bind_file_to_device(&mut right, &b, "/same/source", json!({ "type":"desktop", "desktopPath":"/same/source" }), "2026-01-01T00:00:02Z");
+        local.files().upsert_metadata(&left).unwrap();
+        remote.files().upsert_metadata(&right).unwrap();
+        let remote_root = remote.root().to_owned();
+        let server = crate::test_http::Server::start(move |request, body| respond(&remote_root, request, body));
+        let client = Client::builder().no_proxy().build().unwrap();
+        sync_resources(&client, &server.url, "", &local, &mut |_| {}).unwrap();
+        let merged = local.files().get("file_device").unwrap().unwrap();
+        let upstream = remote.files().get("file_device").unwrap().unwrap();
+        assert_eq!(merged["deviceBindings"], upstream["deviceBindings"]);
+        assert_eq!(merged["deviceBindings"].as_object().unwrap().len(), 2);
+        tie_local::bind_file_to_device(&mut right, &b, "D:\\Source", json!({ "type":"desktop", "desktopPath":"D:\\Source" }), "2026-01-01T00:00:04Z");
+        right["updatedAt"] = json!("2026-01-01T00:00:04Z");
+        tie_local::bind_file_to_device(&mut left, &a, "/new/source", json!({ "type":"desktop", "desktopPath":"/new/source" }), "2026-01-01T00:00:03Z");
+        left["updatedAt"] = json!("2026-01-01T00:00:03Z");
+        local.files().upsert_metadata(&left).unwrap();
+        remote.files().upsert_metadata(&right).unwrap();
+        sync_resources(&client, &server.url, "", &local, &mut |_| {}).unwrap();
+        let merged = local.files().get("file_device").unwrap().unwrap();
+        assert_eq!(tie_local::file_binding_path(&merged, "dev_a").as_deref(), Some("/new/source"));
+        assert_eq!(tie_local::file_binding_path(&merged, "dev_b").as_deref(), Some("D:\\Source"));
+        assert_eq!(merged["deviceBindings"], remote.files().get("file_device").unwrap().unwrap()["deviceBindings"]);
+        assert!(remote.files().all_metadata().iter().all(|item| item.get("preview").is_none()));
+        drop(server);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

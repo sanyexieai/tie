@@ -6,7 +6,7 @@ import { reconcileSaveAgainstRemote } from '@/services/save-reconcile'
 import { isLocalWinningConflict } from '@/services/storage/sync-merge'
 import { loadLocalS3Providers, loadS3ProviderMetadata, refreshS3Providers, s3StorageSource, takeS3SourceIdRemap, buildS3SourceIdHealingRemap } from '@/services/s3'
 import { captureStartupPages, mergeStartupPages, pageChangedSinceStartup } from '@/services/startup-pages'
-import { isCloudStorageSourceId, isLocalStorageSourceId } from '@/services/storage-identity'
+import { isCloudStorageSourceId, isLocalStorageSourceId, isTemporaryStorageSourceId } from '@/services/storage-identity'
 import { dedupeStorageSources, isWorkspaceFileSource, uniqueSourceIds } from '@/services/storage-sources'
 import { sourceStatusStore, syncQueue, storageRegistry } from '@/services/storage'
 import { transferPreservesHistory } from '@/services/transfer-policy'
@@ -77,6 +77,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const initialized = ref(false)
   const initializationStage = ref('正在准备应用…')
   const backgroundStarted = ref(false)
+  let editorSaveHandler: (() => Promise<boolean>) | undefined
+  function registerEditorSaveHandler(handler: () => Promise<boolean>) {
+    editorSaveHandler = handler
+    return () => { if (editorSaveHandler === handler) editorSaveHandler = undefined }
+  }
   const favoritePageIds = ref<PageId[]>([])
   const recentPageIds = ref<PageId[]>([])
   const collapsedPageIds = ref<PageId[]>([])
@@ -121,9 +126,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return sourceStatusStore.get(sourceId)
   }
   const defaultStorageSourceId = computed(() => {
-    const candidates = usesMobileUi.value
+    const visible = usesMobileUi.value
       ? allSources.value.filter((source) => isMobileSupportedStorageSource(source))
       : allSources.value
+    const candidates = visible.filter((source) => !source.temporary)
     const available = candidates.filter((source) => source.available !== false)
     const pool = available.length ? available : candidates
     return pool.find((source) => isCloudStorageSourceId(source.id))?.id
@@ -140,7 +146,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       return preferred
     }
     return allSources.value.find((source) => (
-      (source.kind === 'local' || source.kind === 'smb')
+      !source.temporary
+      && (source.kind === 'local' || source.kind === 'smb')
       && source.available !== false
       && Boolean(source.path)
     )) ?? null
@@ -525,7 +532,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       const target = pickAccountWorkspace(workspaces)
       if (!target) return empty
       backendSyncWorkspaceId = target.id
-      const sources = (workspace.value?.sources ?? []).filter((source) => source.kind === 'local' || source.kind === 'smb')
+      const sources = (workspace.value?.sources ?? []).filter((source) => !source.temporary && (source.kind === 'local' || source.kind === 'smb'))
       let pushed = 0
       let pulled = 0
       const conflicts: string[] = []
@@ -708,16 +715,22 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     persistPreferences()
   }
 
-  async function openFromFiles() {
-    const result = await workspaceService.openMarkdownFiles()
-    if (!result) return false
-    applySnapshot(result.snapshot)
-    const pageId = result.openedPageIds.find((id) => result.snapshot.pages.some((page) => page.id === id && !page.deletedAt))
-      ?? result.openedPageIds[0]
-      ?? result.snapshot.pages.find((page) => !page.deletedAt)?.id
-      ?? null
-    if (pageId) openPage(pageId)
-    return true
+  let openFilesFlight: Promise<unknown> = Promise.resolve()
+  function openFromFiles(paths?: string[]) {
+    const work = openFilesFlight.then(async () => {
+      if (editorSaveHandler && !await editorSaveHandler()) return false
+      const result = await workspaceService.openMarkdownFiles(paths)
+      if (!result) return false
+      applySnapshot(result.snapshot)
+      const pageId = result.openedPageIds.find((id) => result.snapshot.pages.some((page) => page.id === id && !page.deletedAt))
+        ?? result.openedPageIds[0]
+        ?? result.snapshot.pages.find((page) => !page.deletedAt)?.id
+        ?? null
+      if (pageId) activatePage(pageId)
+      return true
+    })
+    openFilesFlight = work.catch(() => undefined)
+    return work
   }
 
   async function openTieEntry() {
@@ -787,10 +800,20 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function removeStorageSource(sourceId: string) {
+    if (isTemporaryStorageSourceId(sourceId) && activePage.value && pageBoundToSource(activePage.value, sourceId)) {
+      if (editorSaveHandler && !await editorSaveHandler()) return false
+    }
     const snapshot = await workspaceService.removeStorageSource(sourceId)
     if (!snapshot) return false
     workspace.value = snapshot.workspace
     setPages(snapshot.pages.filter((page) => !pageBoundToSource(page, sourceId)))
+    const available = new Set(pages.value.filter((page) => !page.deletedAt).map((page) => page.id))
+    favoritePageIds.value = favoritePageIds.value.filter((id) => available.has(id))
+    recentPageIds.value = recentPageIds.value.filter((id) => available.has(id))
+    collapsedPageIds.value = collapsedPageIds.value.filter((id) => available.has(id))
+    if (activePageId.value && !available.has(activePageId.value)) {
+      activePageId.value = recentPageIds.value[0] ?? pages.value.find((page) => !page.deletedAt)?.id ?? null
+    }
     syncStorageSourceOrder()
     persistPreferences()
     return true
@@ -816,13 +839,15 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   function persistPreferences() {
     if (!workspace.value) return
+    const temporaryPageIds = new Set(pages.value.filter((page) => isTemporaryStorageSourceId(page.storageSourceId)).map((page) => page.id))
+    const temporarySourceIds = new Set(allSources.value.filter((source) => source.temporary).map((source) => source.id))
     workspaceService.savePreferences(workspace.value.id, {
-      favoritePageIds: favoritePageIds.value,
-      recentPageIds: recentPageIds.value,
-      collapsedPageIds: collapsedPageIds.value,
+      favoritePageIds: favoritePageIds.value.filter((id) => !temporaryPageIds.has(id)),
+      recentPageIds: recentPageIds.value.filter((id) => !temporaryPageIds.has(id)),
+      collapsedPageIds: collapsedPageIds.value.filter((id) => !temporaryPageIds.has(id)),
       spellcheckEnabled: spellcheckEnabled.value,
       sourceMode: sourceMode.value,
-      storageSourceOrder: storageSourceOrder.value,
+      storageSourceOrder: storageSourceOrder.value.filter((id) => !temporarySourceIds.has(id)),
       skillsSectionCollapsed: skillsSectionCollapsed.value,
     })
   }
@@ -884,8 +909,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function createPage(parentId: PageId | null) {
     const parent = parentId ? pages.value.find((item) => item.id === parentId) : null
+    if (parent && isTemporaryStorageSourceId(parent.storageSourceId)) throw new Error('临时工作区仅编辑当前文件，请在正式工作区创建页面')
     const fallbackPage = pages.value.find((item) => {
       if (item.deletedAt) return false
+      if (isTemporaryStorageSourceId(item.storageSourceId)) return false
       if (!usesMobileUi.value) return true
       const source = allSources.value.find((candidate) => candidate.id === item.storageSourceId)
       return source && isMobileSupportedStorageSource(source)
@@ -929,6 +956,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function createChildPage(parentId: PageId) {
     const parent = pages.value.find((page) => page.id === parentId)
     if (!parent) throw new Error('父页面不存在')
+    if (isTemporaryStorageSourceId(parent.storageSourceId)) throw new Error('临时工作区仅编辑当前文件，请在正式工作区创建页面')
     const child = await workspaceService.createPage(parentId, parent.storageSourceId)
     pages.value.push(child)
     expandPage(parentId)
@@ -942,6 +970,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function createChildFromText(parentId: PageId, rawTitle: string) {
     const parent = pages.value.find((page) => page.id === parentId && !page.deletedAt)
     if (!parent) throw new Error('父页面不存在')
+    if (isTemporaryStorageSourceId(parent.storageSourceId)) throw new Error('临时工作区仅编辑当前文件，请在正式工作区创建页面')
     const title = rawTitle.trim().replace(/\s+/g, ' ').slice(0, 120)
     if (!title) throw new Error('请先选中要展开的文字')
     const created = await workspaceService.createPage(parentId, parent.storageSourceId)
@@ -960,7 +989,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function createLinkedPage(title: string) {
-    const storageSourceId = activePage.value?.storageSourceId ?? defaultStorageSourceId.value
+    const activeSource = activePage.value?.storageSourceId
+    const storageSourceId = activeSource && !isTemporaryStorageSourceId(activeSource) ? activeSource : defaultStorageSourceId.value
     if (!storageSourceId) throw new Error('请先添加一个工作区')
     const created = await workspaceService.createPage(null, storageSourceId)
     const cleanTitle = title.trim() || '无标题'
@@ -972,6 +1002,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function duplicatePage(pageId: PageId) {
     const original = pages.value.find((page) => page.id === pageId && !page.deletedAt)
     if (!original) return null
+    if (isTemporaryStorageSourceId(original.storageSourceId)) throw new Error('请先将文件导入正式工作区后再复制页面')
     const created = await workspaceService.createPage(original.parentId, original.storageSourceId)
     const title = `${original.title || '无标题'} 副本`
     const hasHeading = original.markdown.startsWith('# ')
@@ -1075,11 +1106,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function runPendingWorkspaceMigrations() {
     try {
-      const originals = captureStartupPages(pages.value)
+      const originals = captureStartupPages(pages.value.filter((page) => !isTemporaryStorageSourceId(page.storageSourceId)))
       const before = new Map(originals.map((page) => [page.id, page]))
       await runFileHrefMigrationOnce({
         pages: originals,
-        sources: allSources.value,
+        sources: allSources.value.filter((source) => !source.temporary),
         persistPage: async (page) => {
           const original = before.get(page.id)
           if (original) await persist(page, { onlyIfUnchanged: original })
@@ -1093,7 +1124,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   /** Cheap idempotent sourceId backfill only — not file:/// (that is a one-shot update migration). */
   async function persistLegacyWorkspaceHrefs(originals: Page[]) {
     for (const page of originals) {
-      if (page.deletedAt) continue
+      if (page.deletedAt || isTemporaryStorageSourceId(page.storageSourceId)) continue
       const migrated = migratePageWorkspaceHrefs(page)
       if (migrated.markdown === page.markdown) continue
       const current = pages.value.find((item) => item.id === page.id)
@@ -1114,7 +1145,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       throw new Error('页面已移入回收站，请先恢复页面再编辑')
     }
     // 树层级只认 parent_id（写在 .tie/meta）；正文里的 tie://page 链接只做关联，不回写子页列表。
-    const contentDraft = migratePageWorkspaceHrefs(page)
+    const temporary = isTemporaryStorageSourceId(page.storageSourceId)
+    const contentDraft = temporary ? page : migratePageWorkspaceHrefs(page)
     // 无正文/标题/标签/删除态/树结构差异时不写盘、不刷新 updatedAt（避免自动保存空转）。
     if (!options?.force && previous && pageWriteEqual(contentDraft, previous)) {
       return
@@ -1122,7 +1154,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const draft = { ...contentDraft, updatedAt: new Date().toISOString() }
     let expectedUpdatedAt = options?.force ? undefined : previous?.updatedAt
     let forceWrite = Boolean(options?.force)
-    const localOnly = pageIsLocalOnly(previous ?? draft)
+    const localOnly = !temporary && pageIsLocalOnly(previous ?? draft)
+    const conflictMessage = temporary
+      ? '页面文件已在磁盘上被修改，请重新载入后再保存'
+      : '页面已在其他设备更新，请重新载入后再保存'
 
     // 云端协作冲突：本地领先时禁止静默覆盖。纯本地页没有跨端协作面，直接以编辑器为准。
     if (!forceWrite && syncConflicts.value.has(page.id)) {
@@ -1133,7 +1168,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           expectedUpdatedAt = undefined
           clearSyncConflict(page.id)
         } else {
-          throw new Error('页面已在其他设备更新，请重新载入后再保存')
+          throw new Error(conflictMessage)
         }
       }
     }
@@ -1154,7 +1189,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
             clearSyncConflict(page.id)
           } else {
             registerSyncConflict(page.id, previous.storageSourceId, draft.updatedAt, result.remote.updatedAt)
-            throw new Error('页面已在其他设备更新，请重新载入后再保存')
+            throw new Error(conflictMessage)
           }
         } else {
           expectedUpdatedAt = result.expectedUpdatedAt
@@ -1176,7 +1211,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (index === -1) pages.value.push(saved)
       else pages.value[index] = saved
       clearSyncConflict(saved.id)
-      if (options?.sync !== false) scheduleBackendSync()
+      if (options?.sync !== false && !isTemporaryStorageSourceId(saved.storageSourceId)) scheduleBackendSync()
       if (previous && previous.title !== saved.title) {
         const linkPattern = pageLinkPattern(saved.id)
         const targetUrl = `tie://page/${saved.id}`
@@ -1228,16 +1263,16 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function canTransferPageTo(targetSourceId: string, fromSourceId = activePage.value?.storageSourceId) {
-    if (!fromSourceId) return false
+    if (!fromSourceId || isTemporaryStorageSourceId(fromSourceId) || isTemporaryStorageSourceId(targetSourceId)) return false
     return storageRegistry.canTransfer(fromSourceId, targetSourceId)
   }
 
   function transferHistoryNotice(fromSourceId: string, toSourceId: string) {
     if (transferPreservesHistory(fromSourceId, toSourceId)) {
-      return '页面树、Markdown 文件、历史版本与图片附件会一并移动。'
+      return '页面树、Markdown 文件、历史版本、变更、讨论与图片附件会一并移动。'
     }
     if (isBackendRemoteSourceId(fromSourceId) || isBackendRemoteSourceId(toSourceId)) {
-      return '页面正文与图片附件会迁移；历史版本可能不会完整保留。'
+      return '页面正文、变更、讨论与图片附件会迁移；历史版本可能不会完整保留。'
     }
     return '页面正文会迁移，但历史版本与部分附件可能不会完整保留。'
   }
@@ -1245,6 +1280,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function transferPage(pageId: PageId, targetSourceId: string, includeChildren = false) {
     const page = pages.value.find((item) => item.id === pageId)
     if (!page) return false
+    if (!canTransferPageTo(targetSourceId, page.storageSourceId)) return false
     const pageIds = new Set<PageId>([page.id])
     if (includeChildren) {
       let changed = true
@@ -1346,6 +1382,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   let trashNoticeTimer: ReturnType<typeof globalThis.setTimeout> | undefined
 
   async function trashPage(pageId: PageId) {
+    const page = pages.value.find((item) => item.id === pageId)
+    if (page && isTemporaryStorageSourceId(page.storageSourceId)) {
+      await removeStorageSource(page.storageSourceId)
+      return
+    }
     const removed = collectSubtree(pageId)
     const deletedAt = new Date().toISOString()
     saving.value = true
@@ -1485,10 +1526,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   function canMovePage(pageId: PageId, parentId: PageId | null) {
     if (pageId === parentId) return false
     const page = pages.value.find((item) => item.id === pageId)
-    if (!page) return false
+    if (!page || isTemporaryStorageSourceId(page.storageSourceId)) return false
     if (parentId) {
       const parent = pages.value.find((item) => item.id === parentId)
-      if (!parent) return false
+      if (!parent || isTemporaryStorageSourceId(parent.storageSourceId)) return false
     }
     let current = parentId
     while (current) {
@@ -1512,6 +1553,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const page = pages.value.find((item) => item.id === pageId)
     const target = pages.value.find((item) => item.id === targetId)
     if (!page || !target || page.id === target.id) return false
+    if (isTemporaryStorageSourceId(target.storageSourceId)) return false
     const nextParentId = target.parentId
     if (!canMovePage(pageId, nextParentId)) return false
     const siblings = pages.value
@@ -1550,6 +1592,17 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function openPage(pageId: PageId) {
+    if (activePageId.value !== pageId && editorSaveHandler) {
+      return editorSaveHandler().then((saved) => {
+        if (saved) activatePage(pageId)
+        return saved
+      })
+    }
+    activatePage(pageId)
+    return true
+  }
+
+  function activatePage(pageId: PageId) {
     const switching = activePageId.value !== pageId
     activePageId.value = pageId
     expandPageAncestors(pageId)
@@ -1663,7 +1716,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function refreshBackendSyncCursor() {
     if (!desktopCanSync()) return
-    const sources = (workspace.value?.sources ?? []).filter((source) => source.kind === 'local' || source.kind === 'smb')
+    const sources = (workspace.value?.sources ?? []).filter((source) => !source.temporary && (source.kind === 'local' || source.kind === 'smb'))
     const next: Record<string, { local: string; remote: string }> = {}
     for (const source of sources) {
       try {
@@ -1680,6 +1733,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const backend = useBackendStore()
     if (!pageId || !backend.connected) return null
     const page = pages.value.find((item) => item.id === pageId)
+    if (page && isTemporaryStorageSourceId(page.storageSourceId)) return null
     if (!desktopCanSync()) return page && isBackendSourceId(page.storageSourceId) ? 'synced' : null
     if (syncConflicts.value.has(pageId)) return 'conflict'
     if (pageHasPendingRemoteSave(pageId)) return 'pending'
@@ -1711,7 +1765,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, pageBackendSync, saving, reloading, initialized, initializationStage, backgroundStarted, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, initializeBackground, reloadWorkspace, syncBackendSources, syncBackendNow, scheduleBackendSync, backendSyncMode, backendSyncRunning, backendSyncProgress, backendSyncLastCompletedAt, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, registerEditorSaveHandler, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, pageBackendSync, saving, reloading, initialized, initializationStage, backgroundStarted, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, initializeBackground, reloadWorkspace, syncBackendSources, syncBackendNow, scheduleBackendSync, backendSyncMode, backendSyncRunning, backendSyncProgress, backendSyncLastCompletedAt, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })
 
 if (import.meta.hot) {

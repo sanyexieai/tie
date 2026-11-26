@@ -4,6 +4,7 @@ import { detectCli, loadSettings } from './settings.js'
 import { findMcpToken, touchMcpToken } from './mcp-tokens.js'
 import { store } from './store.js'
 import { callVaultTool, isVaultTool, vaultTools } from './vault-mcp.js'
+import { requestChangeOrigin } from './change-origin.js'
 
 const LOCAL_FILE_TOOLS = new Set(['tie_file_ingest', 'tie_file_open_hint', 'tie_export', 'tie_import'])
 
@@ -30,12 +31,12 @@ export function mcpUrlForRequest(req) {
   return `${proto}://${host}/mcp`
 }
 
-export function exchangeWithTie(executable, args, message, timeoutMs = 20000) {
+export function exchangeWithTie(executable, args, message, timeoutMs = 20000, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const script = executable.toLowerCase().endsWith('.cmd') || executable.toLowerCase().endsWith('.bat')
     const child = script
-      ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', executable, ...args], { stdio: ['pipe', 'pipe', 'pipe'], env: mcpChildEnv() })
-      : spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'], env: mcpChildEnv() })
+      ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', executable, ...args], { stdio: ['pipe', 'pipe', 'pipe'], env: mcpChildEnv(extraEnv) })
+      : spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'], env: mcpChildEnv(extraEnv) })
     let out = ''
     let err = ''
     let settled = false
@@ -83,8 +84,8 @@ function bearer(req) {
   return header.startsWith('Bearer ') ? header.slice(7).trim() : ''
 }
 
-function mcpChildEnv() {
-  return { ...process.env, TIE_MCP_VIA: 'http' }
+function mcpChildEnv(extraEnv) {
+  return { ...process.env, ...extraEnv, TIE_MCP_VIA: 'http' }
 }
 
 function headerValue(req, name) {
@@ -101,7 +102,7 @@ function resolveCaller(req, jwtSecret) {
     if (!workspace) return { error: 404, message: '这个令牌绑定的工作区已经不存在' }
     const user = store.loadUsers().find((item) => item.id === token.userId)
     if (!user || user.disabled) return { error: 403, message: '账号已停用' }
-    return { workspace, userId: user.id, principal: { type: 'mcp-token', id: token.id }, touch: token.id }
+    return { workspace, userId: user.id, userName: user.name, clientName: token.name || 'HTTP MCP', principal: { type: 'mcp-token', id: token.id }, touch: token.id }
   }
   let payload
   try {
@@ -116,7 +117,7 @@ function resolveCaller(req, jwtSecret) {
   if (!workspaceId) return { error: 400, message: '缺少工作区' }
   const workspace = store.loadWorkspaces().find((item) => item.id === workspaceId && item.ownerId === user.id)
   if (!workspace) return { error: 404, message: '工作区不存在' }
-  return { workspace, userId: user.id, principal: { type: 'session', id: payload.sid || '' }, touch: null }
+  return { workspace, userId: user.id, userName: user.name, clientName: 'HTTP MCP', principal: { type: 'session', id: payload.sid || '' }, touch: null }
 }
 
 export async function handleMcpRequest(req, res, jwtSecret) {
@@ -173,13 +174,16 @@ export async function handleMcpRequest(req, res, jwtSecret) {
   }
   const workspaceDir = store.workspaceDir(workspace.id)
   try {
-    const response = await exchangeWithTie(status.cli, ['--workspace', workspaceDir, 'mcp'], message)
+    const origin = requestChangeOrigin(req, { userId: caller.userId, actor: caller.userName, clientName: caller.clientName })
+    const response = await exchangeWithTie(status.cli, ['--workspace', workspaceDir, 'mcp'], message, 20000, {
+      TIE_CHANGE_ORIGIN: JSON.stringify(origin),
+    })
     if (message.method === 'tools/list' && Array.isArray(response.result?.tools)) {
       response.result.tools = [...response.result.tools.filter((tool) => !LOCAL_FILE_TOOLS.has(tool.name) && !isVaultTool(tool.name)), ...vaultTools]
     }
     if (caller.touch) touchMcpToken(caller.touch)
     res.json(response)
   } catch (error) {
-    res.status(502).json({ message: error instanceof Error ? error.message : 'tie mcp 调用失败' })
+    res.status(error.status || 502).json({ message: error instanceof Error ? error.message : 'tie mcp 调用失败' })
   }
 }

@@ -11,6 +11,17 @@ export interface FileLocator {
   displayPath: string
 }
 
+export interface DeviceFileBinding {
+  deviceId: string
+  deviceName: string
+  platform: string
+  sourcePath: string
+  locator: FileLocator
+  boundAt: string
+}
+
+export type FileBindingState = 'portable' | 'bound' | 'other-device' | 'unbound'
+
 export interface FileMeta {
   id: string
   title: string
@@ -23,6 +34,7 @@ export interface FileMeta {
   sourcePath: string
   storedPath: string
   locator: FileLocator
+  deviceBindings: Record<string, DeviceFileBinding>
   contentHash?: string | null
   sha256?: string | null
   createdAt: string
@@ -58,6 +70,30 @@ function locatorFrom(raw: Record<string, unknown>, sourcePath: string, storedPat
   return locator
 }
 
+export function normalizeDeviceBindings(raw: unknown): Record<string, DeviceFileBinding> {
+  const bindings: Record<string, DeviceFileBinding> = {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return bindings
+  for (const [id, value] of Object.entries(raw)) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id) || !value || typeof value !== 'object') continue
+    const input = value as Record<string, unknown>
+    const sourcePath = text(input.sourcePath)
+    if (text(input.deviceId) !== id || !sourcePath) continue
+    bindings[id] = { deviceId: id, deviceName: text(input.deviceName), platform: text(input.platform), sourcePath,
+      locator: locatorFrom({ locator: input.locator }, sourcePath, sourcePath), boundAt: text(input.boundAt) }
+  }
+  return bindings
+}
+
+export function mergeDeviceBindings(left: unknown, right: unknown): Record<string, DeviceFileBinding> {
+  const merged = normalizeDeviceBindings(left)
+  for (const [id, binding] of Object.entries(normalizeDeviceBindings(right))) {
+    const previous = merged[id]
+    if (!previous || binding.boundAt > previous.boundAt
+      || (binding.boundAt === previous.boundAt && JSON.stringify(binding) > JSON.stringify(previous))) merged[id] = binding
+  }
+  return merged
+}
+
 export function normalizeFileMeta(
   raw: Record<string, unknown> | null | undefined,
   options: { sourceId?: string | null; now?: string } = {},
@@ -87,13 +123,14 @@ export function normalizeFileMeta(
     sourcePath,
     storedPath,
     locator: locatorFrom(input, sourcePath, storedPath),
+    deviceBindings: normalizeDeviceBindings(input.deviceBindings),
     contentHash: hash,
     sha256: hash,
     createdAt: text(input.createdAt) || now,
     updatedAt: text(input.updatedAt) || now,
   }
   if (sourceId) meta.sourceId = sourceId
-  if (input.preview != null) meta.preview = typeof input.preview === 'string' ? input.preview : null
+  if (mode === 'copy' && input.preview != null) meta.preview = typeof input.preview === 'string' ? input.preview : null
   if (input.entryCount != null) meta.entryCount = input.entryCount as FileMeta['entryCount']
   if (input.mtime != null) meta.mtime = text(input.mtime) || null
   return meta
@@ -111,13 +148,14 @@ export function fileMetaToJson(meta: FileMeta): Record<string, unknown> {
     sourcePath: meta.sourcePath,
     storedPath: meta.storedPath,
     locator: meta.locator,
+    deviceBindings: normalizeDeviceBindings(meta.deviceBindings),
     createdAt: meta.createdAt,
     updatedAt: meta.updatedAt,
   }
   if (meta.sourceId) json.sourceId = meta.sourceId
   if (meta.contentHash) json.contentHash = meta.contentHash
   if (meta.sha256) json.sha256 = meta.sha256
-  if (meta.preview != null) json.preview = meta.preview
+  if (meta.mode === 'copy' && meta.preview != null) json.preview = meta.preview
   if (meta.entryCount != null) json.entryCount = meta.entryCount
   if (meta.mtime != null) json.mtime = meta.mtime
   return json

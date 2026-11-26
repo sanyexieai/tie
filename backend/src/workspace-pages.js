@@ -6,6 +6,7 @@ import { syncRootTieFiles } from './solution-files.js'
 import { notifyWorkspace } from './live.js'
 import { store } from './store.js'
 import { deleteWorkspacePageAssets } from './workspace-assets.js'
+import { recordPageChange } from './reviews.js'
 
 const MAX_REVISIONS = 80
 
@@ -239,11 +240,13 @@ export function getWorkspacePage(workspaceId, pageId, sourceId) {
   return withSource(found.page, workspaceId, sourceId)
 }
 
-export function saveWorkspacePage(workspaceId, page, expectedUpdatedAt) {
+export function saveWorkspacePage(workspaceId, page, expectedUpdatedAt, context = {}) {
   migrateWorkspacePages(workspaceId)
   const currentPath = locatePageFile(workspaceId, page.id)
+  let previous = null
   if (currentPath) {
     const current = readFilePage(workspaceId, currentPath)
+    previous = current?.page ?? null
     if (current && expectedUpdatedAt && current.page.updatedAt !== expectedUpdatedAt) {
       const error = new Error('页面已在其他设备更新，请重新载入后再保存')
       error.status = 409
@@ -254,6 +257,7 @@ export function saveWorkspacePage(workspaceId, page, expectedUpdatedAt) {
     }
   }
   const saved = writeStoredPage(workspaceId, page)
+  recordPageChange(workspaceId, previous, saved, context.origin, context)
   refreshTieFiles(workspaceId)
   notifyWorkspace(workspaceId)
   return saved
@@ -270,16 +274,18 @@ function pageHasChanged(before, after) {
     || (before.deletedAt ?? null) !== (after.deletedAt ?? null)
 }
 
-export function deleteWorkspacePages(workspaceId, pageIds) {
+export function deleteWorkspacePages(workspaceId, pageIds, context = {}) {
   migrateWorkspacePages(workspaceId)
   for (const pageId of pageIds) {
     const filePath = locatePageFile(workspaceId, pageId)
+    const previous = filePath ? readFilePage(workspaceId, filePath)?.page : null
     if (filePath && fs.existsSync(filePath)) fs.rmSync(filePath, { force: true })
     const meta = metaFile(workspaceId, pageId)
     if (meta && fs.existsSync(meta)) fs.rmSync(meta, { force: true })
     const historyDir = store.workspaceHistoryDir(workspaceId, pageId)
     if (fs.existsSync(historyDir)) fs.rmSync(historyDir, { recursive: true, force: true })
     deleteWorkspacePageAssets(workspaceId, pageId)
+    if (previous) recordPageChange(workspaceId, previous, null, context.origin, context)
   }
   refreshTieFiles(workspaceId)
   notifyWorkspace(workspaceId)

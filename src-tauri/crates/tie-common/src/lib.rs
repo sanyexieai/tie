@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod identity;
 pub mod fs_path;
 pub mod file_meta;
 
@@ -51,7 +52,11 @@ pub struct StorageSource {
     pub path: String,
     #[serde(default = "default_source_available")]
     pub available: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub temporary: bool,
 }
+
+fn is_false(value: &bool) -> bool { !value }
 
 fn default_source_available() -> bool {
     true

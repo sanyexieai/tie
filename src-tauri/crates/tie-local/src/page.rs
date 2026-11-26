@@ -16,7 +16,8 @@ pub fn revision_id() -> String {
 }
 
 pub fn page_has_changed(before: &Page, after: &Page) -> bool {
-    before.title != after.title
+    before.created_at != after.created_at
+        || before.title != after.title
         || before.icon != after.icon
         || before.parent_id != after.parent_id
         || before.sort_key != after.sort_key

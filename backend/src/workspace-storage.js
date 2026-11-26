@@ -30,21 +30,21 @@ export async function getPage(workspace, pageId) {
   return getWorkspacePage(workspace.id, pageId, sourceIdFor(workspace))
 }
 
-export async function savePage(workspace, page, expectedUpdatedAt) {
+export async function savePage(workspace, page, expectedUpdatedAt, context) {
   const next = withWorkspaceSource({ ...page, updatedAt: page.updatedAt || new Date().toISOString() }, workspace)
-  const saved = saveWorkspacePage(workspace.id, next, expectedUpdatedAt)
+  const saved = saveWorkspacePage(workspace.id, next, expectedUpdatedAt, context)
   notifyWorkspace(workspace.id)
   return saved
 }
 
-export async function removePages(workspace, pageIds) {
+export async function removePages(workspace, pageIds, context) {
   if (!Array.isArray(pageIds)) {
     const error = new Error('页面列表无效')
     error.status = 400
     throw error
   }
   pageIds.forEach(assertResourceId)
-  deleteWorkspacePages(workspace.id, pageIds)
+  deleteWorkspacePages(workspace.id, pageIds, context)
   notifyWorkspace(workspace.id)
 }
 

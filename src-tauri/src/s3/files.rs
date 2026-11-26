@@ -7,13 +7,15 @@ use std::{
 };
 use tie_storage::fs_path;
 use tie_storage::file_meta;
+use tie_storage::identity::load_or_create_device_identity;
 use tie_storage::s3::{self as s3_store, S3Connection, WorkspaceFileResource};
 
 fn now_stamp() -> String {
-    SystemTime::now()
+    let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_else(|_| "0".into())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    tie_storage::local::format_utc_millis_pub(millis)
 }
 
 fn new_file_id() -> String {
@@ -75,10 +77,14 @@ fn resolve_abs_path(raw: &str) -> Result<PathBuf, String> {
 
 fn patch_local_exists(mut resource: WorkspaceFileResource) -> WorkspaceFileResource {
     if resource.mode == "link" {
-        let candidate = if resource.open_path.trim().is_empty() {
-            resource.source_path.clone()
-        } else {
-            resource.open_path.clone()
+        let device = load_or_create_device_identity().ok();
+        let meta = json!({ "mode": "link", "deviceBindings": resource.device_bindings });
+        resource.binding_state = tie_storage::local::file_binding_state(&meta, device.as_ref().map(|value| value.id.as_str())).to_owned();
+        resource.current_device_id = device.as_ref().map(|value| value.id.clone());
+        let Some(candidate) = device.and_then(|value| tie_storage::local::file_binding_path(&meta, &value.id)) else {
+            resource.exists = false;
+            resource.open_path.clear();
+            return resource;
         };
         if crate::saf::is_content_uri(&candidate) {
             resource.exists = crate::saf::uri_exists(&candidate);
@@ -212,17 +218,24 @@ pub(crate) async fn ingest_s3_workspace_file(
             "createdAt": existing.updated_at,
             "updatedAt": now_stamp(),
             "sourceId": resolved_source,
+            "deviceBindings": existing.device_bindings,
         });
         if let Some(locator) = locator {
             raw["locator"] = locator;
         }
+        let device = load_or_create_device_identity()?;
+        let local_locator = raw.get("locator").cloned().unwrap_or_else(|| json!({ "type":"desktop", "desktopPath":abs_display, "displayPath":abs_display }));
+        tie_storage::local::bind_file_to_device(&mut raw, &device, &abs_display, local_locator, &now_stamp());
         let meta = file_meta::normalize_file_meta(&raw, Some(&resolved_source));
         let resource = s3_store::upsert_s3_workspace_file_meta(&connection, &payload, meta).await?;
         return Ok(patch_local_exists(resource));
     }
     let existing = s3_store::list_s3_workspace_files(&connection, &payload).await?;
+    let device = if normalized_mode == "link" { Some(load_or_create_device_identity()?) } else { None };
     if let Some(found) = existing.into_iter().find(|item| {
-        item.mode == normalized_mode && (item.source_path == abs_display || item.open_path == abs_display)
+        item.mode == normalized_mode && if let Some(device) = &device {
+            tie_storage::local::file_binding_path(&json!({ "deviceBindings":item.device_bindings }), &device.id).as_deref() == Some(abs_display.as_str())
+        } else { item.source_path == abs_display || item.open_path == abs_display }
     }) {
         return Ok(patch_local_exists(found));
     }
@@ -283,6 +296,10 @@ pub(crate) async fn ingest_s3_workspace_file(
     if let Some(locator) = locator {
         raw["locator"] = locator;
     }
+    if let Some(device) = device {
+        let local_locator = raw.get("locator").cloned().unwrap_or_else(|| json!({ "type":"desktop", "desktopPath":abs_display, "displayPath":abs_display }));
+        tie_storage::local::bind_file_to_device(&mut raw, &device, &abs_display, local_locator, &now);
+    }
     let meta = file_meta::normalize_file_meta(&raw, Some(&resolved_source));
     let resource = s3_store::upsert_s3_workspace_file_meta(&connection, &payload, meta).await?;
     Ok(patch_local_exists(resource))
@@ -306,6 +323,9 @@ pub(crate) async fn prepare_s3_workspace_file(
             ));
         }
         return Ok(resource.open_path);
+    }
+    if tie_storage::local::portable_copy_path(Path::new("."), &resource.stored_path).is_none() {
+        return Err("副本路径必须是工作区内的相对路径".into());
     }
     if !resource.exists {
         return Err(format!(

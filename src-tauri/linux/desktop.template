@@ -1,10 +1,13 @@
 [Desktop Entry]
 Categories={{categories}}
 Comment={{comment}}
-Exec={{exec}}
+Exec={{exec}} %F
 Icon={{icon}}
 Name={{name}}
 StartupNotify=true
 StartupWMClass=tie
 Terminal=false
 Type=Application
+{{#if mime_type}}
+MimeType={{mime_type}}
+{{/if}}

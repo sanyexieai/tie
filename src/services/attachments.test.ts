@@ -62,6 +62,10 @@ describe('attachments', () => {
         storageSourceIds: ['src_local_a'],
       })).toEqual(['src_local_a'])
     })
+
+    it('does not create Tie asset directories beside a temporarily opened file', () => {
+      expect(assetWriteSourceIds({ storageSourceId: 'src_temporary_file', storageSourceIds: ['src_temporary_file'] })).toEqual([])
+    })
   })
 
   it('allows demo source attachments in the browser', () => {

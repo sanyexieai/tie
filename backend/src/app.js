@@ -9,7 +9,8 @@ import { store } from './store.js'
 import { watchWorkspace } from './live.js'
 import * as workspaceStorage from './workspace-storage.js'
 import { ensureWorkspaceSolution } from './workspace-pages.js'
-import { readReviews, saveMergedReviews } from './reviews.js'
+import { addPageSignal, readReviews, resolvePageSignal, saveMergedReviews } from './reviews.js'
+import { requestChangeOrigin } from './change-origin.js'
 import {
   listWorkspaceFiles,
   getWorkspaceFile,
@@ -59,6 +60,10 @@ export function createApp(options = {}) {
   }
 
 function nowIso() { return new Date().toISOString() }
+function changeContext(req) {
+  return { origin: requestChangeOrigin(req, { userId: req.user.sub, actor: req.account.name, clientName: '未知客户端' }),
+    replication: req.headers['x-tie-replication'] === '1' }
+}
 function newId(prefix) { return `${prefix}_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}` }
 
 function auth(req, res, next) {
@@ -307,6 +312,7 @@ app.put('/api/v1/workspaces/:workspaceId/pages/:pageId', auth, async (req, res) 
       workspace,
       { ...req.body, id: req.params.pageId },
       expectedUpdatedAt,
+      changeContext(req),
     )
     res.json(saved)
   } catch (error) { handleError(res, error) }
@@ -316,7 +322,7 @@ app.post('/api/v1/workspaces/:workspaceId/pages', auth, async (req, res) => {
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
-    await workspaceStorage.removePages(workspace, req.body.pageIds ?? [])
+    await workspaceStorage.removePages(workspace, req.body.pageIds ?? [], changeContext(req))
     res.status(204).end()
   } catch (error) { handleError(res, error) }
 })
@@ -336,6 +342,20 @@ app.put('/api/v1/workspaces/:workspaceId/pages/:pageId/reviews', auth, (req, res
     const incoming = Array.isArray(req.body?.entries) ? req.body.entries : []
     res.json(saveMergedReviews(workspace.id, req.params.pageId, incoming))
   } catch (error) { handleError(res, error) }
+})
+
+app.post('/api/v1/workspaces/:workspaceId/pages/:pageId/signals', auth, (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try { res.json(addPageSignal(workspace.id, req.params.pageId, req.body, changeContext(req).origin)) }
+  catch (error) { handleError(res, error) }
+})
+
+app.post('/api/v1/workspaces/:workspaceId/pages/:pageId/signals/:signalId/resolve', auth, (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try { res.json(resolvePageSignal(workspace.id, req.params.pageId, req.params.signalId, req.body, changeContext(req).origin)) }
+  catch (error) { handleError(res, error) }
 })
 
 app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/revisions', auth, async (req, res) => {

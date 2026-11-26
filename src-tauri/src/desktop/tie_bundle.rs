@@ -2,13 +2,13 @@
 
 use super::{ensure_local_source_at, source_root};
 use crate::common::{
-    app_data_dir, load_settings, save_settings, workspace_sources, WorkspaceSnapshot,
+    load_settings, load_workspace_snapshot, save_settings, workspace_sources, WorkspaceSnapshot,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 use tie_storage::local::{
-    load_file_workspace, pack_tiez, resolve_workspace_entry, unpack_tiez, PackReport,
+    pack_tiez, resolve_workspace_entry, unpack_tiez, PackReport,
     UnpackReport,
 };
 
@@ -67,7 +67,7 @@ pub(crate) fn open_tie_entry(app: AppHandle, path: String) -> Result<OpenTieEntr
     let name = solution_workspace_name(solution.as_ref());
     let (source_id, created) = register_workspace_root(&app, &root, name)?;
     Ok(OpenTieEntryResult {
-        snapshot: load_file_workspace(&app_data_dir(&app)?, "tie-workspace")?,
+        snapshot: load_workspace_snapshot(&app)?,
         source_id,
         created,
         workspace: root.display().to_string(),
@@ -108,7 +108,7 @@ pub(crate) fn unpack_tiez_to_dir(
     let (source_id, created) = register_workspace_root(&app, &root, name)?;
     let _ = report;
     Ok(OpenTieEntryResult {
-        snapshot: load_file_workspace(&app_data_dir(&app)?, "tie-workspace")?,
+        snapshot: load_workspace_snapshot(&app)?,
         source_id,
         created,
         workspace: root.display().to_string(),

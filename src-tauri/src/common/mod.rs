@@ -1,6 +1,6 @@
 pub(crate) mod settings;
 
-pub(crate) use settings::{app_data_dir, load_settings, save_settings, workspace_sources};
+pub(crate) use settings::{app_data_dir, load_settings, load_workspace_snapshot, save_settings, workspace_sources};
 pub(crate) use tie_storage::{
     Page, PageRevision, S3ProviderConfig, StorageSource, WorkspaceSnapshot,
 };

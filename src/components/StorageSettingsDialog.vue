@@ -281,6 +281,7 @@ const settingsOrderedSources = computed(() => {
 const defaultSourceId = computed(() => store.defaultStorageSourceId)
 const fileMcpSources = computed(() => orderedSources.value.filter((source) => (
   (source.kind === 'local' || source.kind === 'smb')
+  && !source.temporary
   && source.available !== false
   && Boolean(source.path)
 )))
@@ -529,9 +530,10 @@ function canRename(source: StorageSource) {
 }
 
 function canDisconnect(source: StorageSource) {
+  if (source.temporary) return true
   if (isBackendSourceId(source.id) || isBackendManagedS3SourceId(source.id)) return false
   if (source.kind === 'local' || source.kind === 'smb') {
-    return localSources.value.length > 1 && sourcePageCount(source.id) === 0 && source.available !== false
+    return localSources.value.filter((item) => !item.temporary).length > 1 && sourcePageCount(source.id) === 0 && source.available !== false
   }
   if (source.kind === 's3' && !isBackendManagedS3SourceId(source.id)) return sourcePageCount(source.id) === 0
   return false
@@ -829,6 +831,10 @@ async function saveS3Connection() {
 }
 
 async function disconnectSource(sourceId: string) {
+  if (orderedSources.value.find((source) => source.id === sourceId)?.temporary) {
+    await store.removeStorageSource(sourceId)
+    return
+  }
   if (isBackendSourceId(sourceId)) return
   if ((sourcePageStats.value.get(sourceId)?.total ?? 0) > 0) return
   const label = isS3SourceId(sourceId) && !isBackendManagedS3SourceId(sourceId)
@@ -1376,6 +1382,7 @@ function restoreDefaultUpdateEndpoints() {
             <div class="storage-settings-title">
               <span class="storage-status" :class="sourceStatusClass(source)"></span>
               <strong>{{ source.name }}</strong>
+              <span v-if="source.temporary" class="storage-default-badge">临时工作区</span>
               <span v-if="source.id === defaultSourceId" class="storage-default-badge">默认</span>
             </div>
             <small>{{ sourceDetail(source) }}</small>
@@ -1384,12 +1391,12 @@ function restoreDefaultUpdateEndpoints() {
             <button type="button" title="上移" :disabled="!canMoveSource(source.id, -1)" @click="moveSource(source.id, -1)">↑</button>
             <button type="button" title="下移" :disabled="!canMoveSource(source.id, 1)" @click="moveSource(source.id, 1)">↓</button>
             <button v-if="canSync(source)" :disabled="syncingRemote || store.reloading" title="同步此工作区" @click="syncSource(source.id)">↻</button>
-            <button v-if="isDesktop && (source.kind === 'local' || source.kind === 'smb')" class="labeled" type="button" title="配置多设备同步（保存后自动对齐）" @click="openGitSync(source.id)">同步</button>
+            <button v-if="isDesktop && !source.temporary && (source.kind === 'local' || source.kind === 'smb')" class="labeled" type="button" title="配置多设备同步（保存后自动对齐）" @click="openGitSync(source.id)">同步</button>
             <button v-if="isDesktop && (source.kind === 'local' || source.kind === 'smb')" :disabled="source.available === false" title="在文件管理器中打开" @click="openSource(source.path)">↗</button>
             <button v-if="source.kind === 's3' && !isBackendManagedS3SourceId(source.id)" title="编辑旧版直连 S3" @click="openS3Form(source.id)">✎</button>
             <button v-else-if="source.kind === 'backend'" title="修改后台服务" @click="emit('connect-backend')">✎</button>
             <button v-else-if="canRename(source)" title="重命名显示名称" @click="renameSource(source.id)">✎</button>
-            <button v-if="canDisconnect(source)" title="移除工作区" @click="disconnectSource(source.id)">×</button>
+            <button v-if="canDisconnect(source)" :title="source.temporary ? '关闭临时工作区（保留原文件）' : '移除工作区'" @click="disconnectSource(source.id)">×</button>
           </div>
         </div>
       </div>

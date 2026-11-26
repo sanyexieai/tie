@@ -13,6 +13,7 @@ import {
   type LinkContext,
 } from '@/services/link-runtime'
 import { getPlatformAccess } from '@/services/platform-access'
+import { fileBindingUnavailableMessage, resolveFileDeviceBinding } from '@/services/file-bindings'
 import {
   blobStoreFor,
   type WorkspaceFileKind,
@@ -50,6 +51,8 @@ export function fileLinkClass(
   if (availability === 'missing') tokens.push('file-link-missing')
   if (availability === 'offline') tokens.push('file-link-offline')
   if (availability === 'unknown') tokens.push('file-link-unknown')
+  if (availability === 'other-device') tokens.push('file-link-other-device')
+  if (availability === 'unbound') tokens.push('file-link-unbound')
   return tokens.join(' ')
 }
 
@@ -65,6 +68,8 @@ export function fileLinkLabel(
     return resolved === 'absolute' ? '找不到' : '缺失'
   }
   if (availability === 'offline') return '源不可用'
+  if (availability === 'other-device') return '其他设备'
+  if (availability === 'unbound') return '未绑定设备'
   return ''
 }
 
@@ -125,7 +130,10 @@ export async function resolveRegisteredFile(source: StorageSource, fileId: strin
 export async function openRegisteredFile(source: StorageSource, fileId: string) {
   const resource = await resolveRegisteredFile(source, fileId)
   if (!resource) throw new Error(`文件资源不存在：${fileId}`)
-  if (!resource.exists) {
+  const checked = await resolveFileDeviceBinding(resource)
+  rememberOne(source.id, checked)
+  if (checked.mode === 'link' && checked.bindingState !== 'bound') throw new Error(fileBindingUnavailableMessage(checked))
+  if (!checked.exists) {
     throw new Error(
       resource.mode === 'link'
         ? `找不到已登记的文件：${resource.openPath || resource.sourcePath}`
@@ -134,11 +142,11 @@ export async function openRegisteredFile(source: StorageSource, fileId: string) 
   }
   const store = blobStoreFor(source)
   if (store.open) {
-    await store.open(source, resource)
-    return resource
+    await store.open(source, checked)
+    return checked
   }
-  await getPlatformAccess().openNative(resource.openPath)
-  return resource
+  await getPlatformAccess().openNative(checked.openPath)
+  return checked
 }
 
 export function cachedFileResource(sourceId: string | null | undefined, fileId: string) {
@@ -170,17 +178,18 @@ export function resourceAvailability(
     const exists = link.relativePath ? cachedRelativeExists(sourceId, link.relativePath) : null
     return availabilityForSource(source, exists)
   }
-  if (link.kind === 'absolute') return 'unknown'
+  if (link.kind === 'absolute') return 'unbound'
   if (!sourceId || !link.fileId) return availabilityForSource(source, null)
   const cached = cacheBySource.get(sourceId)
   if (!cached) return availabilityForSource(source, null)
   const resource = cached.get(link.fileId)
   if (!resource) return 'missing'
+  if (resource.bindingState === 'other-device' || resource.bindingState === 'unbound') return resource.bindingState
   return availabilityForSource(source, resource.exists)
 }
 
 export function canRebindRegisteredFile(resource: WorkspaceFileResource | null | undefined) {
-  return Boolean(resource && resource.mode === 'link' && resource.exists === false)
+  return Boolean(resource && resource.mode === 'link' && (resource.exists === false || resource.bindingState === 'other-device' || resource.bindingState === 'unbound'))
 }
 
 export async function probeRelativePath(source: StorageSource, relativePath: string): Promise<boolean | null> {

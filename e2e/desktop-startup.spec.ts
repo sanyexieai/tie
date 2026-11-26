@@ -54,8 +54,10 @@ test(`opens local desktop pages before deferred restoration (${hasFileReference 
             case 'list_workspace_files': return new Promise(() => {})
             case 'load_workspace': return structuredClone(snapshot)
             case 'load_s3_provider_metadata':
+            case 'consume_open_file_paths':
             case 'list_page_audit_events': return []
             case 'list_page_reviews': return { entries: [] }
+            case 'get_change_origin': return { clientId: 'tie-desktop', clientName: 'Tie 桌面', clientVersion: 'test', deviceId: 'dev_startup', deviceName: 'Startup fixture', platform: 'windows', actor: 'Tie 桌面' }
             case 'refresh_startup_integrations': return null
             case 'backend_sync_cursor': return {}
             case 'read_native_file_bytes': return [...new TextEncoder().encode(JSON.stringify({ applied: ['href-file-protocol-v1'] }))]

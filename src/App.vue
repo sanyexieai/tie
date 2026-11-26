@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import AppSidebar from '@/components/AppSidebar.vue'
 import ContextPanel from '@/components/ContextPanel.vue'
 import DocumentEditor from '@/components/DocumentEditor.vue'
@@ -316,6 +317,18 @@ function onWindowResize() {
   clampPanelsToViewport()
 }
 
+let unlistenOpenFiles: UnlistenFn | undefined
+let nativeWorkspaceReady = false
+let consumeOpenFilesFlight: Promise<void> = Promise.resolve()
+
+function consumeOpenFiles() {
+  if (!nativeWorkspaceReady) return
+  consumeOpenFilesFlight = consumeOpenFilesFlight.then(async () => {
+    const paths = await invoke<string[]>('consume_open_file_paths')
+    if (paths.length) await store.openFromFiles(paths)
+  }).catch((error) => { console.error('打开文件失败', error) })
+}
+
 onMounted(async () => {
   syncWebReadMode()
   window.addEventListener('hashchange', syncWebReadMode)
@@ -339,6 +352,9 @@ onMounted(async () => {
   window.addEventListener('tie:toggle-focus-mode', toggleFocusMode)
   window.addEventListener('tie:show-changes', showChangesPanel)
   await initPlatform()
+  if (isTauriDesktop() && !isMobileClient.value) {
+    unlistenOpenFiles = await listen('tie:open-files', consumeOpenFiles)
+  }
   syncViewportHeight()
   syncMobileLayout()
   syncContextDrawer()
@@ -368,6 +384,10 @@ onMounted(async () => {
     onBackendError: (error) => { console.warn('后台连接初始化失败，本地工作区已打开', error) },
     onBackgroundError: (error) => { console.warn('后台维护未完成，本地工作区可继续使用', error) },
   })
+  if (isTauriDesktop() && !isMobileClient.value) {
+    nativeWorkspaceReady = true
+    consumeOpenFiles()
+  }
   if (!isTauriDesktop() && backend.connected && temporaryBrowserPages().length) browserTempOffer.value = true
   syncViewportHeight()
   if (usesMobileShell.value) goMobileHome()
@@ -415,6 +435,8 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  nativeWorkspaceReady = false
+  unlistenOpenFiles?.()
   document.body.classList.remove('panel-resizing')
   window.removeEventListener('hashchange', syncWebReadMode)
   mobileLayoutQuery?.removeEventListener('change', syncMobileLayout)

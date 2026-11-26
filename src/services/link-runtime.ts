@@ -15,7 +15,7 @@ export interface AssetUrlRef {
 
 export type LinkForm = 'absolute' | 'relative'
 export type LocalLinkKind = 'workspace-file' | 'absolute' | 'relative'
-export type LinkAvailability = 'ready' | 'missing' | 'offline' | 'unknown'
+export type LinkAvailability = 'ready' | 'missing' | 'offline' | 'unknown' | 'other-device' | 'unbound'
 
 export interface FileUrlRef {
   fileId: string

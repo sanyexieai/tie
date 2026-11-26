@@ -603,15 +603,7 @@ impl LocalWorkspace {
         })
     }
 
-    fn now_iso() -> String {
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        // Keep ISO-ish timestamps without chrono dependency; prefer existing page stamps when present.
-        // For new writes use RFC3339-like UTC via a minimal formatter.
-        format_utc_millis(secs * 1000)
-    }
+    fn now_iso() -> String { next_updated_at(None) }
 
     fn next_sort_key(&self, parent_id: Option<&str>) -> Result<i64, String> {
         if parent_id.is_none() {
@@ -649,7 +641,7 @@ impl LocalWorkspace {
             None
         };
 
-        let now = Self::now_iso();
+        let now = next_updated_at(existing.as_ref().map(|page| page.updated_at.as_str()));
         let mut tags = if let Some(tags) = input.tags {
             tags.into_iter()
                 .map(|tag| tag.trim().to_owned())
@@ -960,6 +952,7 @@ impl LocalWorkspace {
             fs::remove_dir_all(&history).map_err(|e| format!("无法移除页面历史：{e}"))?;
         }
         remove_page_assets(&self.root, &page.id)?;
+        crate::changes::record_change(&self.root, Some(&page), None, Some("purge"))?;
         Ok(summary)
     }
 
@@ -1017,7 +1010,7 @@ impl LocalWorkspace {
             deleted_at: page.deleted_at.clone(),
             ..revision
         };
-        let saved = save_page_to_root(&self.root, restored, expected_updated_at)?;
+        let saved = crate::changes::with_revision_context(revision_id, || save_page_to_root(&self.root, restored, expected_updated_at))?;
         Ok(Self::summarize(&saved))
     }
 }
@@ -1042,7 +1035,7 @@ pub fn ensure_title_markdown(title: &str, body: &str) -> String {
     format!("# {clean_title}\n\n{trimmed}\n")
 }
 
-pub(crate) fn format_utc_millis_pub(millis: u64) -> String {
+pub fn format_utc_millis_pub(millis: u64) -> String {
     format_utc_millis(millis)
 }
 
@@ -1251,7 +1244,7 @@ mod tests {
         current.created_at = "2025-01-01T00:00:00.000Z".into();
         current.updated_at = "2026-11-26T00:00:00.000Z".into();
         current.deleted_at = Some("2026-11-26T00:00:00.000Z".into());
-        ws.save_full_page(current.clone(), None).unwrap();
+        current = ws.save_full_page(current, None).unwrap();
         let revision = ws.list_revisions(&id).unwrap()[0].id.clone();
         assert!(ws.restore_revision_checked(&id, &revision, Some("stale")).unwrap_err().contains("重新载入"));
         assert_eq!(ws.list_revisions(&id).unwrap().len(), 1);
@@ -1464,4 +1457,20 @@ mod tests {
         assert!(again.iter().all(|page| page.id == pages[0].id));
         let _ = fs::remove_dir_all(&dir);
     }
+}
+
+/// Keep document versions distinct even when multiple persisted edits occur in one millisecond.
+pub fn next_updated_at(previous: Option<&str>) -> String {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let previous_millis = previous.and_then(|stamp| {
+        if stamp.len() != 24 || !stamp.ends_with('Z') { return None; }
+        let n = stamp.split(['-', 'T', ':', '.', 'Z']).filter(|part| !part.is_empty()).map(str::parse::<u64>).collect::<Result<Vec<_>,_>>().ok()?;
+        if n.len() != 7 || !(1970..=9999).contains(&n[0]) || !(1..=12).contains(&n[1]) || !(1..=31).contains(&n[2]) { return None; }
+        let leap = |year: u64| year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let mut days = (1970..n[0]).map(|year| if leap(year) {366} else {365}).sum::<u64>();
+        let months = [31, if leap(n[0]) {29} else {28},31,30,31,30,31,31,30,31,30,31];
+        days += months[..(n[1]-1) as usize].iter().sum::<u64>() + n[2] - 1;
+        Some((((days*24+n[3])*60+n[4])*60+n[5])*1000+n[6])
+    }).unwrap_or(0);
+    format_utc_millis(now.max(previous_millis.saturating_add(1)))
 }

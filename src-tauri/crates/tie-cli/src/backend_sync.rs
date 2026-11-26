@@ -257,6 +257,7 @@ fn sync_with_progress(
         .build()
         .map_err(|error| error.to_string())?;
     let remote_pages = list_remote(&client, target, token)?;
+    let remote_review_ids = remote_pages.iter().map(|page| page.id.clone()).collect::<Vec<_>>();
     let local_pages = ws.load_all(true)?;
     let mut cursor = read_cursor(ws.root())?;
     let mut remote_by_id: HashMap<String, Page> = remote_pages
@@ -338,7 +339,8 @@ fn sync_with_progress(
     if !purged.is_empty() {
         let response = client.post(format!(
             "{}/api/v1/workspaces/{}/pages", target.url.trim_end_matches('/'), target.workspace_id
-        )).bearer_auth(token).json(&json!({ "pageIds": purged })).send()
+        )).bearer_auth(token).header("x-tie-replication", "1")
+            .header("x-tie-origin", tie_local::changes::origin_header(&tie_local::changes::current_origin())?).json(&json!({ "pageIds": purged })).send()
             .map_err(|error| format!("永久删除尚未同步：{error}"))?;
         if !response.status().is_success() {
             return Err(format!("永久删除尚未同步：{}", response.status()));
@@ -360,10 +362,13 @@ fn sync_with_progress(
         observe,
     )?;
     write_cursor(ws.root(), &cursor)?;
-    let review_ids = review_page_ids(ws.root());
+    let mut review_ids = review_page_ids(ws.root());
+    review_ids.extend(remote_review_ids);
+    review_ids.extend(local_pages.iter().map(|page| page.id.clone()));
+    review_ids.sort(); review_ids.dedup();
     report_progress(observe, BackendSyncStage::Reviews, 0, review_ids.len());
     for (index, page_id) in review_ids.iter().enumerate() {
-        let _ = exchange_reviews(&client, target, token, ws.root(), &page_id);
+        exchange_reviews(&client, target, token, ws.root(), &page_id)?;
         report_progress(observe, BackendSyncStage::Reviews, index + 1, review_ids.len());
     }
     let mode = if conflicts.is_empty() { "synced" } else { "conflict" };
@@ -664,7 +669,7 @@ fn pull_page(ws: &LocalWorkspace, remote: &Page, local: Option<&Page>) -> Result
     page.storage_source_id = source.clone();
     page.storage_source_ids = vec![source];
     let expected = local.map(|item| item.updated_at.as_str());
-    save_page_to_root(ws.root(), page, expected)?;
+    tie_local::changes::with_change_context(tie_local::changes::current_origin(), None, true, || save_page_to_root(ws.root(), page, expected))?;
     Ok(())
 }
 
@@ -728,7 +733,8 @@ fn put_remote(
         target.workspace_id,
         local.id
     );
-    let mut request = client.put(url).bearer_auth(token).json(local);
+    let mut request = client.put(url).bearer_auth(token).header("x-tie-replication", "1")
+        .header("x-tie-origin", tie_local::changes::origin_header(&tie_local::changes::current_origin())?).json(local);
     if let Some(remote) = remote {
         request = request.header("if-unmodified-since", &remote.updated_at);
     }
@@ -922,32 +928,7 @@ pub fn resolve_conflict(ws: &LocalWorkspace, page_id: &str, keep_local: bool) ->
     Ok(report)
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ReviewEntry {
-    id: String,
-    at: String,
-    actor: String,
-    kind: String,
-    #[serde(default)]
-    side: String,
-    status: String,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    markdown: String,
-    #[serde(default)]
-    quote: String,
-    #[serde(default)]
-    body: String,
-    #[serde(default)]
-    opinion_kind: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-struct ReviewFile {
-    entries: Vec<ReviewEntry>,
-}
+use tie_local::changes::{ReviewEntry, ReviewFile, merge_reviews};
 
 fn review_path(root: &Path, page_id: &str) -> Result<std::path::PathBuf, String> {
     if page_id.is_empty() || page_id.contains(['/', '\\']) || page_id.contains("..") {
@@ -963,44 +944,7 @@ fn read_reviews(root: &Path, page_id: &str) -> ReviewFile {
 }
 
 fn write_reviews(root: &Path, page_id: &str, file: &ReviewFile) -> Result<(), String> {
-    let path = review_path(root, page_id)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let body = serde_json::to_string_pretty(file).map_err(|error| error.to_string())?;
-    fs::write(path, format!("{body}\n")).map_err(|error| error.to_string())
-}
-
-fn status_rank(status: &str) -> u8 {
-    match status {
-        "final" => 2,
-        "kept" | "dropped" => 1,
-        _ => 0,
-    }
-}
-
-fn merge_reviews(mut current: ReviewFile, incoming: ReviewFile) -> ReviewFile {
-    for entry in incoming.entries {
-        if let Some(prev) = current.entries.iter_mut().find(|item| item.id == entry.id) {
-            if status_rank(&entry.status) > status_rank(&prev.status) {
-                let actor = if entry.actor != "另一端" && !entry.actor.is_empty() {
-                    entry.actor.clone()
-                } else if prev.actor != "另一端" && !prev.actor.is_empty() {
-                    prev.actor.clone()
-                } else {
-                    entry.actor.clone()
-                };
-                *prev = entry;
-                prev.actor = actor;
-            } else if prev.actor == "另一端" && entry.actor != "另一端" && !entry.actor.is_empty() {
-                prev.actor = entry.actor;
-            }
-        } else {
-            current.entries.push(entry);
-        }
-    }
-    current.entries.sort_by(|a, b| a.at.cmp(&b.at));
-    current
+    tie_local::changes::merge_review_file(root, page_id, file.clone()).map(|_| ())
 }
 
 fn version_id(page_id: &str, updated_at: &str) -> String {
@@ -1020,6 +964,7 @@ fn version_entry(page: &Page, actor: &str) -> ReviewEntry {
         quote: String::new(),
         body: String::new(),
         opinion_kind: String::new(),
+        ..ReviewEntry::default()
     }
 }
 
@@ -1072,36 +1017,7 @@ pub fn read_review_file(root: &Path, page_id: &str) -> Value {
 }
 
 pub fn add_opinion(root: &Path, page_id: &str, id: &str, actor: &str, opinion_kind: &str, quote: &str, body: &str) -> Result<(), String> {
-    if id.is_empty() || body.trim().is_empty() {
-        return Err("修改意见不完整".to_owned());
-    }
-    let mut file = read_reviews(root, page_id);
-    if file.entries.iter().any(|item| item.id == id) {
-        return Ok(());
-    }
-    file.entries.push(ReviewEntry {
-        id: id.to_owned(),
-        at: local_stamp(),
-        actor: actor.to_owned(),
-        kind: "opinion".into(),
-        side: String::new(),
-        status: "open".into(),
-        title: String::new(),
-        markdown: String::new(),
-        quote: quote.to_owned(),
-        body: body.trim().to_owned(),
-        opinion_kind: opinion_kind.to_owned(),
-    });
-    write_reviews(root, page_id, &file)?;
-    append_audit(root, &json!({
-        "type": "opinion",
-        "actor": actor,
-        "pageId": page_id,
-        "title": quote,
-        "status": "open",
-        "note": body.trim()
-    }));
-    Ok(())
+    tie_local::changes::add_signal(root, page_id, id, actor, opinion_kind, quote, body, "", None, None, None).map(|_| ())
 }
 
 fn review_page_ids(root: &Path) -> Vec<String> {
@@ -1320,7 +1236,7 @@ mod tests {
             assert_eq!(remote_ws.resolve("pg_sync").unwrap().unwrap().markdown,
                 if concurrent { "concurrent remote" } else { "remote draft" });
             assert_eq!(puts.load(Ordering::SeqCst), usize::from(concurrent));
-            assert_eq!(read_reviews(local_ws.root(), "pg_sync").entries.len(), 2);
+            assert_eq!(read_reviews(local_ws.root(), "pg_sync").entries.iter().filter(|entry| entry.kind == "version").count(), 2);
             drop(server);
             fs::remove_dir_all(dir).unwrap();
         }
@@ -1459,7 +1375,7 @@ mod tests {
         let expected = [
             (BackendSyncStage::Connecting, 3), (BackendSyncStage::Pages, 3),
             (BackendSyncStage::Assets, 3), (BackendSyncStage::Files, 3),
-            (BackendSyncStage::Reviews, 2),
+            (BackendSyncStage::Reviews, 3),
         ];
         let mut stages: Vec<_> = progress.iter().map(|step| step.stage).collect();
         stages.dedup();

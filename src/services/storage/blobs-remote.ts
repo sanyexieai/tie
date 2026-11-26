@@ -1,3 +1,4 @@
+import { currentBackendProfile } from '@/services/backend-profile'
 import { invoke } from '@tauri-apps/api/core'
 import {
   backendService,
@@ -8,6 +9,7 @@ import { getPlatformAccess } from '@/services/platform-access'
 import { s3ConnectionForSource } from '@/services/s3'
 import type { IngestBytesOptions, SourceBlobStore, WorkspaceFileResource } from '@/services/storage/blobs'
 import { fileMetaToJson, normalizeFileMeta } from '@/services/storage/file-meta'
+import { bindFileToDevice, currentResourceDevice, fileBindingUnavailableMessage, portableCopyRelativePath, resolveFileDeviceBinding } from '@/services/file-bindings'
 import {
   asUint8Array,
   assertIngestSize,
@@ -91,7 +93,7 @@ function s3Store(): SourceBlobStore {
         const list = await invoke<WorkspaceFileResource[]>('list_s3_workspace_files', {
           connection: s3ConnectionForSource(source.id),
         })
-        return list
+        return Promise.all(list.map(resolveFileDeviceBinding))
       } catch {
         return []
       }
@@ -99,10 +101,11 @@ function s3Store(): SourceBlobStore {
     async resolve(source, fileId) {
       if (!isTauriRuntime()) return null
       try {
-        return await invoke<WorkspaceFileResource>('resolve_s3_workspace_file', {
+        const resource = await invoke<WorkspaceFileResource>('resolve_s3_workspace_file', {
           connection: s3ConnectionForSource(source.id),
           fileId,
         })
+        return resolveFileDeviceBinding(resource)
       } catch {
         return null
       }
@@ -167,6 +170,9 @@ function s3Store(): SourceBlobStore {
     },
     async open(source, resource) {
       if (!isTauriRuntime()) throw new Error('仅桌面或 Android 客户端可打开文件')
+      if (resource.mode === 'copy' && !portableCopyRelativePath(resource.storedPath)) throw new Error('副本路径必须是工作区内的相对路径')
+      const checked = await resolveFileDeviceBinding(resource)
+      if (checked.mode === 'link' && checked.bindingState !== 'bound') throw new Error(fileBindingUnavailableMessage(checked))
       const path = await invoke<string>('prepare_s3_workspace_file', {
         connection: s3ConnectionForSource(source.id),
         fileId: resource.id,
@@ -187,28 +193,25 @@ function httpFileStore(kind: 'workspace' | 'provider'): SourceBlobStore {
   return {
     canRegister: true,
     async list(source) {
-      const profile = backendService.loadProfile()
+      const profile = currentBackendProfile()
       if (!profile.accessToken) return []
       try {
         if (kind === 'workspace') {
-          return backendService.listWorkspaceFiles(profile, parseBackendWorkspaceId(source.id))
+          return Promise.all((await backendService.listWorkspaceFiles(profile, parseBackendWorkspaceId(source.id))).map(resolveFileDeviceBinding))
         }
-        return backendService.listProviderFiles(profile, parseBackendProviderId(source.id))
+        return Promise.all((await backendService.listProviderFiles(profile, parseBackendProviderId(source.id))).map(resolveFileDeviceBinding))
       } catch {
         return []
       }
     },
     async resolve(source, fileId) {
-      const profile = backendService.loadProfile()
+      const profile = currentBackendProfile()
       if (!profile.accessToken) return null
       try {
         const resource = kind === 'workspace'
           ? await backendService.getWorkspaceFile(profile, parseBackendWorkspaceId(source.id), fileId)
           : await backendService.getProviderFile(profile, parseBackendProviderId(source.id), fileId)
-        if (resource.mode === 'link') {
-          resource.exists = await getPlatformAccess().exists(resource.openPath || resource.sourcePath)
-        }
-        return resource
+        return resolveFileDeviceBinding(resource)
       } catch {
         return null
       }
@@ -217,7 +220,7 @@ function httpFileStore(kind: 'workspace' | 'provider'): SourceBlobStore {
       if (mode === 'copy' && !isTauriRuntime()) {
         throw new Error('仅桌面或 Android 客户端可导入本机文件')
       }
-      const profile = backendService.loadProfile()
+      const profile = currentBackendProfile()
       if (!profile.accessToken) throw new Error('请先连接自定义后台')
       const path = nativePath.trim()
       if (!path) throw new Error('路径不能为空')
@@ -231,6 +234,8 @@ function httpFileStore(kind: 'workspace' | 'provider'): SourceBlobStore {
       const id = newWorkspaceFileId()
       const stored = mode === 'copy' ? `.tie/files/${id}/${storedName(ext)}` : path
       const now = new Date().toISOString()
+      const device = mode === 'link' ? await currentResourceDevice() : null
+      if (mode === 'link' && !device) throw new Error('当前客户端不能绑定本机设备路径')
       const meta = normalizeFileMeta({
         id,
         title: title?.trim() || basenameOf(path),
@@ -241,6 +246,7 @@ function httpFileStore(kind: 'workspace' | 'provider'): SourceBlobStore {
         size: stat.size,
         sourcePath: path,
         storedPath: stored,
+        deviceBindings: device ? bindFileToDevice({}, device, path, now) : {},
         createdAt: now,
         updatedAt: now,
       }, { sourceId: source.id, now })
@@ -272,13 +278,13 @@ function httpFileStore(kind: 'workspace' | 'provider'): SourceBlobStore {
         }
       }
       if (kind === 'workspace') {
-        return backendService.upsertWorkspaceFile(profile, parseBackendWorkspaceId(source.id), payload)
+        return resolveFileDeviceBinding(await backendService.upsertWorkspaceFile(profile, parseBackendWorkspaceId(source.id), payload))
       }
-      return backendService.upsertProviderFile(profile, parseBackendProviderId(source.id), payload)
+      return resolveFileDeviceBinding(await backendService.upsertProviderFile(profile, parseBackendProviderId(source.id), payload))
     },
     async ingestBytes(source, bytes, options) {
       assertIngestSize(bytes.byteLength)
-      const profile = backendService.loadProfile()
+      const profile = currentBackendProfile()
       if (!profile.accessToken) throw new Error('请先连接自定义后台')
       const name = options.name.trim() || 'upload.bin'
       const ext = extensionOf(name)
@@ -332,13 +338,15 @@ function httpFileStore(kind: 'workspace' | 'provider'): SourceBlobStore {
       if (existing.mode !== 'link') throw new Error('副本不能重新绑定，请重新导入')
       const path = nativePath.trim()
       if (!path) throw new Error('路径不能为空')
-      const profile = backendService.loadProfile()
+      const profile = currentBackendProfile()
       if (!profile.accessToken) throw new Error('请先连接自定义后台')
       const stat = isTauriRuntime()
         ? await invoke<{ exists: boolean; isDirectory: boolean; size: number }>('native_path_stat', { path })
         : { exists: true, isDirectory: false, size: 0 }
       const now = new Date().toISOString()
       const ext = stat.isDirectory ? 'dir' : extensionOf(path)
+      const device = await currentResourceDevice()
+      if (!device) throw new Error('当前客户端不能绑定本机设备路径')
       const meta = normalizeFileMeta({
         ...existing,
         title: existing.title || basenameOf(path),
@@ -349,6 +357,7 @@ function httpFileStore(kind: 'workspace' | 'provider'): SourceBlobStore {
         size: stat.size,
         sourcePath: path,
         storedPath: path,
+        deviceBindings: bindFileToDevice(existing.deviceBindings, device, path, now),
         updatedAt: now,
       }, { sourceId: source.id, now })
       const payload = {
@@ -357,13 +366,13 @@ function httpFileStore(kind: 'workspace' | 'provider'): SourceBlobStore {
         exists: true,
       } as WorkspaceFileResource
       if (kind === 'workspace') {
-        return backendService.upsertWorkspaceFile(profile, parseBackendWorkspaceId(source.id), payload)
+        return resolveFileDeviceBinding(await backendService.upsertWorkspaceFile(profile, parseBackendWorkspaceId(source.id), payload))
       }
-      return backendService.upsertProviderFile(profile, parseBackendProviderId(source.id), payload)
+      return resolveFileDeviceBinding(await backendService.upsertProviderFile(profile, parseBackendProviderId(source.id), payload))
     },
     async existsRelative(source, relativePath) {
       return existsCopyOrAsset(this, source, relativePath, async (pageId) => {
-        const profile = backendService.loadProfile()
+        const profile = currentBackendProfile()
         if (!profile.accessToken) return []
         if (kind === 'workspace') {
           return backendService.listWorkspacePageAssets(profile, parseBackendWorkspaceId(source.id), pageId)
@@ -372,7 +381,7 @@ function httpFileStore(kind: 'workspace' | 'provider'): SourceBlobStore {
       })
     },
     async readRelative(source, relativePath) {
-      const profile = backendService.loadProfile()
+      const profile = currentBackendProfile()
       if (!profile.accessToken) throw new Error('请先连接自定义后台')
       const asset = assetRefFromRelative(relativePath)
       if (asset) {
@@ -389,7 +398,7 @@ function httpFileStore(kind: 'workspace' | 'provider'): SourceBlobStore {
       return asUint8Array(data)
     },
     async writeRelative(source, relativePath, data) {
-      const profile = backendService.loadProfile()
+      const profile = currentBackendProfile()
       if (!profile.accessToken) throw new Error('请先连接自定义后台')
       const asset = assetRefFromRelative(relativePath)
       if (!asset) throw new Error('远程存储源只能从此处写入页面附件')
@@ -413,10 +422,14 @@ function httpFileStore(kind: 'workspace' | 'provider'): SourceBlobStore {
     },
     async open(source, resource) {
       if (resource.mode === 'link') {
-        await getPlatformAccess().openNative(resource.openPath || resource.sourcePath)
+        const checked = await resolveFileDeviceBinding(resource)
+        if (checked.bindingState !== 'bound') throw new Error(fileBindingUnavailableMessage(checked))
+        if (!checked.exists) throw new Error('本机绑定的路径不存在，请重新绑定')
+        await getPlatformAccess().openNative(checked.openPath)
         return
       }
-      const profile = backendService.loadProfile()
+      if (!portableCopyRelativePath(resource.storedPath)) throw new Error('副本路径必须是工作区内的相对路径')
+      const profile = currentBackendProfile()
       if (!profile.accessToken) throw new Error('请先连接自定义后台')
       const data = kind === 'workspace'
         ? await backendService.readWorkspaceFileBlob(profile, parseBackendWorkspaceId(source.id), resource.id)

@@ -1,4 +1,7 @@
 import type { Page, PageRevision, StorageSource } from '@/types'
+import { currentChangeOrigin } from '@/services/change-origin'
+import type { ReviewEntry, ReviewFile } from '@/services/review-service'
+import type { DeviceFileBinding, FileBindingState } from '@/services/storage/file-meta'
 
 export interface BackendUser {
   id: string
@@ -127,6 +130,9 @@ type BackendFileResource = {
   openPath: string
   exists: boolean
   updatedAt: string
+  deviceBindings?: Record<string, DeviceFileBinding>
+  bindingState?: FileBindingState
+  currentDeviceId?: string | null
 }
 
 const storageKey = 'tie-backend-profile-v1'
@@ -199,6 +205,9 @@ export async function fetchBackendJsonWithTimeout<T>(url: string, options: Reque
 
 async function request<T>(profile: BackendProfile, path: string, options: RequestInit = {}, allowRefresh = true): Promise<T> {
   const headers = new Headers(options.headers)
+  if (options.method && !['GET', 'HEAD'].includes(options.method.toUpperCase())) {
+    headers.set('x-tie-origin', encodeURIComponent(JSON.stringify(await currentChangeOrigin(profile.user?.name))))
+  }
   headers.set('accept', 'application/json')
   if (options.body) headers.set('content-type', 'application/json')
   if (profile.accessToken) headers.set('authorization', `Bearer ${profile.accessToken}`)
@@ -604,6 +613,24 @@ export const backendService = {
   },
   async listPageRevisions(profile: BackendProfile, workspaceId: string, pageId: string) {
     return request<PageRevision[]>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/revisions`)
+  },
+  async listPageReviews(profile: BackendProfile, workspaceId: string, pageId: string) {
+    return request<ReviewFile>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/reviews`)
+  },
+  async savePageReviews(profile: BackendProfile, workspaceId: string, pageId: string, entries: ReviewEntry[]) {
+    return request<ReviewFile>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/reviews`, {
+      method: 'PUT', body: JSON.stringify({ entries }),
+    })
+  },
+  async addPageSignal(profile: BackendProfile, workspaceId: string, pageId: string, input: {
+    id?: string; actor?: string; opinionKind: string; quote?: string; body: string; baseUpdatedAt?: string; replyTo?: string | null
+  }) {
+    return request<ReviewFile>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/signals`, { method: 'POST', body: JSON.stringify(input) })
+  },
+  async resolvePageSignal(profile: BackendProfile, workspaceId: string, pageId: string, id: string, input: {
+    status: 'resolved' | 'adopted' | 'withdrawn'; resolutionNote?: string; appliedUpdatedAt?: string
+  }) {
+    return request<ReviewFile>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/signals/${encodeURIComponent(id)}/resolve`, { method: 'POST', body: JSON.stringify(input) })
   },
   async readPageRevision(profile: BackendProfile, workspaceId: string, pageId: string, revisionId: string) {
     return request<BackendPagePayload>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/revisions/${revisionId}`)

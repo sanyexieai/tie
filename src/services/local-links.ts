@@ -52,6 +52,8 @@ const LOCAL_LINK_CLASSES = [
   'file-link-missing',
   'file-link-offline',
   'file-link-unknown',
+  'file-link-other-device',
+  'file-link-unbound',
   'file-link-cross-source',
 ] as const
 
@@ -142,12 +144,9 @@ export async function openLocalLink(
 ) {
   const link = classifyLocalLink(href)
   if (!link) throw new Error('不是可打开的本地链接')
+  if (link.kind === 'absolute') throw new Error('旧绝对路径尚未绑定设备，请选择本机路径登记后再打开。')
 
   if (!('__TAURI_INTERNALS__' in window)) {
-    if (link.kind === 'absolute') {
-      window.open(href, '_blank', 'noopener,noreferrer')
-      return link
-    }
     throw new Error('仅桌面端可打开工作区本地链接')
   }
 
@@ -157,11 +156,6 @@ export async function openLocalLink(
       throw new Error('当前链接所属存储源不是本地或 SMB，无法在本机打开登记文件。')
     }
     await openRegisteredFile(source, link.fileId!)
-    return link
-  }
-
-  if (link.kind === 'absolute') {
-    await getPlatformAccess().openNative(link.absolutePath!)
     return link
   }
 

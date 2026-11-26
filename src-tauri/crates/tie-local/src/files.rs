@@ -10,6 +10,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tie_common::file_meta::{normalize_file_meta, source_path_from_meta};
+use tie_common::identity::{load_or_create_device_identity, DeviceIdentity};
 
 const MAX_COPY_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_COPY_DIR_BYTES: u64 = 50 * 1024 * 1024;
@@ -45,6 +46,9 @@ pub struct FileOpenHint {
     pub kind: String,
     pub url: String,
     pub hint: String,
+    pub device_bindings: Value,
+    pub binding_state: String,
+    pub current_device_id: Option<String>,
 }
 
 fn mtime_iso(meta: &fs::Metadata) -> Option<String> {
@@ -269,12 +273,20 @@ fn find_existing(
     abs: &Path,
     mode: &str,
     sha256: Option<&str>,
+    device_id: Option<&str>,
 ) -> Option<Value> {
     for entry in read_index(workspace) {
         let Some(meta) = read_meta(workspace, &entry.id) else {
             continue;
         };
         if meta.get("mode").and_then(Value::as_str) != Some(mode) {
+            continue;
+        }
+        if mode == "link" {
+            if device_id.and_then(|id| file_binding_path(&meta, id))
+                .is_some_and(|path| paths_equal(Path::new(&path), abs)) {
+                return Some(meta);
+            }
             continue;
         }
         if let (Some(want), Some(have)) = (
@@ -404,23 +416,71 @@ fn resource_url(meta: &Value, source_id: &str) -> String {
     build_file_url(id, source_id)
 }
 
-fn open_path_for(workspace: &Path, meta: &Value) -> String {
+fn open_path_for(workspace: &Path, meta: &Value, device_id: Option<&str>) -> String {
     let mode = meta.get("mode").and_then(Value::as_str).unwrap_or("link");
     if mode == "copy" {
         let stored = meta.get("storedPath").and_then(Value::as_str).unwrap_or("");
-        if Path::new(stored).is_absolute() {
-            return stored.to_owned();
+        return portable_copy_path(workspace, stored).map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
+    }
+    device_id.and_then(|id| file_binding_path(meta, id)).unwrap_or_default()
+}
+
+pub fn portable_copy_path(workspace: &Path, stored: &str) -> Option<PathBuf> {
+    let relative = stored.trim().replace('\\', "/");
+    if relative.is_empty() || relative.starts_with('/') || relative.contains('\0')
+        || relative.split('/').next().is_some_and(|part| part.contains(':'))
+        || relative.split('/').any(|part| part == "..") { return None; }
+    if relative.split('/').all(|part| part.is_empty() || part == ".") { return None; }
+    Some(workspace.join(relative))
+}
+
+pub fn file_binding_path(meta: &Value, device_id: &str) -> Option<String> {
+    let binding = meta.get("deviceBindings")?.get(device_id)?;
+    if binding.get("deviceId")?.as_str()? != device_id { return None; }
+    binding.get("sourcePath")?.as_str().map(str::trim).filter(|path| !path.is_empty()).map(str::to_owned)
+}
+
+pub fn file_binding_state(meta: &Value, device_id: Option<&str>) -> &'static str {
+    if meta.get("mode").and_then(Value::as_str) == Some("copy") { return "portable"; }
+    if device_id.and_then(|id| file_binding_path(meta, id)).is_some() { return "bound"; }
+    if meta.get("deviceBindings").and_then(Value::as_object).is_some_and(|bindings| !bindings.is_empty()) {
+        "other-device"
+    } else { "unbound" }
+}
+
+pub fn bind_file_to_device(meta: &mut Value, device: &DeviceIdentity, path: &str, locator: Value, stamp: &str) {
+    if !meta.get("deviceBindings").is_some_and(Value::is_object) { meta["deviceBindings"] = json!({}); }
+    meta["deviceBindings"][&device.id] = json!({
+        "deviceId": device.id, "deviceName": device.name, "platform": device.platform,
+        "sourcePath": path, "locator": locator, "boundAt": stamp,
+    });
+    if let Some(map) = meta.as_object_mut() { map.remove("preview"); }
+}
+
+pub fn merge_file_metadata(left: &Value, right: &Value) -> Value {
+    let stamp = |value: &Value| value.get("updatedAt").and_then(Value::as_str).unwrap_or("").to_owned();
+    let winner = if stamp(left) > stamp(right) { left } else { right };
+    let mut merged = normalize_file_meta(winner, None);
+    let mut bindings = serde_json::Map::new();
+    for input in [left, right] {
+        if let Some(items) = input.get("deviceBindings").and_then(Value::as_object) {
+            for (id, binding) in items {
+                if file_binding_path(input, id).is_none() { continue; }
+                let bound_at = |value: &Value| value.get("boundAt").and_then(Value::as_str).unwrap_or("").to_owned();
+                let replace = bindings.get(id).is_none_or(|previous| bound_at(binding) > bound_at(previous)
+                    || (bound_at(binding) == bound_at(previous) && binding.to_string() > previous.to_string()));
+                if replace { bindings.insert(id.clone(), binding.clone()); }
+            }
         }
-        return workspace.join(stored).to_string_lossy().into_owned();
     }
-    let source = source_path_from_meta(meta);
-    if !source.is_empty() {
-        return source;
+    merged["deviceBindings"] = Value::Object(bindings);
+    if merged.get("mode").and_then(Value::as_str) == Some("link") {
+        if let Some(map) = merged.as_object_mut() { map.remove("preview"); }
     }
-    meta.get("storedPath")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned()
+    if let Some(map) = merged.as_object_mut() {
+        for field in ["url", "created", "openPath", "exists", "bindingState", "currentDeviceId"] { map.remove(field); }
+    }
+    merged
 }
 
 pub struct FileRegistry<'a> {
@@ -440,6 +500,7 @@ impl<'a> FileRegistry<'a> {
         read_index(self.workspace)
             .into_iter()
             .filter_map(|entry| read_meta(self.workspace, &entry.id))
+            .map(|meta| merge_file_metadata(&Value::Null, &meta))
             .collect()
     }
 
@@ -448,8 +509,9 @@ impl<'a> FileRegistry<'a> {
         if !id.starts_with("file_") || !id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
             return Err("文件资源 id 无效".to_owned());
         }
-        write_meta(self.workspace, meta)?;
-        upsert_index(self.workspace, meta)
+        let merged = merge_file_metadata(&read_meta(self.workspace, id).unwrap_or(Value::Null), meta);
+        write_meta(self.workspace, &merged)?;
+        upsert_index(self.workspace, &merged)
     }
 
     pub fn list(
@@ -487,7 +549,7 @@ impl<'a> FileRegistry<'a> {
                     continue;
                 }
             }
-            let mut enriched = normalize_file_meta(&meta, Some(self.source_id.as_str()));
+            let mut enriched = normalize_file_meta(&merge_file_metadata(&Value::Null, &meta), Some(self.source_id.as_str()));
             if let Value::Object(map) = &mut enriched {
                 map.insert("url".into(), json!(resource_url(&meta, &self.source_id)));
             }
@@ -503,7 +565,7 @@ impl<'a> FileRegistry<'a> {
         let Some(meta) = read_meta(self.workspace, file_id) else {
             return Ok(None);
         };
-        let mut enriched = normalize_file_meta(&meta, Some(self.source_id.as_str()));
+        let mut enriched = normalize_file_meta(&merge_file_metadata(&Value::Null, &meta), Some(self.source_id.as_str()));
         if let Value::Object(map) = &mut enriched {
             map.insert("url".into(), json!(resource_url(&meta, &self.source_id)));
         }
@@ -513,8 +575,17 @@ impl<'a> FileRegistry<'a> {
     pub fn open_hint(&self, file_id: &str) -> Result<FileOpenHint, String> {
         let meta = read_meta(self.workspace, file_id)
             .ok_or_else(|| format!("文件资源不存在：{file_id}"))?;
-        let open_path = open_path_for(self.workspace, &meta);
-        let exists = Path::new(&open_path).exists();
+        let device = if meta.get("mode").and_then(Value::as_str) == Some("link") {
+            Some(load_or_create_device_identity()?)
+        } else { None };
+        self.open_hint_with_device(file_id, &meta, device.as_ref())
+    }
+
+    fn open_hint_with_device(&self, file_id: &str, meta: &Value, device: Option<&DeviceIdentity>) -> Result<FileOpenHint, String> {
+        let device_id = device.as_ref().map(|device| device.id.as_str());
+        let binding_state = file_binding_state(&meta, device_id);
+        let open_path = open_path_for(self.workspace, &meta, device_id);
+        let exists = !open_path.is_empty() && Path::new(&open_path).exists();
         let mode = meta
             .get("mode")
             .and_then(Value::as_str)
@@ -526,11 +597,15 @@ impl<'a> FileRegistry<'a> {
             .unwrap_or("file")
             .to_owned();
         let is_directory = kind == "directory"
-            || Path::new(&open_path)
+            || (!open_path.is_empty() && Path::new(&open_path)
                 .metadata()
                 .map(|m| m.is_dir())
-                .unwrap_or(false);
-        let hint = if exists {
+                .unwrap_or(false));
+        let hint = if binding_state == "other-device" {
+            "资源属于其他设备；请在本机明确绑定路径，其他设备绑定会保留".to_owned()
+        } else if binding_state == "unbound" {
+            "旧资源尚未绑定设备；请在本机明确绑定路径".to_owned()
+        } else if exists {
             if is_directory {
                 format!("可用系统文件管理器打开目录：{open_path}")
             } else {
@@ -554,6 +629,9 @@ impl<'a> FileRegistry<'a> {
             kind,
             url: resource_url(&meta, &self.source_id),
             hint,
+            device_bindings: meta.get("deviceBindings").cloned().unwrap_or_else(|| json!({})),
+            binding_state: binding_state.to_owned(),
+            current_device_id: device.map(|device| device.id.clone()),
         })
     }
 
@@ -606,7 +684,8 @@ impl<'a> FileRegistry<'a> {
             assert_copy_limits(&abs, is_dir, size)?;
         }
 
-        if let Some(existing) = find_existing(self.workspace, &abs, mode, sha256.as_deref()) {
+        let device = if mode == "link" { Some(load_or_create_device_identity()?) } else { None };
+        if let Some(existing) = find_existing(self.workspace, &abs, mode, sha256.as_deref(), device.as_ref().map(|item| item.id.as_str())) {
             return Ok(enrich_result(existing, &self.source_id, false));
         }
 
@@ -640,9 +719,9 @@ impl<'a> FileRegistry<'a> {
             } else {
                 None
             }
-        } else {
+        } else if mode == "copy" {
             read_text_preview(&abs, &ext, 1200)
-        };
+        } else { None };
         let mut raw = json!({
             "id": id,
             "title": title.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(file_name),
@@ -656,6 +735,10 @@ impl<'a> FileRegistry<'a> {
             "createdAt": stamp,
             "updatedAt": stamp,
         });
+        if let Some(device) = device {
+            let locator = json!({ "type": "desktop", "desktopPath": abs_str, "displayPath": abs_str });
+            bind_file_to_device(&mut raw, &device, &abs_str, locator, &stamp);
+        }
         if let Some(mtime) = mtime_iso(&meta_fs) {
             raw["mtime"] = json!(mtime);
         }
@@ -699,6 +782,8 @@ mod tests {
         fs::write(&sample, b"hello").unwrap();
         let reg = FileRegistry::new(&dir, Some("src_local_0123456789abcdef"));
         let meta = reg.ingest_link(&sample, Some("样例")).unwrap();
+        assert!(meta.get("preview").is_none());
+        assert_eq!(meta["deviceBindings"].as_object().unwrap().len(), 1);
         assert_eq!(meta.get("created"), Some(&json!(true)));
         let id = meta.get("id").and_then(Value::as_str).unwrap();
         let listed = reg.list(Some("样例"), None, 10).unwrap();
@@ -735,5 +820,66 @@ mod tests {
         assert!(hint.exists);
         assert!(hint.hint.contains("打开"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_path_binding_never_guesses_same_path_on_another_device_and_preserves_rebindings() {
+        let dir = env::temp_dir().join(format!("tie-files-devices-{}", new_file_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let same_path = dir.join("source");
+        let rebound_path = dir.join("source-b");
+        fs::create_dir_all(&same_path).unwrap();
+        fs::create_dir_all(&rebound_path).unwrap();
+        let a = DeviceIdentity { id: "dev_a".into(), name: "A".into(), platform: "linux".into() };
+        let b = DeviceIdentity { id: "dev_b".into(), name: "B".into(), platform: "linux".into() };
+        let reg = FileRegistry::new(&dir, Some("src_local_0123456789abcdef"));
+        let mut legacy = json!({ "id":"file_device", "mode":"link", "kind":"directory", "sourcePath":same_path,
+            "storedPath":same_path, "updatedAt":"2026-01-01T00:00:00Z", "preview":"must not synchronize" });
+        let hint = reg.open_hint_with_device("file_device", &legacy, Some(&a)).unwrap();
+        assert_eq!(hint.binding_state, "unbound");
+        assert!(!hint.exists);
+        assert!(hint.open_path.is_empty());
+        bind_file_to_device(&mut legacy, &a, same_path.to_str().unwrap(), json!({ "type":"desktop", "desktopPath":same_path }), "2026-01-01T00:00:01Z");
+        reg.upsert_metadata(&legacy).unwrap();
+        let hint = reg.open_hint_with_device("file_device", &legacy, Some(&b)).unwrap();
+        assert_eq!(hint.binding_state, "other-device");
+        assert!(!hint.exists);
+        assert!(hint.open_path.is_empty());
+        let mut b_only = json!({ "id":"file_device", "mode":"link", "kind":"directory", "updatedAt":"2026-01-01T00:00:02Z" });
+        bind_file_to_device(&mut b_only, &b, same_path.to_str().unwrap(), json!({ "type":"desktop", "desktopPath":same_path }), "2026-01-01T00:00:02Z");
+        reg.upsert_metadata(&b_only).unwrap();
+        let mut merged = reg.get("file_device").unwrap().unwrap();
+        assert!(reg.open_hint_with_device("file_device", &merged, Some(&a)).unwrap().exists);
+        assert!(reg.open_hint_with_device("file_device", &merged, Some(&b)).unwrap().exists);
+        bind_file_to_device(&mut merged, &b, rebound_path.to_str().unwrap(), json!({ "type":"desktop", "desktopPath":rebound_path }), "2026-01-01T00:00:03Z");
+        merged["updatedAt"] = json!("2026-01-01T00:00:03Z");
+        reg.upsert_metadata(&merged).unwrap();
+        reg.upsert_metadata(&legacy).unwrap();
+        let saved = reg.get("file_device").unwrap().unwrap();
+        assert_eq!(saved["deviceBindings"].as_object().unwrap().len(), 2);
+        assert_eq!(reg.open_hint_with_device("file_device", &saved, Some(&a)).unwrap().open_path, same_path.to_str().unwrap());
+        assert_eq!(reg.open_hint_with_device("file_device", &saved, Some(&b)).unwrap().open_path, rebound_path.to_str().unwrap());
+        assert!(saved.get("preview").is_none());
+        assert_eq!(merge_file_metadata(&legacy, &b_only), merge_file_metadata(&b_only, &legacy));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn copies_reject_external_and_parent_paths_but_keep_legacy_workspace_relative_locations() {
+        let dir = env::temp_dir().join(format!("tie-files-copy-path-{}", new_file_id()));
+        fs::create_dir_all(dir.join("legacy")).unwrap();
+        fs::write(dir.join("legacy/manual.txt"), "copy").unwrap();
+        let reg = FileRegistry::new(&dir, None);
+        for invalid in ["/etc/passwd", "../source", "safe/../../source", "C:\\source.txt", "C:source.txt", "\\\\server\\share\\source", "content://provider/document"] {
+            let meta = json!({ "id":"file_copy", "mode":"copy", "storedPath":invalid });
+            let hint = reg.open_hint_with_device("file_copy", &meta, None).unwrap();
+            assert!(hint.open_path.is_empty(), "{invalid}");
+            assert!(!hint.exists, "{invalid}");
+        }
+        let valid = json!({ "id":"file_copy", "mode":"copy", "storedPath":"legacy/manual.txt" });
+        let hint = reg.open_hint_with_device("file_copy", &valid, None).unwrap();
+        assert!(hint.exists);
+        assert_eq!(Path::new(&hint.open_path), dir.join("legacy/manual.txt"));
+        fs::remove_dir_all(dir).unwrap();
     }
 }

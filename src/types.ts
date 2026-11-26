@@ -7,6 +7,7 @@ export interface StorageSource {
   kind: StorageKind
   path: string
   available?: boolean
+  temporary?: boolean
 }
 
 export interface Page {

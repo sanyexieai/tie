@@ -12,6 +12,11 @@ const topLevelDragOver = ref(false)
 const deleteError = ref('')
 const emit = defineEmits<{ close: []; 'open-storage-settings': [] }>()
 const sourcesById = computed(() => Object.fromEntries(store.allSources.map((source) => [source.id, source])))
+const temporaryWorkspaces = computed(() => store.allSources.filter((source) => source.temporary).map((source) => ({
+  source,
+  nodes: store.tree.filter((node) => node.storageSourceId === source.id),
+})))
+const permanentTree = computed(() => store.tree.filter((node) => !sourcesById.value[node.storageSourceId]?.temporary))
 const activePageCount = computed(() => store.pages.filter((page) => !page.deletedAt).length)
 const trashCount = computed(() => store.trashedPages.length)
 const defaultSourceName = computed(() => store.allSources.find((source) => source.id === store.defaultStorageSourceId)?.name ?? '未设置')
@@ -73,6 +78,11 @@ async function remove(pageId: string) {
   deleteError.value = ''
   try { await store.trashPage(pageId) }
   catch (error) { deleteError.value = error instanceof Error ? error.message : '删除页面失败，请重试' }
+}
+async function closeTemporaryWorkspace(sourceId: string) {
+  deleteError.value = ''
+  try { await store.removeStorageSource(sourceId) }
+  catch (error) { deleteError.value = error instanceof Error ? error.message : '关闭临时工作区失败' }
 }
 async function move(pageId: string, parentId: string) { await store.movePage(pageId, parentId) }
 async function reorder(pageId: string, targetId: string, position: 'before' | 'after') { await store.reorderPage(pageId, targetId, position) }
@@ -137,7 +147,7 @@ async function renameWorkspace() {
         @drop.prevent="dropAtTopLevel"
       >拖到这里设为顶层页面</div>
       <PageTreeItem
-        v-for="node in store.tree"
+        v-for="node in permanentTree"
         :key="node.id"
         :node="node"
         :active-page-id="store.activePageId"
@@ -150,6 +160,25 @@ async function renameWorkspace() {
         @move="move"
         @reorder="reorder"
       />
+      <section v-for="{ source, nodes } in temporaryWorkspaces" :key="source.id" :data-temporary-source-id="source.id">
+        <div class="sidebar-section-title">
+          <span :title="source.path">{{ source.name }}</span>
+          <small>临时工作区</small>
+          <div class="sidebar-section-actions">
+            <button type="button" :aria-label="`关闭临时工作区 ${source.name}`" title="关闭临时工作区（保留原文件）" @click="closeTemporaryWorkspace(source.id)">×</button>
+          </div>
+        </div>
+        <PageTreeItem
+          v-for="node in nodes"
+          :key="node.id"
+          :node="node"
+          :active-page-id="store.activePageId"
+          :sources-by-id="sourcesById"
+          @select="store.openPage($event)"
+          @rename="rename"
+          @remove="closeTemporaryWorkspace(source.id)"
+        />
+      </section>
     </div>
 
     <div v-if="supportsAgentSkills" class="sidebar-section-title skills-section-title">

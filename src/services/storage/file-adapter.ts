@@ -8,6 +8,7 @@ import { syncQueue } from '@/services/storage/sync-queue'
 import type { SavePageOptions, StorageAdapter, StorageCapabilities, SyncSourceContext } from '@/services/storage/types'
 import { isFileSourceId } from '@/services/storage/types'
 import { fileBlobStore } from '@/services/storage/blobs'
+import { isTemporaryStorageSourceId } from '@/services/storage-identity'
 
 const capabilities: StorageCapabilities = {
   load: true,
@@ -54,7 +55,7 @@ export const fileStorageAdapter: StorageAdapter = {
       if (message.includes('其他设备更新') || message.includes('磁盘上被修改')) {
         throw new Error('页面文件已被其他程序修改，请重新载入后再保存')
       }
-      if (options?.queueOnFailure !== false && isRetryableStorageError(error, 'file')) {
+      if (!isTemporaryStorageSourceId(page.storageSourceId) && options?.queueOnFailure !== false && isRetryableStorageError(error, 'file')) {
         syncQueue.enqueueSave(page, options?.expectedUpdatedAt)
         throw new Error(queueFailureMessage(error, '保存', 'file'))
       }
@@ -67,7 +68,7 @@ export const fileStorageAdapter: StorageAdapter = {
       await invoke('permanently_delete_pages', { pages })
       pages.forEach((page) => syncQueue.removeForPage(page.id))
     } catch (error) {
-      if (isRetryableStorageError(error, 'file')) {
+      if (!isTemporaryStorageSourceId(_sourceId) && isRetryableStorageError(error, 'file')) {
         syncQueue.enqueueDelete(_sourceId, pages)
         throw new Error(queueFailureMessage(error, '删除', 'file'))
       }
@@ -88,7 +89,7 @@ export const fileStorageAdapter: StorageAdapter = {
   },
   async syncSource(sourceId, context?: SyncSourceContext) {
     try {
-      if (await isTauri()) {
+      if (!isTemporaryStorageSourceId(sourceId) && await isTauri()) {
         try {
           await syncWorkspaceWithGit(sourceId)
         } catch (error) {
@@ -98,6 +99,7 @@ export const fileStorageAdapter: StorageAdapter = {
       }
       const loaded = await this.loadPages(sourceId)
       if (loaded.error) return emptySyncResult(sourceId, loaded.error)
+      if (isTemporaryStorageSourceId(sourceId)) return { ...emptySyncResult(sourceId), pages: loaded.pages }
       const remoteIds = new Set(loaded.pages.map((page) => page.id))
       return mergeSyncPages(sourceId, context?.localPages ?? [], loaded.pages, remoteIds)
     } catch (error) {
