@@ -74,6 +74,54 @@ describe('server credential vault', { concurrency: 1 }, () => {
     assert.equal(fs.existsSync(path.join(dataDir, 'workspaces', workspaceId, 'vault.json')), false)
   })
 
+  it('saves a value without an HTTP action and preserves it through metadata edits', () => {
+    const secret = vault.createSecret(owner, { workspaceId, name: 'Private note', value })
+    assert.equal(secret.action, null)
+    assert.equal(vault.getSecret(owner, secret.id).target, null)
+    assert.equal(vault.revealSecret(owner, secret.id), value)
+    assert.ok(!fs.readFileSync(path.join(dataDir, 'vault.json'), 'utf8').includes(value))
+    assert.deepEqual(vault.listSecrets(owner, { query: 'Private note' }), [secret])
+    assert.deepEqual(vault.listSecrets(owner, { query: value }), [])
+    const edited = vault.updateSecret(owner, secret.id, { name: 'Renamed private note', description: 'For personal use' })
+    assert.equal(edited.version, 2)
+    assert.equal(edited.action, null)
+    assert.equal(vault.revealSecret(owner, secret.id), value)
+    assert.throws(() => vault.revealSecret(other, secret.id), { code: 'SECRET_NOT_FOUND' })
+    vault.deleteSecret(owner, secret.id)
+    assert.throws(() => vault.getSecret(owner, secret.id), { code: 'SECRET_NOT_FOUND' })
+  })
+
+  it('requires an action before granting or using a stored value, and revokes grants when the action is removed', () => {
+    const secret = create({ target: null })
+    assert.throws(() => grant(secret), { code: 'ACTION_REQUIRED', status: 409 })
+    // The refusal must precede decryption: a missing key does not change it to a decrypt/key failure.
+    const keyFile = path.join(dataDir, '.private/vault.key')
+    const key = fs.readFileSync(keyFile)
+    fs.rmSync(keyFile)
+    assert.throws(() => use(secret), { code: 'ACTION_REQUIRED', status: 409 })
+    const [denied] = vault.listUsage(owner, { workspaceId })
+    assert.equal(denied.reason, 'ACTION_REQUIRED')
+    assert.equal(denied.action, null)
+    assert.ok(!JSON.stringify(denied).includes(value))
+    fs.writeFileSync(keyFile, key, { mode: 0o600 })
+
+    const configured = vault.updateSecret(owner, secret.id, { target: input.target })
+    const permission = grant(configured, { maxUses: null })
+    assert.equal(use(configured, permission.id).value, value)
+    const renamed = vault.updateSecret(owner, secret.id, { name: 'Rename without clearing action' })
+    assert.deepEqual(renamed.action, { method: 'POST', origin: 'https://api.example.test' })
+    assert.deepEqual(vault.getSecret(owner, secret.id).target, input.target)
+    grant(renamed)
+    const cleared = vault.updateSecret(owner, secret.id, { target: null })
+    assert.equal(cleared.action, null)
+    assert.ok(vault.listGrants(owner, { secretRef: secret.secretRef }).every(item => item.revokedAt))
+    assert.throws(() => use(cleared), { code: 'ACTION_REQUIRED' })
+    assert.equal(vault.revealSecret(owner, secret.id), value)
+    for (const target of [{}, '', false, { url: 'http://example.test' }]) {
+      assert.throws(() => create({ target }), { code: 'INVALID_TARGET' })
+    }
+  })
+
   it('uses an external private master key and never silently replaces a missing key', () => {
     const keyPath = path.join(dataDir, 'external-vault.key')
     const key = crypto.randomBytes(32)

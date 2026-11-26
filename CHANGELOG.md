@@ -2,6 +2,16 @@
 
 All notable changes to Tie are documented in this file.
 
+## [1.0.61] - 2026-11-26
+
+- 新增客户端「凭据页面」：从新建菜单或左侧列表进入，只填名称与密钥即可保存，桌面、网页和移动端都可直接维护。
+- 支持在同页查看、复制、替换与删除敏感值；分类说明、Agent 操作配置、授权及使用记录按需展开，不必跳转账号网页。
+- 凭据支持仅保存模式，不再强制填写 HTTP 地址；需要 Agent 调用时再配置固定 HTTPS 操作并授权，纯 HTTP MCP 继续只检索元数据和执行已授权操作。
+- 左侧按工作区列出并搜索凭据，保留所选工作区；旧账号页兼容仅保存型条目和原有操作凭据。
+- 密钥仍独立加密保存，不进入普通文档、历史、导出或浏览器缓存；切页、换账号和退出会清除原文，延迟响应不能跨页面显示或复制。
+- 修复延迟列表覆盖新建条目或恢复已删除条目、未修改保存误撤销授权，以及固定 GET 操作配置提交空请求体的问题。
+- 补充真实后台浏览器回归，覆盖最简创建、完整维护、同页授权、工作区隔离、多行值、移动端和敏感响应清理。
+
 ## [1.0.60] - 2026-11-26
 
 - 修复表格、段落等位置的 Wiki 页面链接显示为纯文本，以及带竖线的表格内容编辑后列错位的问题。
@@ -252,7 +262,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.60...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.61...HEAD
+[1.0.61]: https://github.com/sanyexieai/tie/releases/tag/v1.0.61
 [1.0.60]: https://github.com/sanyexieai/tie/releases/tag/v1.0.60
 [1.0.59]: https://github.com/sanyexieai/tie/releases/tag/v1.0.59
 [1.0.49]: https://github.com/sanyexieai/tie/releases/tag/v1.0.49

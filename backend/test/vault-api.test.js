@@ -116,6 +116,44 @@ describe('credential vault through owner REST and native HTTP MCP', { concurrenc
     assert.equal((await request(`/api/v1/me/secrets/${secret.id}/value`, { bearer: token })).response.status, 401)
   })
 
+  it('manages storage-only credentials over REST while native HTTP MCP returns metadata and refuses execution', async () => {
+    const storedValue = 'STORAGE_ONLY_FIXTURE_NOT_A_REAL_SECRET'
+    const created = await request('/api/v1/me/secrets', { body: {
+      workspaceId: workspace, name: 'Personal credential page', value: storedValue,
+    } })
+    assert.equal(created.response.status, 201)
+    const stored = created.payload
+    assert.equal(stored.action, null)
+    assert.ok(!JSON.stringify(stored).includes(storedValue))
+    const detail = await request(`/api/v1/me/secrets/${stored.id}`)
+    assert.equal(detail.payload.target, null)
+    const edited = await request(`/api/v1/me/secrets/${stored.id}`, { method: 'PUT', body: { description: 'A saved private value' } })
+    assert.equal(edited.response.status, 200)
+    const revealed = await request(`/api/v1/me/secrets/${stored.id}/value`)
+    assert.equal(revealed.payload.value, storedValue)
+    const search = await call('tie_secret_search', { query: stored.name })
+    assert.equal(search.error, false)
+    assert.equal(search.value.length, 1)
+    assert.equal(search.value[0].action, null)
+    assert.ok(!JSON.stringify(search.value).includes(storedValue))
+    const refusedGrant = await request(`/api/v1/me/secrets/${stored.id}/grants`, { body: { principal: { type: 'session', id: 'current' } } })
+    assert.equal(refusedGrant.response.status, 409)
+    assert.equal(refusedGrant.payload.code, 'ACTION_REQUIRED')
+    const callsBefore = upstreamCalls
+    const refusedUse = await call('tie_secret_use', { secretRef: stored.secretRef })
+    assert.equal(refusedUse.error, true)
+    assert.equal(refusedUse.value.code, 'ACTION_REQUIRED')
+    assert.equal(refusedUse.value.configurationRequired, true)
+    assert.equal(upstreamCalls, callsBefore)
+    assert.ok(!JSON.stringify(refusedUse).includes(storedValue))
+    const usage = await call('tie_secret_usage', { secretRef: stored.secretRef })
+    assert.equal(usage.value[0].reason, 'ACTION_REQUIRED')
+    assert.equal(usage.value[0].status, 'denied')
+    const deleted = await request(`/api/v1/me/secrets/${stored.id}`, { method: 'DELETE' })
+    assert.equal(deleted.response.status, 204)
+    assert.equal((await request(`/api/v1/me/secrets/${stored.id}`)).response.status, 404)
+  })
+
   it('requires owner approval, binds grants to the caller and consumes one-time grants', async () => {
     const denied = await call('tie_secret_use', { secretRef: secret.secretRef })
     assert.equal(denied.error, true)

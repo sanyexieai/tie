@@ -9,7 +9,7 @@ export function mountVault(container, { api, esc, workspaces, tokens, isActive }
   const workspaceOptions = workspaces.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join('')
   root.innerHTML = `
     <h2>凭据库</h2>
-    <p class="lead">密钥保存在服务器凭据库。Agent 只能查找凭据说明、执行已授权的固定 HTTP 操作，不能读取密钥原文。</p>
+    <p class="lead">填写名称和密钥即可保存；需要 Agent 执行操作时再配置授权。Agent 只能查找说明，不能读取密钥原文。</p>
     <form class="toolbar" id="vault-search">
       <label>凭据库工作区<select name="workspaceId" required>${workspaceOptions}</select></label>
       <label>搜索凭据说明<input name="query" placeholder="名称、服务、环境或标签"></label>
@@ -83,7 +83,7 @@ export function mountVault(container, { api, esc, workspaces, tokens, isActive }
   function renderSecrets() {
     root.querySelector('#vault-secrets').innerHTML = secrets.length ? secrets.map((secret) => `
       <tr data-secret-id="${esc(secret.id)}"><td><strong>${esc(secret.name)}</strong><div class="hint">${esc(secret.description)}</div><code>${esc(secret.secretRef)}</code><div class="hint">${esc(secret.tags.join(' · '))}</div></td>
-      <td>${esc(secret.service)}<div class="hint">${esc(secret.environment)}</div></td><td>${esc(secret.action.method)}<div class="hint">${esc(secret.action.origin)}</div></td>
+      <td>${esc(secret.service)}<div class="hint">${esc(secret.environment)}</div></td><td>${secret.action ? `${esc(secret.action.method)}<div class="hint">${esc(secret.action.origin)}</div>` : '<span class="hint">仅保存</span>'}</td>
       <td><div class="token-actions">${[['details', '详情与授权'], ['view', '查看密钥'], ['copy', '复制密钥'], ['edit', '编辑'], ['delete', '删除']].map(([action, label]) => `<button type="button" class="${action === 'delete' ? 'danger' : 'ghost'}" data-vault-action="${action}" aria-label="${label} ${esc(secret.name)}">${label}</button>`).join('')}</div>
       <code class="vault-value" data-vault-value hidden></code><p class="hint" data-vault-feedback role="status"></p></td></tr>`).join('')
       : '<tr><td colspan="4" class="empty">没有匹配的凭据</td></tr>'
@@ -169,7 +169,7 @@ export function mountVault(container, { api, esc, workspaces, tokens, isActive }
     dialog.showModal()
     return dialog
   }
-  function openEditor(secret = null) {
+  function openEditor(secret = null, configureAction = false) {
     const target = secret?.target || { url: '', method: 'GET', authType: 'bearer' }
     const dialog = openDialog(secret ? '编辑凭据' : '新增凭据', `
       <form id="vault-editor">
@@ -177,17 +177,20 @@ export function mountVault(container, { api, esc, workspaces, tokens, isActive }
         <label>说明<textarea name="description" rows="2">${esc(secret?.description || '')}</textarea></label>
         <div class="split"><label>服务<input name="service" value="${esc(secret?.service || '')}" placeholder="例如 GitHub"></label><label>环境<input name="environment" value="${esc(secret?.environment || '')}" placeholder="例如 production"></label></div>
         <label>标签<input name="tags" value="${esc(secret?.tags.join(', ') || '')}" placeholder="用逗号分隔"></label>
+        <label>密钥${secret ? '（留空保留）' : ''}<input name="value" type="password" autocomplete="new-password" ${secret ? '' : 'required'}></label>
+        <button class="ghost" type="button" id="vault-toggle-value">显示输入</button>
+        <label class="vault-action-toggle"><input name="configureAction" type="checkbox"${secret?.target || configureAction ? ' checked' : ''}> 允许 Agent 执行固定 HTTP 操作</label>
+        <fieldset data-action-fields>
         <label>固定 HTTP 地址<input name="url" type="url" pattern="https://.+" title="仅支持 HTTPS 地址" required value="${esc(target.url)}" placeholder="https://api.example.com/status"></label>
         <p class="hint">授权后 Agent 不能更改目标地址、方法和请求内容。密钥请填写在密钥字段中。</p>
         <div class="split"><label>HTTP 方法<select name="method">${['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'].map((value) => `<option${target.method === value ? ' selected' : ''}>${value}</option>`).join('')}</select></label>
         <label>认证方式<select name="authType"><option value="bearer"${target.authType === 'bearer' ? ' selected' : ''}>Bearer</option><option value="header"${target.authType === 'header' ? ' selected' : ''}>自定义请求头</option><option value="basic"${target.authType === 'basic' ? ' selected' : ''}>Basic</option></select></label></div>
         <label data-header-name>请求头名称<input name="headerName" value="${esc(target.headerName || '')}" placeholder="例如 X-API-Key"></label>
         <label data-username>Basic 用户名（可留空）<input name="username" value="${esc(target.username || '')}" autocomplete="off"></label>
-        <label>密钥${secret ? '（留空保留）' : ''}<input name="value" type="password" autocomplete="new-password" ${secret ? '' : 'required'}></label>
-        <button class="ghost" type="button" id="vault-toggle-value">显示输入</button>
         <label>固定请求内容（可选，GET / HEAD 不发送）<textarea name="body" rows="3">${esc(target.body || '')}</textarea></label>
         <label>允许返回的字段（每行一个）<textarea name="responseFields" rows="3" placeholder="status\ndata.id">${esc((target.responseFields || []).join('\n'))}</textarea></label>
         <p class="hint">默认仅返回 HTTP 状态。可选字段支持点分路径，仅返回标量并脱敏；只为可信服务开放，脱敏无法识别所有变形内容。</p>
+        </fieldset>
         <p class="error" data-form-error role="status"></p><div class="vault-form-actions"><button type="submit" class="primary">保存凭据</button></div>
       </form>`)
     const form = dialog.querySelector('form')
@@ -202,6 +205,14 @@ export function mountVault(container, { api, esc, workspaces, tokens, isActive }
     const updateBodyField = () => { form.elements.body.disabled = ['GET', 'HEAD'].includes(form.elements.method.value) }
     form.elements.method.onchange = updateBodyField
     updateBodyField()
+    const updateActionFields = () => {
+      const enabled = form.elements.configureAction.checked
+      const fields = dialog.querySelector('[data-action-fields]')
+      fields.hidden = !enabled
+      fields.disabled = !enabled
+    }
+    form.elements.configureAction.onchange = updateActionFields
+    updateActionFields()
     dialog.querySelector('#vault-toggle-value').onclick = (event) => {
       const showing = form.elements.value.type === 'password'
       form.elements.value.type = showing ? 'text' : 'password'
@@ -222,7 +233,8 @@ export function mountVault(container, { api, esc, workspaces, tokens, isActive }
       const payload = {
         name: String(data.get('name')), description: String(data.get('description')),
         service: String(data.get('service')), environment: String(data.get('environment')),
-        tags: String(data.get('tags')).split(/[,，]/).map((tag) => tag.trim()).filter(Boolean), target,
+        tags: String(data.get('tags')).split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
+        target: form.elements.configureAction.checked ? target : null,
       }
       if (!secret) payload.workspaceId = selectedWorkspace()
       if (!secret || value !== '') payload.value = value
@@ -241,6 +253,14 @@ export function mountVault(container, { api, esc, workspaces, tokens, isActive }
   }
   function openGrant(secret, sessions) {
     const target = secret.target
+    if (!target) {
+      const dialog = openDialog(`详情与授权 · ${secret.name}`, `
+        <p>${esc(secret.description)}</p><p><code>${esc(secret.secretRef)}</code> · 版本 ${esc(secret.version)}</p>
+        <p>此凭据目前仅用于保存。需要 Agent 使用时，在这里配置固定操作并授权。</p>
+        <button type="button" class="primary" data-configure-action>配置 Agent 操作</button>`)
+      dialog.querySelector('[data-configure-action]').onclick = () => { dialog.close(); openEditor(secret, true) }
+      return
+    }
     const eligibleTokens = tokens.filter((token) => token.workspaceId === secret.workspaceId)
     const dialog = openDialog(`详情与授权 · ${secret.name}`, `
       <p>${esc(secret.description)}</p><p><code>${esc(secret.secretRef)}</code> · 版本 ${esc(secret.version)}</p>

@@ -11,6 +11,9 @@
 .vault-dialog { width: min(720px, calc(100% - 24px)); max-height: calc(100% - 40px); }
 .vault-dialog .vault-dialog-body { padding: 24px; }
 .vault-dialog form { padding: 0; }
+.vault-dialog fieldset { border: 0; margin: 0; padding: 0; }
+.vault-dialog input[type="checkbox"] { width: auto; margin-right: 6px; }
+.vault-dialog .vault-action-toggle { display: flex; align-items: center; gap: 4px; }
 .vault-dialog textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; font: inherit; resize: vertical; }
 .vault-dialog .split { margin-top: 0; }
 .vault-dialog code, .vault-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; }

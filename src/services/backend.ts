@@ -240,6 +240,8 @@ async function request<T>(profile: BackendProfile, path: string, options: Reques
   return body as T
 }
 
+export { request as backendRequest }
+
 async function uploadBinary(profile: BackendProfile, path: string, data: Uint8Array) {
   const headers = new Headers()
   headers.set('content-type', 'application/octet-stream')

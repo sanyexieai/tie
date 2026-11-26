@@ -63,6 +63,7 @@ async function createSecret(page: Page) {
   await editor.getByLabel('服务', { exact: true }).fill('Fixture API')
   await editor.getByLabel('环境', { exact: true }).fill('production')
   await editor.getByLabel('标签', { exact: true }).fill('deploy, status')
+  await editor.getByRole('checkbox', { name: '允许 Agent 执行固定 HTTP 操作', exact: true }).check()
   await editor.getByLabel('固定 HTTP 地址', { exact: true }).fill('https://api.example.com/status')
   await editor.getByLabel('密钥', { exact: true }).fill(secretValue)
   await editor.getByLabel('允许返回的字段（每行一个）', { exact: true }).fill('status\ndata.id')
@@ -77,6 +78,44 @@ async function createSecret(page: Page) {
   await expect(page.getByRole('table', { name: '凭据列表' })).toContainText('Production API')
   return record as { id: string; secretRef: string }
 }
+
+test('stores a credential with only a name and value, and lets the owner add an optional action later', async ({ page, backend }) => {
+  await openVault(page, backend)
+  await page.getByRole('button', { name: '新增凭据', exact: true }).click()
+  let editor = page.getByRole('dialog', { name: '新增凭据', exact: true })
+  await expect(editor.getByRole('checkbox', { name: '允许 Agent 执行固定 HTTP 操作', exact: true })).not.toBeChecked()
+  await expect(editor.getByLabel('固定 HTTP 地址', { exact: true })).toBeHidden()
+  await editor.getByLabel('名称', { exact: true }).fill('Personal credential')
+  await editor.getByLabel('密钥', { exact: true }).fill(secretValue)
+  const saved = page.waitForResponse((response) => response.url().endsWith('/api/v1/me/secrets') && response.request().method() === 'POST')
+  await editor.getByRole('button', { name: '保存凭据', exact: true }).click()
+  const response = await saved
+  expect(response.status()).toBe(201)
+  expect(response.request().postDataJSON().target).toBeNull()
+  const secret = await response.json()
+  expect(secret.action).toBeNull()
+  const row = page.getByRole('table', { name: '凭据列表' }).getByRole('row').filter({ hasText: 'Personal credential' })
+  await expect(row).toContainText('仅保存')
+  await expect(row).not.toContainText(secretValue)
+  await row.getByRole('button', { name: '编辑 Personal credential', exact: true }).click()
+  editor = page.getByRole('dialog', { name: '编辑凭据', exact: true })
+  await expect(editor.getByLabel('密钥（留空保留）', { exact: true })).toHaveValue('')
+  await editor.getByLabel('说明', { exact: true }).fill('保留原密钥')
+  await editor.getByRole('button', { name: '保存凭据', exact: true }).click()
+  await expect(editor).toHaveCount(0)
+  await row.getByRole('button', { name: '详情与授权 Personal credential', exact: true }).click()
+  const detail = page.getByRole('dialog', { name: '详情与授权 · Personal credential', exact: true })
+  await expect(detail).toContainText('此凭据目前仅用于保存')
+  await expect(detail.getByRole('button', { name: '授权此操作', exact: true })).toHaveCount(0)
+  await detail.getByRole('button', { name: '配置 Agent 操作', exact: true }).click()
+  editor = page.getByRole('dialog', { name: '编辑凭据', exact: true })
+  await expect(editor.getByLabel('固定 HTTP 地址', { exact: true })).toBeVisible()
+  await editor.getByRole('button', { name: '关闭', exact: true }).click()
+  await row.getByRole('button', { name: '复制密钥 Personal credential', exact: true }).click()
+  await expect(row.locator('[data-vault-feedback]')).toHaveText('密钥已复制。')
+  expect(await page.evaluate(() => (window as Window & { __vaultCopied: string[] }).__vaultCopied)).toEqual([secretValue])
+  expect(fs.readFileSync(path.join(backend.data, 'vault.json'), 'utf8')).not.toContain(secretValue)
+})
 
 test('maintains metadata, reveals only explicitly, and grants token or session use with a fixed target', async ({ page, backend }) => {
   const valueRequests: string[] = []

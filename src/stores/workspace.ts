@@ -1,6 +1,6 @@
 import { computed, ref, watch } from 'vue'
 import { acceptHMRUpdate, defineStore } from 'pinia'
-import { backendService, isBackendRemoteSourceId, isBackendSourceId } from '@/services/backend'
+import { backendService, isBackendRemoteSourceId, isBackendSourceId, parseBackendWorkspaceId } from '@/services/backend'
 import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageContentEqual, pageSourceIds, pageWriteEqual, prunePageSources, remapPageSourceIds, withPageSources } from '@/services/page-sources'
 import { reconcileSaveAgainstRemote } from '@/services/save-reconcile'
 import { isLocalWinningConflict } from '@/services/storage/sync-merge'
@@ -15,6 +15,7 @@ import { migratePageWorkspaceHrefs } from '@/services/link-runtime'
 import { runFileHrefMigrationOnce } from '@/services/workspace-migrations'
 import { workspaceService } from '@/services/workspace'
 import { useBackendStore } from '@/stores/backend'
+import { useCredentialsStore } from '@/stores/credentials'
 import type { SyncConflict, SyncResult } from '@/services/storage/types'
 import {
   connectSkill,
@@ -60,6 +61,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const showingRecent = ref(false)
   const showingFavorites = ref(false)
   const showingSkills = ref(false)
+  const showingCredentials = ref(false)
   const showingSkillManager = ref(false)
   const activeSkillId = ref<string | null>(null)
   const skillConnections = ref<SkillConnection[]>([])
@@ -695,6 +697,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     showingRecent.value = false
     showingFavorites.value = false
     showingSkills.value = false
+    showingCredentials.value = false
     return true
   }
 
@@ -1576,6 +1579,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function clearSpecialViews() {
+    showingCredentials.value = false
     showingTrash.value = false
     showingSearch.value = false
     showingTags.value = false
@@ -1651,6 +1655,19 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   function openRecent() { clearSpecialViews(); showingRecent.value = true }
   function openFavorites() { clearSpecialViews(); showingFavorites.value = true }
 
+  async function openCredentialPage(id: string | null = null, workspaceId?: string) {
+    if (editorSaveHandler && !await editorSaveHandler()) return false
+    const credentials = useCredentialsStore()
+    const sourceId = activePage.value?.storageSourceId
+    credentials.open(id, workspaceId ?? (!showingCredentials.value && sourceId && isBackendSourceId(sourceId) ? parseBackendWorkspaceId(sourceId) : undefined))
+    clearSpecialViews()
+    showingCredentials.value = true
+    void credentials.refresh()
+    return true
+  }
+
+  function closeCredentialPage() { showingCredentials.value = false }
+
   async function refreshSkills() {
     if (!('__TAURI_INTERNALS__' in window)) {
       skillConnections.value = []
@@ -1687,6 +1704,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function selectSkill(skillId: string) {
+    showingCredentials.value = false
     activeSkillId.value = skillId
     showingSkills.value = true
     showingSkillManager.value = false
@@ -1765,7 +1783,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, registerEditorSaveHandler, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, pageBackendSync, saving, reloading, initialized, initializationStage, backgroundStarted, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, initializeBackground, reloadWorkspace, syncBackendSources, syncBackendNow, scheduleBackendSync, backendSyncMode, backendSyncRunning, backendSyncProgress, backendSyncLastCompletedAt, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, registerEditorSaveHandler, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, pageBackendSync, saving, reloading, initialized, initializationStage, backgroundStarted, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingCredentials, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, initializeBackground, reloadWorkspace, syncBackendSources, syncBackendNow, scheduleBackendSync, backendSyncMode, backendSyncRunning, backendSyncProgress, backendSyncLastCompletedAt, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openCredentialPage, closeCredentialPage, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })
 
 if (import.meta.hot) {

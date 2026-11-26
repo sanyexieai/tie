@@ -11,6 +11,7 @@ const SECRET_FIELDS = ['workspaceId', 'name', 'description', 'service', 'environ
 const AUDIT_REASONS = new Set([
   'INVALID_ARGUMENTS', 'INVALID_PRINCIPAL', 'INVALID_SECRET_REF', 'OWNER_NOT_FOUND', 'ACCOUNT_DISABLED',
   'WORKSPACE_NOT_FOUND', 'SECRET_NOT_FOUND', 'PRINCIPAL_UNAVAILABLE', 'GRANT_REQUIRED', 'VAULT_ERROR',
+  'ACTION_REQUIRED',
   'VAULT_KEY_MISSING', 'VAULT_KEY_UNAVAILABLE', 'VAULT_KEY_PERMISSIONS', 'VAULT_KEY_INVALID',
   'VAULT_KEY_IN_WORKSPACE', 'VAULT_DECRYPT_FAILED', 'TARGET_FAILED', 'USE_FAILED', 'INVALID_TARGET',
   'TARGET_NOT_ALLOWED', 'TARGET_DNS', 'TARGET_POLICY', 'TARGET_TIMEOUT', 'TARGET_REDIRECT',
@@ -105,6 +106,7 @@ export function createGrant(ownerId, secretId, input) {
   objectInput(input, ['principal', 'expiresAt', 'maxUses'])
   const data = readVault()
   const secret = ownedSecret(data, ownerId, secretId)
+  requireAction(secret)
   const principal = principalInput(input.principal)
   requireLivePrincipal(ownerId, secret.workspaceId, principal)
   const now = Date.now()
@@ -174,6 +176,7 @@ export function authorizeUse(caller, input) {
     if (!secret) fail('SECRET_NOT_FOUND', '凭据不存在', 404)
     event.action = metadata(secret).action
     event.version = secret.version
+    requireAction(secret)
     if (input.grantId !== undefined && typeof input.grantId !== 'string') fail('INVALID_ARGUMENTS', '授权标识无效', 400)
     const grant = [...data.grants].reverse().find(item => item.ownerId === caller.userId
       && item.secretRef === event.secretRef && item.workspaceId === caller.workspaceId
@@ -231,7 +234,8 @@ export function listUsage(ownerId, options = {}) {
 function metadata(secret) {
   const { id, ownerId, workspaceId, name, description, service, environment, tags, version, createdAt, updatedAt } = secret
   return { id, secretRef: secretRef(secret), ownerId, workspaceId, name, description, service, environment,
-    tags: [...tags], version, createdAt, updatedAt, action: { method: secret.target.method, origin: new URL(secret.target.url).origin } }
+    tags: [...tags], version, createdAt, updatedAt,
+    action: secret.target ? { method: secret.target.method, origin: new URL(secret.target.url).origin } : null }
 }
 
 function grantMetadata(grant) {
@@ -256,7 +260,11 @@ function secretFields(ownerId, input) {
     return value
   }))]
   return { workspaceId, name, description: optionalText(input.description, 2000), service: optionalText(input.service, 100),
-    environment: optionalText(input.environment, 100), tags, target: validateTarget(input.target) }
+    environment: optionalText(input.environment, 100), tags, target: input.target == null ? null : validateTarget(input.target) }
+}
+
+function requireAction(secret) {
+  if (!secret.target) fail('ACTION_REQUIRED', '此凭据仅用于保存，请先配置固定 HTTPS 操作后再授权 Agent 使用', 409)
 }
 
 function rejectValueCopies(fields, value) {

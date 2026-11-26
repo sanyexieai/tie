@@ -5,7 +5,7 @@ const string = { type: 'string' }
 export const vaultTools = [
   {
     name: 'tie_secret_search',
-    description: '搜索当前工作区的凭据元数据，不读取明文。返回 secretRef、用途和目标摘要；凭据使用需本人在 /me/ 凭据库授权。',
+    description: '搜索当前工作区的凭据元数据，不读取明文。返回 secretRef、用途和可选操作摘要；action 为 null 的凭据仅用于保存，执行操作前需本人配置并授权。',
     inputSchema: { type: 'object', additionalProperties: false, properties: {
       query: string, service: string, environment: string,
       limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
@@ -62,6 +62,7 @@ export async function callVaultTool(caller, name, argumentsValue) {
   } catch (error) {
     return failure(error.code || 'VAULT_ERROR', error.status < 500 ? error.message : '凭据服务暂时不可用', {
       ...(error.code === 'GRANT_REQUIRED' ? { approvalRequired: true, approvalPath: '/me/#vault', secretRef: args.secretRef, principal: caller.principal } : {}),
+      ...(error.code === 'ACTION_REQUIRED' ? { configurationRequired: true, configurationPath: '/me/#vault', secretRef: args.secretRef } : {}),
     })
   }
 }
