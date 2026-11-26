@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken'
 import { detectCli, loadSettings } from './settings.js'
 import { findMcpToken, touchMcpToken } from './mcp-tokens.js'
 import { store } from './store.js'
+import { callVaultTool, isVaultTool, vaultTools } from './vault-mcp.js'
 
 const LOCAL_FILE_TOOLS = new Set(['tie_file_ingest', 'tie_file_open_hint', 'tie_export', 'tie_import'])
 
@@ -100,7 +101,7 @@ function resolveCaller(req, jwtSecret) {
     if (!workspace) return { error: 404, message: '这个令牌绑定的工作区已经不存在' }
     const user = store.loadUsers().find((item) => item.id === token.userId)
     if (!user || user.disabled) return { error: 403, message: '账号已停用' }
-    return { workspace, touch: token.id }
+    return { workspace, userId: user.id, principal: { type: 'mcp-token', id: token.id }, touch: token.id }
   }
   let payload
   try {
@@ -115,10 +116,11 @@ function resolveCaller(req, jwtSecret) {
   if (!workspaceId) return { error: 400, message: '缺少工作区' }
   const workspace = store.loadWorkspaces().find((item) => item.id === workspaceId && item.ownerId === user.id)
   if (!workspace) return { error: 404, message: '工作区不存在' }
-  return { workspace, touch: null }
+  return { workspace, userId: user.id, principal: { type: 'session', id: payload.sid || '' }, touch: null }
 }
 
 export async function handleMcpRequest(req, res, jwtSecret) {
+  res.set('Cache-Control', 'no-store')
   const status = mcpStatus()
   if (!status.enabled) {
     res.status(503).json({ message: 'MCP 未开启。请管理员在服务设置里打开。' })
@@ -163,11 +165,17 @@ export async function handleMcpRequest(req, res, jwtSecret) {
     })
     return
   }
+  if (message.method === 'tools/call' && isVaultTool(message.params?.name)) {
+    const result = await callVaultTool({ userId: caller.userId, workspaceId: workspace.id, principal: caller.principal }, message.params.name, message.params.arguments)
+    if (caller.touch) touchMcpToken(caller.touch)
+    res.json({ jsonrpc: '2.0', id: message.id ?? null, result })
+    return
+  }
   const workspaceDir = store.workspaceDir(workspace.id)
   try {
     const response = await exchangeWithTie(status.cli, ['--workspace', workspaceDir, 'mcp'], message)
     if (message.method === 'tools/list' && Array.isArray(response.result?.tools)) {
-      response.result.tools = response.result.tools.filter((tool) => !LOCAL_FILE_TOOLS.has(tool.name))
+      response.result.tools = [...response.result.tools.filter((tool) => !LOCAL_FILE_TOOLS.has(tool.name) && !isVaultTool(tool.name)), ...vaultTools]
     }
     if (caller.touch) touchMcpToken(caller.touch)
     res.json(response)

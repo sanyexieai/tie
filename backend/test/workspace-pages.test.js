@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 import { closeLive } from '../src/live.js'
 import { frontmatter } from '../src/page-format.js'
 import { store } from '../src/store.js'
-import { getWorkspacePage, listWorkspacePages, saveWorkspacePage } from '../src/workspace-pages.js'
+import { getWorkspacePage, listWorkspacePages, listWorkspaceRevisions, readWorkspaceRevision, saveWorkspacePage } from '../src/workspace-pages.js'
 
 const stamp = '2026-11-25T00:00:00.000Z'
 const workspaceId = 'workspace-pages-test'
@@ -161,5 +161,69 @@ describe('workspace page storage', { concurrency: 1 }, () => {
     assert.equal(migrated.createdAt, legacy.createdAt)
     assert.equal(migrated.updatedAt, legacy.updatedAt)
     assert.deepEqual(listWorkspacePages(workspaceId), pages)
+  })
+
+  it('archives the replaced content when restoring without a concurrency precondition', () => {
+    const original = demoPage(0)
+    saveWorkspacePage(workspaceId, original)
+    assert.deepEqual(listWorkspaceRevisions(workspaceId, original.id), [])
+    const changed = { ...original, markdown: '# Page 0\n\nChanged', updatedAt: '2026-11-25T00:00:01.000Z' }
+    saveWorkspacePage(workspaceId, changed, original.updatedAt)
+    const [revision] = listWorkspaceRevisions(workspaceId, original.id)
+    const restored = readWorkspaceRevision(workspaceId, original.id, revision.id)
+    saveWorkspacePage(workspaceId, { ...restored, updatedAt: '2026-11-25T00:00:02.000Z' })
+
+    const snapshots = listWorkspaceRevisions(workspaceId, original.id)
+      .map((item) => readWorkspaceRevision(workspaceId, original.id, item.id))
+    assert.equal(snapshots.length, 2)
+    assert.deepEqual(new Set(snapshots.map((page) => page.markdown)), new Set([original.markdown, changed.markdown]))
+    assert.equal(getWorkspacePage(workspaceId, original.id).markdown, original.markdown)
+  })
+
+  for (const [field, value] of Object.entries({
+    icon: '📚', parentId: 'pg_parent', sortKey: 9, tags: ['changed'],
+    createdAt: '2026-11-24T00:00:00.000Z', deletedAt: '2026-11-25T00:00:01.000Z',
+  })) {
+    it(`archives a ${field}-only change without a concurrency precondition`, () => {
+      const original = demoPage(0)
+      saveWorkspacePage(workspaceId, original)
+      saveWorkspacePage(workspaceId, { ...original, [field]: value, updatedAt: '2026-11-25T00:00:01.000Z' })
+      const [revision] = listWorkspaceRevisions(workspaceId, original.id)
+      assert.ok(revision)
+      const previous = readWorkspaceRevision(workspaceId, original.id, revision.id)
+      assert.deepEqual(previous[field], original[field])
+      assert.deepEqual(getWorkspacePage(workspaceId, original.id)[field], value)
+    })
+  }
+
+  it('archives a renamed page before relocating its Markdown file', () => {
+    const original = demoPage(0)
+    saveWorkspacePage(workspaceId, original)
+    const renamed = { ...original, title: 'Renamed page', markdown: '# Renamed page\n\nSynthetic content' }
+    saveWorkspacePage(workspaceId, renamed)
+    const [revision] = listWorkspaceRevisions(workspaceId, original.id)
+    assert.equal(readWorkspaceRevision(workspaceId, original.id, revision.id).title, original.title)
+    assert.equal(getWorkspacePage(workspaceId, original.id).title, renamed.title)
+  })
+
+  it('does not create history for timestamp or source binding changes alone', () => {
+    const original = demoPage(0)
+    saveWorkspacePage(workspaceId, original)
+    saveWorkspacePage(workspaceId, {
+      ...original, icon: undefined, parentId: undefined, sortKey: undefined, tags: undefined, deletedAt: undefined,
+      updatedAt: '2026-11-25T00:00:01.000Z', storageSourceId: 'backend:changed-binding',
+    })
+    assert.deepEqual(listWorkspaceRevisions(workspaceId, original.id), [])
+  })
+
+  it('rejects stale writes before archiving or replacing the current page', () => {
+    const original = demoPage(0)
+    saveWorkspacePage(workspaceId, original)
+    const current = { ...original, markdown: '# Page 0\n\nOther device', updatedAt: '2026-11-25T00:00:01.000Z' }
+    saveWorkspacePage(workspaceId, current, original.updatedAt)
+    const historyBefore = listWorkspaceRevisions(workspaceId, original.id)
+    assert.throws(() => saveWorkspacePage(workspaceId, original, original.updatedAt), { status: 409 })
+    assert.deepEqual(listWorkspaceRevisions(workspaceId, original.id), historyBefore)
+    assert.equal(getWorkspacePage(workspaceId, original.id).markdown, current.markdown)
   })
 })

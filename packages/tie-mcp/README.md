@@ -20,6 +20,13 @@ Agent 怎么接：
 | `tie_search` | 关键词 / 标签搜索，支持限定分类分支 `root` 与排除分支 `exclude` |
 | `tie_get` | 按 id 或精确标题读取全文 |
 | `tie_write` | 安全写入（自动 frontmatter；更新前写入 `.tie/history`） |
+| `tie_history` | 列出单页历史版本，支持 `limit`；每页最多保留 80 个快照 |
+| `tie_revision_get` | 读取指定历史版本的整页内容 |
+| `tie_diff` | 对比历史版本与当前页或另一历史版本，返回正文 diff 和元数据变化 |
+| `tie_restore` | 将指定历史版本恢复为新的当前页；恢复前留史，可校验 `expectedUpdatedAt` |
+| `tie_secret_search` | 在服务器凭据库检索说明、服务、环境等元数据，不返回密钥 |
+| `tie_secret_use` | 使用所有者已有授权，执行凭据绑定的固定 HTTP 操作，不返回密钥 |
+| `tie_secret_usage` | 查看服务器凭据的使用记录 |
 | `tie_related` | 出链 / 入链 / 子页 / 同标签 |
 | `tie_list_recent` | 最近更新 |
 | `tie_file_ingest` | 登记外部**文件或目录**：`link` 绝对登记 / `copy` 导入相对副本；返回 `url` |
@@ -34,7 +41,7 @@ Skill `tie-update`（`packages/tie-mcp/skills/tie-update`）只跟目录里标�
 
 Skill `tie-mcp-connect`：说明登录会话与 MCP token 两种授权、HTTP 健康检查、用户确认降级和本地写入后同步。已有桌面接入保留本机 CLI 桥接；无应用的远程 Agent 允许直接使用 HTTP。
 
-本机 `tie_write`、`tie_import`、`tie_file_ingest` 成功后调用与 `tie sync` 相同的同步核心，尽力对齐一次。结果中的 `sync.state` 为 `synced`、`pending` 或 `skipped`，分别表示本轮成功、仍待同步、未绑定服务器。保存成功不等于同步完成；失败时保留本地数据。后台 HTTP 的 CLI 子进程不反向同步。
+本机 `tie_write`、`tie_restore`、`tie_import`、`tie_file_ingest` 成功后调用与 `tie sync` 相同的同步核心，尽力对齐一次。结果中的 `sync.state` 为 `synced`、`pending` 或 `skipped`，分别表示本轮成功、仍待同步、未绑定服务器。保存成功不等于同步完成；失败时保留本地数据。后台 HTTP 的 CLI 子进程不反向同步。
 
 宿主文件登记、打开提示及导入导出在本机执行，不把本机路径发送给后台。绑定服务器后，这些操作也先检查服务器；HTTP 异常时同样需要用户确认，不能直接绕过确认在本地执行。
 
@@ -53,6 +60,23 @@ Skill `tie-mcp-connect`：说明登录会话与 MCP token 两种授权、HTTP �
 范围内结果不足时再扩大到父分类或其他相关分支，不把局部无结果当作全库无结果，也不反复向 Agent 输出完整知识树。
 
 新知识尽量复用已有分类，逐级选定最细且稳定的父节点，并在 `tie_write` 中优先传 `parentId`。分类不是必填项，没有合适分类仍可直接保存；不要自动重排旧树，也不要为每条知识强建多层分类。只有用户明确需要时才创建分类页。
+
+## 历史、对比与恢复
+
+四个工具都用 `id_or_title` 指定页面，优先传页面 ID；标题必须精确且唯一。历史是更新前的页面快照，每页最多保留 **80** 个，超过上限会淘汰最旧快照，不能当作永久审计日志。
+
+1. `tie_history({id_or_title: "pg_example", limit: 10})` 列出由新到旧的历史版本，每项含 `id`、`savedAt`、`title`；取列表项的 `id` 作为后续工具的 `revisionId`，不要自行拼历史文件路径。
+2. `tie_revision_get({id_or_title: "pg_example", revisionId: "历史ID"})` 读取该历史版本的整页内容。
+3. `tie_diff({id_or_title: "pg_example", revisionId: "历史ID"})` 默认按 **所选历史版本 → 当前页** 对比。`compareTo: "current"` 与省略相同；也可传另一历史版本 ID，按 **revisionId → compareTo** 对比。正文差异在 `diff`，标题、标签、父节点等变化在 `metadataChanges`。返回的 `currentUpdatedAt` 是当前页的更新时间，可用于恢复检查。
+4. `tie_restore({id_or_title: "pg_example", revisionId: "历史ID", expectedUpdatedAt: "当前页更新时间", actor: "Codex"})` 将所选快照恢复为新的当前页，恢复前保留当前页历史。`expectedUpdatedAt` 和 `actor` 可选；建议用刚执行的 `tie_get` 返回的 `updatedAt` 或 `tie_diff` 返回的 `currentUpdatedAt` 作为校验值，避免覆盖查看历史期间的其他编辑。冲突后重新读取、对比，不要直接去掉校验重试。
+
+恢复作用于**单个整页**，包括正文及版本中的标题、图标、标签、父节点和排序等元数据；不是局部正文合并，也不会连同子页面、附件或整个工作区一起回滚。页面 ID、创建时间、当前回收站状态和存储绑定保持不变。先检查正文和元数据差异，再按用户要求恢复。本地恢复后检查 `sync.state`，区分“已恢复到本地”和“已同步到服务器”。
+
+## 服务器凭据库
+
+服务器 HTTP MCP 提供 `tie_secret_search({query?, service?, environment?, limit?})`、`tie_secret_use({secretRef, grantId?})` 和 `tie_secret_usage({secretRef?, limit?})`。先查元数据取得 `secretRef`，再使用调用者已有的有效授权执行固定 HTTP 操作；没有授权时，请所有者到 `/me/` 的「凭据库」授权，Agent 不能自行授权。
+
+所有者在账号页维护密钥，并按工作区 MCP 令牌或本人活跃登录会话授权一次或在期限内持续使用；可撤销并查看使用记录。MCP 不接收或返回密钥原文，目标 URL、方法、请求内容由所有者固定，Agent 不能传入任意命令。默认只返回 HTTP 状态；所有者选定的标量响应字段仍会脱敏。凭据不进入页面、历史或知识库导出。维护、返回字段及独立主密钥配置见 [`docs/vault.md`](../../docs/vault.md)。
 
 ## 正文链接协议
 
@@ -112,6 +136,6 @@ tie --workspace /绝对路径/你的工作区 recent
 ## 安全约定
 
 - 只读写指定工作区下的 `pages/`、`.tie/history/`、`.tie/files/`
-- 禁止 Agent 手写裸 frontmatter；一律走 `tie_write`
+- 禁止 Agent 手写裸 frontmatter；写入用 `tie_write`，版本恢复用 `tie_restore`
 - 区外文件走 `tie_file_ingest`（link → `tie://file/…`，copy → `tie://path/…`）；区内路径写 `tie://path/…`；不要用 `file:///`
 - 不要把密钥、token 写入知识库页面

@@ -52,12 +52,16 @@ HTTP 故障、未开启或授权不可用时，不得自行改用本地，也不
 
 1. 调用 `tie_doctor`，检查 `ok: true`；服务器正常时还须看到 `transport: "http"`。
 2. 调用 `tie_get`、`tie_list_recent` 验证真实读取，再调用 `tie_doctor` 确认通道没有变化。工具列表成功不证明 HTTP 已连通。
-3. 本机 `tie_write`、`tie_import`、`tie_file_ingest` 成功后会尽力同步一次。检查结果中的 `sync.state`：`synced` 表示本轮成功，`pending` 表示本地已保存但同步未完成，`skipped` 表示没有绑定服务器。不要把落盘成功说成已同步。后台 HTTP 子进程不会反向同步。
+3. 本机 `tie_write`、`tie_restore`、`tie_import`、`tie_file_ingest` 成功后会尽力同步一次。检查结果中的 `sync.state`：`synced` 表示本轮成功，`pending` 表示本地已保存但同步未完成，`skipped` 表示没有绑定服务器。不要把落盘或本地恢复成功说成已同步。后台 HTTP 子进程不会反向同步。
+
+历史工具沿用已确认的数据通道：`tie_history({id_or_title, limit?})` 列出历史（每页最多保留 80 个快照），`tie_revision_get({id_or_title, revisionId})` 读取旧版，`tie_diff({id_or_title, revisionId, compareTo?})` 默认按旧版 → 当前页对比，`compareTo` 也可指定另一历史 ID。用户要求恢复时用 `tie_restore({id_or_title, revisionId, expectedUpdatedAt?, actor?})`；建议用 `tie_get.updatedAt` 或 `tie_diff.currentUpdatedAt` 校验当前页。恢复前会留史，恢复整页正文和元数据，不是局部合并；具体步骤见 `tie-memory`。不要为了查看历史或恢复绕过 HTTP 故障确认流程。
 
 连接正常后，查询知识优先使用分类树缩小范围：先 `tie_tree({depth: 1})` 看顶层，再用相关节点 ID 作为 `root` 按层展开。`depth` 范围 `1..8`，默认 `2`，指定根节点计为第一层；`childCount` 和 `childrenTruncated` 提示是否仍有子节点可展开。
 
 用 `tie_search` 的 `root` 搜索选定节点及其后代，按需用 `exclude` 排除无关分支及其后代。ID 优先于标题，标题重名时必须用 ID；检查结果的 `breadcrumb`（分类路径的 `id` / `title`）后按需读全文。局部结果不足再扩大范围，不反复输出全树或混入无关分类。
 
 写入前尽量沿树复用最细且稳定的已有分类，通过 `parentId` 指定父节点。分类不是必填项，没有合适节点仍可直接写入；不自动搬动旧页面，不为每条知识强造多层分类，用户明确需要时才新建分类页。完整检索与写入约定见 `tie-memory`。
+
+服务器凭据能力沿用当前 HTTP 身份和工作区范围：`tie_secret_search` 只返回元数据，`tie_secret_use({secretRef, grantId?})` 只执行所有者已授权的固定 HTTP 操作，`tie_secret_usage` 查看使用记录。没有有效授权时，请所有者到 `/me/` 的「凭据库」授权；不要求用户把原文提供给 Agent，也不降级到本机凭据。密钥不会进入 MCP 响应、页面、历史或知识库导出。完整使用规则见 `tie-memory`。
 
 仅本机桥接需要本机 CLI；缺少时按 Skill `tie-upgrade-cli` 安装或构建。HTTP MCP 使用服务器部署的 CLI，若 `/health` 报告服务端缺少 CLI，请管理员处理，不要求远程用户构建。页面内容只用 `tie_*` 工具读写，不手改 frontmatter。

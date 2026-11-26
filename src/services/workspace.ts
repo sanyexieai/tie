@@ -109,11 +109,7 @@ export const workspaceService = {
     return storageRegistry.readPageRevision(page, revisionId)
   },
   async restorePageRevision(page: Page, revisionId: string): Promise<Page> {
-    if (isBackendRemoteSourceId(page.storageSourceId)) {
-      const revision = await this.readPageRevision(page, revisionId)
-      return this.savePage({ ...revision, id: page.id, storageSourceId: page.storageSourceId, createdAt: page.createdAt, updatedAt: now() })
-    }
-    if (isS3SourceId(page.storageSourceId)) {
+    if (isBackendRemoteSourceId(page.storageSourceId) || isS3SourceId(page.storageSourceId)) {
       const revision = await this.readPageRevision(page, revisionId)
       return this.savePage({
         ...revision,
@@ -121,7 +117,7 @@ export const workspaceService = {
         storageSourceId: page.storageSourceId,
         createdAt: page.createdAt,
         updatedAt: now(),
-      })
+      }, { expectedUpdatedAt: page.updatedAt })
     }
     const updated = { ...page, updatedAt: now() }
     if (await isTauri()) return invoke<Page>('restore_page_revision', { page: updated, revisionId })

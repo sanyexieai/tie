@@ -242,14 +242,14 @@ export function getWorkspacePage(workspaceId, pageId, sourceId) {
 export function saveWorkspacePage(workspaceId, page, expectedUpdatedAt) {
   migrateWorkspacePages(workspaceId)
   const currentPath = locatePageFile(workspaceId, page.id)
-  if (expectedUpdatedAt && currentPath) {
+  if (currentPath) {
     const current = readFilePage(workspaceId, currentPath)
-    if (current && current.page.updatedAt !== expectedUpdatedAt) {
+    if (current && expectedUpdatedAt && current.page.updatedAt !== expectedUpdatedAt) {
       const error = new Error('页面已在其他设备更新，请重新载入后再保存')
       error.status = 409
       throw error
     }
-    if (current && (current.page.markdown !== page.markdown || current.page.title !== page.title)) {
+    if (current && pageHasChanged(current.page, page)) {
       archiveWorkspaceRevision(workspaceId, current.page)
     }
   }
@@ -257,6 +257,17 @@ export function saveWorkspacePage(workspaceId, page, expectedUpdatedAt) {
   refreshTieFiles(workspaceId)
   notifyWorkspace(workspaceId)
   return saved
+}
+
+function pageHasChanged(before, after) {
+  return before.title !== after.title
+    || (before.markdown ?? '') !== (after.markdown ?? '')
+    || (before.icon ?? '') !== (after.icon ?? '')
+    || (before.parentId ?? null) !== (after.parentId ?? null)
+    || (before.sortKey ?? 0) !== (after.sortKey ?? 0)
+    || JSON.stringify(before.tags ?? []) !== JSON.stringify(after.tags ?? [])
+    || before.createdAt !== after.createdAt
+    || (before.deletedAt ?? null) !== (after.deletedAt ?? null)
 }
 
 export function deleteWorkspacePages(workspaceId, pageIds) {

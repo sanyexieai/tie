@@ -20,6 +20,8 @@ find dist -type f -exec chmod 644 {} +
 
 `backend.env` 的 CORS 列表按实际客户端来源配置。桌面端常用来源已列在示例中，同站网页无需额外跨站配置。
 
+凭据库的加密数据与主密钥默认保存在数据卷的 `vault.json` 与 `.private/vault.key`，都不在工作区中。请安全备份主密钥；可用 `TIE_VAULT_KEY_FILE` 指定额外挂载的私有密钥文件。内网凭据操作仅在管理员通过 `TIE_VAULT_ALLOWED_ORIGINS` 允许对应 HTTPS origin 后执行。使用和授权见[凭据库说明](../../docs/vault.md)。
+
 ## 迁移旧 Rust 后台
 
 先在服务器上为 SQLite 创建一致性备份，并复制原数据目录。保持原服务到切换前可用。迁移工具拒绝覆盖非空目标，保留账号密码摘要、工作区归属、页面、历史版本和附件/文件副本；只打印数量。

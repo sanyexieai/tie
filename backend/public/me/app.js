@@ -1,9 +1,13 @@
+import { mountVault } from './vault.js'
+
 const tokenKey = 'tie.me.token'
 const loginEl = document.querySelector('#login')
 const shellEl = document.querySelector('#shell')
 const mainEl = document.querySelector('#main')
 const loginError = document.querySelector('#login-error')
-const state = { token: '', refreshToken: '', me: null }
+const state = { token: '', refreshToken: '', me: null, view: location.hash === '#vault' ? 'vault' : 'account' }
+let renderVersion = 0
+let disposeVault = () => {}
 
 function readSavedSession() {
   const raw = sessionStorage.getItem(tokenKey) || ''
@@ -66,6 +70,8 @@ async function api(pathname, options = {}) {
 }
 
 function showLogin(message = '') {
+  renderVersion += 1
+  disposeVault()
   shellEl.classList.remove('on')
   mainEl.replaceChildren()
   loginEl.style.display = ''
@@ -80,13 +86,29 @@ function showShell() {
 }
 
 async function render() {
+  const version = ++renderVersion
+  const account = state.me
+  disposeVault()
+  disposeVault = () => {}
+  mainEl.replaceChildren()
   const [workspaces, tokens, health] = await Promise.all([
     api('/api/v1/workspaces'),
     api('/api/v1/me/mcp-tokens'),
     fetch('/health').then((response) => response.json()),
   ])
+  if (!state.token || state.me !== account || renderVersion !== version) return
+  document.querySelectorAll('[data-account-view]').forEach((button) => {
+    button.classList.toggle('on', button.dataset.accountView === state.view)
+  })
   const mcpOn = Boolean(health.mcp?.enabled)
   const ordered = [...workspaces].sort((a, b) => Number(Boolean(b.default)) - Number(Boolean(a.default)))
+  if (state.view === 'vault') {
+    disposeVault = mountVault(mainEl, {
+      api, esc, workspaces: ordered, tokens,
+      isActive: () => state.me === account && renderVersion === version && state.view === 'vault',
+    })
+    return
+  }
   const workspaceOptions = ordered.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join('')
   const workspaceCards = ordered.map((workspace) => {
     return `<article class="panel"><h3>${esc(workspace.name)}${workspace.default ? ' <span class="tag">默认</span>' : ''}</h3><p class="hint">${esc(workspace.id)}</p><h4>存储方式</h4><p>服务器磁盘</p><p class="hint">页面存在这台服务器上。HTTP MCP 和各端同步读写的是同一份目录。</p></article>`
@@ -223,7 +245,7 @@ function setGateMode(mode) {
   setAccountField(registering)
   gateSubmit.textContent = registering ? '注册并登录' : '登录'
   gateSwitch.textContent = registering ? '已有账号？登录' : '没有账号？注册'
-  gateLead.textContent = registering ? '注册后自动登录并进入我的账号。用户名在这台服务器上唯一，留空时使用邮箱前缀。第一名用户成为管理员。' : '登录后管理自己的工作区和 MCP 令牌。'
+  gateLead.textContent = registering ? '注册后自动登录并进入我的账号。用户名在这台服务器上唯一，留空时使用邮箱前缀。第一名用户成为管理员。' : '登录后管理自己的工作区、MCP 令牌和凭据库。'
   gateForm.querySelector('input[name="password"]').autocomplete = registering ? 'new-password' : 'current-password'
 }
 
@@ -257,4 +279,13 @@ document.querySelector('#logout').onclick = () => {
   }
   showLogin()
 }
+document.querySelectorAll('[data-account-view]').forEach((button) => {
+  button.onclick = () => {
+    state.view = button.dataset.accountView
+    history.replaceState(null, '', state.view === 'vault' ? '#vault' : location.pathname)
+    void render().catch((error) => {
+      if (state.token) mainEl.textContent = error.message
+    })
+  }
+})
 if (state.token) enter({ accessToken: state.token, refreshToken: state.refreshToken }).catch((error) => showLogin(error.message))

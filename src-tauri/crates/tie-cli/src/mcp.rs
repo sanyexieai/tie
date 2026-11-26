@@ -6,6 +6,8 @@ use tie_local::{
     ExportOptions, ImportStrategy, LocalWorkspace, WritePageInput, DEFAULT_EXPORT_DEPTH,
 };
 
+mod history;
+
 pub fn serve(root: Option<&Path>, source_id: Option<&str>) -> Result<(), String> {
     let mut runtime = McpRuntime::new(root, source_id)?;
     let mut stdin = std::io::stdin();
@@ -109,10 +111,22 @@ impl McpRuntime {
             );
         }
         let host_file = local_only_request(message);
+        let vault_request = message.get("method").and_then(Value::as_str) == Some("tools/call")
+            && vault_tool(params["name"].as_str().unwrap_or(""));
         let probe = json!({ "jsonrpc": "2.0", "id": "tie-host-file-probe", "method": "ping" });
         match self.remote(if host_file { &probe } else { message }) {
             Ok(Some(response)) if !host_file => return Some(response),
+            Ok(None) if vault_request => {
+                return Some(json!({
+                    "jsonrpc": "2.0", "id": id, "result": tool_err("凭据库需要服务器 HTTP MCP；不会读取本地页面或凭据文件。请先绑定服务器。".into())
+                }))
+            }
             Ok(_) => {}
+            Err(reason) if vault_request => {
+                return Some(json!({
+                    "jsonrpc": "2.0", "id": id, "result": tool_err(format!("凭据库 HTTP 连接失败，未降级本地：{reason}"))
+                }))
+            }
             Err(reason) if !self.fallback_confirmed => {
                 let details = self.fallback_error(&reason);
                 return Some(if method == "tools/call" {
@@ -270,6 +284,13 @@ fn host_file_tool(name: &str) -> bool {
     )
 }
 
+fn vault_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "tie_secret_search" | "tie_secret_use" | "tie_secret_usage"
+    )
+}
+
 fn local_only_request(message: &Value) -> bool {
     message.get("method").and_then(Value::as_str) == Some("tools/list")
         || (message.get("method").and_then(Value::as_str) == Some("tools/call")
@@ -285,7 +306,7 @@ fn local_write_request(message: &Value) -> bool {
     message.get("method").and_then(Value::as_str) == Some("tools/call")
         && matches!(
             message.pointer("/params/name").and_then(Value::as_str),
-            Some("tie_write" | "tie_import" | "tie_file_ingest")
+            Some("tie_write" | "tie_restore" | "tie_import" | "tie_file_ingest")
         )
 }
 
@@ -398,6 +419,50 @@ fn tool_defs() -> Vec<Value> {
         tool("tie_get", "按页面 id 或精确标题读取全文", obj_props(json!({
             "id_or_title": { "type": "string" }
         }))),
+        tool("tie_history", "列出页面已保存的历史版本，最新在前；每页最多保留 80 份。返回版本 ID、时间和标题，不返回正文。", json!({
+            "type": "object", "required": ["id_or_title"], "properties": {
+                "id_or_title": { "type": "string" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 80, "default": 20 }
+            }
+        })),
+        tool("tie_revision_get", "读取页面指定历史版本的完整内容；revisionId 从 tie_history 获取。", json!({
+            "type": "object", "required": ["id_or_title", "revisionId"], "properties": {
+                "id_or_title": { "type": "string" },
+                "revisionId": { "type": "string" }
+            }
+        })),
+        tool("tie_diff", "比较历史版本与当前页面（默认）或另一历史版本。返回正文 unified diff、元数据变化和当前 updatedAt，供恢复前核对。", json!({
+            "type": "object", "required": ["id_or_title", "revisionId"], "properties": {
+                "id_or_title": { "type": "string" },
+                "revisionId": { "type": "string" },
+                "compareTo": { "type": "string", "description": "另一版本 ID；省略或 current 表示当前页面" }
+            }
+        })),
+        tool("tie_restore", "将整页恢复到指定历史版本，先保留当前内容。建议先 tie_diff 核对并传 expectedUpdatedAt，防止覆盖后续修改。本地恢复后尽力同步一次，查看 sync.state 确认同步结果。", json!({
+            "type": "object", "required": ["id_or_title", "revisionId"], "properties": {
+                "id_or_title": { "type": "string" },
+                "revisionId": { "type": "string" },
+                "expectedUpdatedAt": { "type": "string", "description": "来自 tie_get.updatedAt 或 tie_diff.currentUpdatedAt；当前版本不匹配时拒绝恢复" },
+                "actor": { "type": "string", "description": "执行恢复的 Agent 名" }
+            }
+        })),
+        tool("tie_secret_search", "通过服务器搜索当前工作区凭据元数据，不返回明文。返回 secretRef 等；本人在 /me/ 凭据库管理和授权。凭据请求不会降级本地。", json!({
+            "type": "object", "additionalProperties": false, "properties": {
+                "query": { "type": "string" }, "service": { "type": "string" }, "environment": { "type": "string" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+            }
+        })),
+        tool("tie_secret_use", "通过服务器使用已获授权的凭据执行本人配置的固定 HTTP 操作，不返回明文，不允许更换目标或请求内容。缺授权时请本人在 /me/ 凭据库授权当前 MCP 令牌或登录会话，不能自行授权。", json!({
+            "type": "object", "additionalProperties": false, "required": ["secretRef"], "properties": {
+                "secretRef": { "type": "string" }, "grantId": { "type": "string" }
+            }
+        })),
+        tool("tie_secret_usage", "通过服务器查看当前 MCP 令牌或会话在此工作区的凭据使用记录，不返回凭据或上游原文。", json!({
+            "type": "object", "additionalProperties": false, "properties": {
+                "secretRef": { "type": "string" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+            }
+        })),
         tool("tie_related", "查看出链、入链、子页和同标签页面", obj_props(json!({
             "id_or_title": { "type": "string" }
         }))),
@@ -457,6 +522,9 @@ fn obj_props(properties: Value) -> Value {
 
 fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, String> {
     match name {
+        "tie_secret_search" | "tie_secret_use" | "tie_secret_usage" => {
+            Err("凭据工具由服务器 HTTP MCP 提供，不支持本地降级或通过 CLI 读取明文。".into())
+        }
         "tie_doctor" => doctor(ws),
         "tie_list_recent" => {
             let limit = int_arg(args, "limit", 20);
@@ -491,9 +559,34 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
             let key = required_str(args, "id_or_title")?;
             Ok(serde_json::to_value(ws.related(key)?).map_err(|error| error.to_string())?)
         }
+        "tie_history" => {
+            let key = required_str(args, "id_or_title")?;
+            let limit = match args.get("limit") {
+                None => 20,
+                Some(value) => value
+                    .as_u64()
+                    .filter(|limit| (1..=80).contains(limit))
+                    .ok_or("limit 必须是 1 到 80 的整数")? as usize,
+            };
+            let mut revisions = ws.list_revisions(key)?;
+            revisions.truncate(limit);
+            Ok(json!(revisions))
+        }
+        "tie_revision_get" => {
+            let key = required_str(args, "id_or_title")?;
+            let revision_id = required_str(args, "revisionId")?;
+            Ok(json!(ws.get_revision(key, revision_id)?))
+        }
+        "tie_diff" => history::diff(
+            ws,
+            required_str(args, "id_or_title")?,
+            required_str(args, "revisionId")?,
+            optional_string_arg(args, "compareTo")?,
+        ),
+        "tie_restore" => restore_page(ws, args),
         "tie_write" => write_page(ws, args),
         "tie_tree" => {
-            let root = node_arg(args, "root")?;
+            let root = optional_string_arg(args, "root")?;
             let depth = match args.get("depth") {
                 None => 2,
                 Some(value) => value
@@ -605,7 +698,7 @@ fn write_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
         }
         Some(_) => return Err("parentId 必须是分类节点 ID 或 null".into()),
     };
-    if let Some(title) = node_arg(args, "parentTitle")? {
+    if let Some(title) = optional_string_arg(args, "parentTitle")? {
         let parent = ws
             .tree_outline(Some(title), 1)?
             .into_iter()
@@ -646,6 +739,25 @@ fn write_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
     Ok(serde_json::to_value(saved).map_err(|error| error.to_string())?)
 }
 
+fn restore_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
+    let key = required_str(args, "id_or_title")?;
+    let revision_id = required_str(args, "revisionId")?;
+    let expected = optional_string_arg(args, "expectedUpdatedAt")?;
+    let saved = ws.restore_revision_checked(key, revision_id, expected)?;
+    append_audit(
+        ws.root(),
+        &json!({
+            "type": "restore",
+            "actor": resolve_actor(str_arg(args, "actor")),
+            "pageId": saved.id,
+            "title": saved.title,
+            "revisionId": revision_id,
+            "status": "applied"
+        }),
+    );
+    Ok(json!({ "restored": true, "revisionId": revision_id, "page": saved }))
+}
+
 fn flatten_hits(hits: Vec<tie_local::SearchHit>) -> Vec<Value> {
     hits.into_iter()
         .filter_map(|hit| {
@@ -662,17 +774,17 @@ fn flatten_hits(hits: Vec<tie_local::SearchHit>) -> Vec<Value> {
         .collect()
 }
 
-fn node_arg<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
+fn optional_string_arg<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
     match args.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value.trim())),
-        Some(Value::String(_)) => Err(format!("{name} 不能为空，请提供节点 ID 或唯一标题")),
-        Some(_) => Err(format!("{name} 必须是节点 ID 或标题字符串")),
+        Some(Value::String(_)) => Err(format!("{name} 不能为空字符串")),
+        Some(_) => Err(format!("{name} 必须是字符串")),
     }
 }
 
 fn search_scope_args(args: &Value) -> Result<(Option<&str>, Vec<String>), String> {
-    let root = node_arg(args, "root")?;
+    let root = optional_string_arg(args, "root")?;
     let exclude = match args.get("exclude") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(values)) => values

@@ -85,12 +85,13 @@ async function revokeMcpToken(token: BackendMcpToken) {
     mcpTokensError.value = error instanceof Error ? error.message : '作废 MCP 令牌失败'
   } finally { mcpTokensBusy.value = false }
 }
-async function openMcpAccount() {
+async function openMcpAccount(section = '') {
   try {
+    const url = mcpAccountUrl.value + (section === 'vault' ? '#vault' : '')
     if (isTauriDesktop()) {
       const { openUrl } = await import('@tauri-apps/plugin-opener')
-      await openUrl(mcpAccountUrl.value)
-    } else window.open(mcpAccountUrl.value, '_blank', 'noopener,noreferrer')
+      await openUrl(url)
+    } else window.open(url, '_blank', 'noopener,noreferrer')
   } catch (error) {
     mcpTokensError.value = error instanceof Error ? error.message : '无法打开我的账号'
   }
@@ -226,6 +227,7 @@ async function logout() {
           </div>
         </div>
         <p v-if="isTauriDesktop()" class="backend-notice">本地的每个工作区都会同步到这台服务器。页面仍写在本机，保存后自动对齐。</p>
+        <button type="button" class="backend-link-button" @click="openMcpAccount('vault')">凭据库与使用授权</button>
         <div class="backend-service-settings">
           <div class="backend-workspace-heading"><span>服务器</span><button :disabled="backend.loading" @click="testConnection">测试连接</button></div>
           <label>服务地址<input v-model="serviceEndpoint" inputmode="url" /></label>
@@ -248,7 +250,7 @@ async function logout() {
               </li>
             </ul>
             <p v-else-if="!mcpTokensBusy && !mcpTokensError" class="backend-empty">还没有 MCP 令牌</p>
-            <button type="button" class="backend-link-button" @click="openMcpAccount">前往我的账号查看与复制</button>
+            <button type="button" class="backend-link-button" @click="openMcpAccount()">前往我的账号查看与复制</button>
             <p v-if="mcpTokensError" class="backend-error" role="alert">{{ mcpTokensError }}</p>
             <p v-else-if="mcpTokensNotice" class="backend-notice" role="status">{{ mcpTokensNotice }}</p>
           </div>

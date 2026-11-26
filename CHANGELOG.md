@@ -2,6 +2,15 @@
 
 All notable changes to Tie are documented in this file.
 
+## [1.0.59] - 2026-11-26
+
+- MCP 新增页面历史查询、历史版本读取、正文与元数据差异对比，以及整页恢复；恢复前保留当前版本，并支持当前版本校验与本地恢复后同步。
+- 修复云端恢复或强制保存时遗漏旧版本的问题；历史访问拒绝重名标题、越界路径及不属于当前页面的快照。
+- 新增服务器凭据库，独立加密保存，支持本人在“我的账号”中维护、查看与复制；凭据不写入页面、历史或知识库导出。
+- HTTP MCP 支持凭据元数据搜索、授权执行固定 HTTPS 操作及查看使用记录，默认不返回密钥值；凭据请求不会降级到本地。
+- 授权绑定具体凭据版本、MCP 令牌或登录会话，支持一次、限时和撤销；凭据更新、会话失效或授权用尽后拒绝使用。
+- 补齐固定目标与重定向检查、返回字段脱敏、权限隔离、退出清理及真实 HTTP/HTTPS 和浏览器回归测试。
+
 ## [1.0.58] - 2026-11-26
 
 - Agent 接入方式由客户端确定；浏览器只生成 HTTP 直连提示词，复制前检查服务状态，失败时不使用缓存地址或转为本机桥接。
@@ -232,7 +241,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.49...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.59...HEAD
+[1.0.59]: https://github.com/sanyexieai/tie/releases/tag/v1.0.59
 [1.0.49]: https://github.com/sanyexieai/tie/releases/tag/v1.0.49
 [1.0.42]: https://github.com/sanyexieai/tie/releases/tag/v1.0.42
 [1.0.41]: https://github.com/sanyexieai/tie/releases/tag/v1.0.41

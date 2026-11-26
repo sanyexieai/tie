@@ -5,12 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tie 我的账号</title>
   <link rel="stylesheet" href="../admin/admin.css">
+  <link rel="stylesheet" href="./vault.css">
 </head>
 <body>
   <div id="login" class="login-wrap">
     <form class="login-card" id="login-form">
       <h1>我的账号</h1>
-      <p id="gate-lead">登录后管理自己的工作区、存储连接和 MCP 令牌。</p>
+      <p id="gate-lead">登录后管理自己的工作区、MCP 令牌和凭据库。</p>
       <label id="name-field" hidden>用户名<input name="name" autocomplete="username"></label>
       <label id="account-field"><span>用户名或邮箱</span><input name="email" type="text" autocomplete="username" required placeholder="用户名或 name@example.com"></label>
       <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
@@ -26,6 +27,10 @@
         <strong>Tie</strong>
         <span>我的账号</span>
       </div>
+      <nav class="nav" aria-label="我的账号">
+        <button type="button" data-account-view="account" class="on">工作区与令牌</button>
+        <button type="button" data-account-view="vault">凭据库</button>
+      </nav>
       <div class="who">
         <div id="who"></div>
         <a id="admin-link" href="/admin/" hidden>管理后台</a>
@@ -34,6 +39,6 @@
     </aside>
     <main class="main" id="main"></main>
   </div>
-  <script src="./app.js"></script>
+  <script type="module" src="./app.js"></script>
 </body>
 </html>

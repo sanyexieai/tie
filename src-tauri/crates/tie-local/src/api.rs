@@ -1,6 +1,6 @@
 //! Headless local workspace API (CLI / MCP / UI share this).
 
-use crate::io::save_page_to_root;
+use crate::io::{list_page_revisions_from_root, read_page_revision_from_root, save_page_to_root};
 use crate::links::rewrite_legacy_workspace_hrefs;
 use crate::page::{
     frontmatter, is_tie_document, new_page_id, normalize_page_sources,
@@ -963,46 +963,29 @@ impl LocalWorkspace {
         Ok(summary)
     }
 
+    fn resolve_history_page(&self, id_or_title: &str) -> Result<Page, String> {
+        if let Some(page) = self.get_by_id(id_or_title)? {
+            return Ok(page);
+        }
+        let title = id_or_title.trim().to_lowercase();
+        let mut matches = self.load_all(false)?.into_iter()
+            .filter(|page| page.title.to_lowercase() == title);
+        let page = matches.next().ok_or_else(|| format!("页面不存在：{id_or_title}"))?;
+        if matches.any(|other| other.id != page.id) {
+            return Err(format!("页面标题不唯一：{id_or_title}；请使用页面 ID"));
+        }
+        Ok(page)
+    }
+
     pub fn list_revisions(&self, id_or_title: &str) -> Result<Vec<PageRevision>, String> {
-        let page = self
-            .resolve(id_or_title)?
-            .ok_or_else(|| format!("页面不存在：{id_or_title}"))?;
-        let directory = revision_dir(&self.root, &page.id);
-        let mut revisions = Vec::new();
-        if !directory.exists() {
-            return Ok(revisions);
-        }
-        for entry in fs::read_dir(directory).map_err(|e| e.to_string())? {
-            let path = entry.map_err(|e| e.to_string())?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                continue;
-            }
-            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let parsed =
-                parse_page(&content).map_err(|e| format!("{}: {e}", path.display()))?;
-            let id = path
-                .file_stem()
-                .and_then(|n| n.to_str())
-                .ok_or("版本文件名无效")?
-                .to_owned();
-            revisions.push(PageRevision {
-                id,
-                saved_at: parsed.updated_at,
-                title: parsed.title,
-            });
-        }
-        revisions.sort_by(|a, b| b.id.cmp(&a.id));
-        Ok(revisions)
+        let page = self.resolve_history_page(id_or_title)?;
+        list_page_revisions_from_root(&self.root, &page.id)
     }
 
     pub fn get_revision(&self, id_or_title: &str, revision_id: &str) -> Result<Page, String> {
-        let page = self
-            .resolve(id_or_title)?
-            .ok_or_else(|| format!("页面不存在：{id_or_title}"))?;
-        let path = revision_dir(&self.root, &page.id).join(format!("{revision_id}.md"));
-        let content =
-            fs::read_to_string(&path).map_err(|e| format!("无法读取历史版本：{e}"))?;
-        Ok(self.hydrate_page_source(parse_page(&content)?))
+        let page = self.resolve_history_page(id_or_title)?;
+        let revision = read_page_revision_from_root(&self.root, &page.id, revision_id)?;
+        Ok(self.hydrate_page_source(revision))
     }
 
     pub fn restore_revision(
@@ -1010,10 +993,17 @@ impl LocalWorkspace {
         id_or_title: &str,
         revision_id: &str,
     ) -> Result<PageSummary, String> {
-        let page = self
-            .resolve(id_or_title)?
-            .ok_or_else(|| format!("页面不存在：{id_or_title}"))?;
-        let revision = self.get_revision(id_or_title, revision_id)?;
+        self.restore_revision_checked(id_or_title, revision_id, None)
+    }
+
+    pub fn restore_revision_checked(
+        &self,
+        id_or_title: &str,
+        revision_id: &str,
+        expected_updated_at: Option<&str>,
+    ) -> Result<PageSummary, String> {
+        let page = self.resolve_history_page(id_or_title)?;
+        let revision = read_page_revision_from_root(&self.root, &page.id, revision_id)?;
         let restored = Page {
             id: page.id,
             storage_source_id: page.storage_source_id.clone(),
@@ -1027,7 +1017,7 @@ impl LocalWorkspace {
             deleted_at: page.deleted_at.clone(),
             ..revision
         };
-        let saved = save_page_to_root(&self.root, restored, None)?;
+        let saved = save_page_to_root(&self.root, restored, expected_updated_at)?;
         Ok(Self::summarize(&saved))
     }
 }
@@ -1221,6 +1211,86 @@ mod tests {
         assert!(restored.deleted_at.is_none());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_access_rejects_foreign_snapshots_and_traversal_without_writing() {
+        let dir = env::temp_dir().join(format!("tie-history-boundary-{}", new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_history").unwrap();
+        let saved = ws.write_page(WritePageInput { title: Some("History".into()), markdown: Some("good".into()), ..Default::default() }).unwrap();
+        let id = saved.page.id;
+        ws.write_page(WritePageInput { page_id: Some(id.clone()), markdown: Some("changed".into()), ..Default::default() }).unwrap();
+        let before = ws.get_by_id(&id).unwrap().unwrap();
+        let count = ws.list_revisions(&id).unwrap().len();
+        for invalid in ["", ".", "..", "../other/123", "/tmp/123", "C:\\history", "other\\123", "nul\0id"] {
+            assert!(ws.get_revision(&id, invalid).unwrap_err().contains("版本 ID"));
+            assert!(ws.restore_revision(&id, invalid).is_err());
+        }
+        let other = ws.write_page(WritePageInput { title: Some("Other".into()), markdown: Some("foreign".into()), ..Default::default() }).unwrap();
+        let foreign = ws.get_by_id(&other.page.id).unwrap().unwrap();
+        fs::write(revision_dir(&dir, &id).join("foreign.md"), frontmatter(&foreign)).unwrap();
+        assert!(ws.get_revision(&id, "foreign").unwrap_err().contains("不属于"));
+        assert!(ws.restore_revision(&id, "foreign").unwrap_err().contains("不属于"));
+        assert!(ws.list_revisions(&id).unwrap_err().contains("不属于"));
+        fs::remove_file(revision_dir(&dir, &id).join("foreign.md")).unwrap();
+        assert_eq!(ws.get_by_id(&id).unwrap().unwrap().markdown, before.markdown);
+        assert_eq!(ws.list_revisions(&id).unwrap().len(), count);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn checked_restore_keeps_current_identity_and_archives_previous_content() {
+        let dir = env::temp_dir().join(format!("tie-history-checked-{}", new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_history").unwrap();
+        let saved = ws.write_page(WritePageInput { title: Some("Original".into()), markdown: Some("good".into()), icon: Some("A".into()), tags: Some(vec!["before".into()]), ..Default::default() }).unwrap();
+        let id = saved.page.id;
+        let mut current = ws.get_by_id(&id).unwrap().unwrap();
+        current.markdown = "# Original\n\nbad\n".into();
+        current.icon = "B".into();
+        current.tags = vec!["after".into()];
+        current.created_at = "2025-01-01T00:00:00.000Z".into();
+        current.updated_at = "2026-11-26T00:00:00.000Z".into();
+        current.deleted_at = Some("2026-11-26T00:00:00.000Z".into());
+        ws.save_full_page(current.clone(), None).unwrap();
+        let revision = ws.list_revisions(&id).unwrap()[0].id.clone();
+        assert!(ws.restore_revision_checked(&id, &revision, Some("stale")).unwrap_err().contains("重新载入"));
+        assert_eq!(ws.list_revisions(&id).unwrap().len(), 1);
+        assert_eq!(ws.get_by_id(&id).unwrap().unwrap().markdown, current.markdown);
+        ws.restore_revision_checked(&id, &revision, Some(&current.updated_at)).unwrap();
+        let restored = ws.get_by_id(&id).unwrap().unwrap();
+        assert!(restored.markdown.contains("good"));
+        assert_eq!(restored.icon, "A");
+        assert_eq!(restored.tags, vec!["before"]);
+        assert_eq!(restored.created_at, current.created_at);
+        assert_eq!(restored.deleted_at, current.deleted_at);
+        assert_eq!(restored.storage_source_id, current.storage_source_id);
+        assert_eq!(restored.storage_source_ids, current.storage_source_ids);
+        assert_eq!(restored.id, current.id);
+        let revisions = ws.list_revisions(&id).unwrap();
+        assert_eq!(revisions.len(), 2);
+        assert!(revisions.iter().any(|revision| ws.get_revision(&id, &revision.id).unwrap().markdown == current.markdown));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn history_requires_id_for_ambiguous_titles_without_changing_either_page() {
+        let dir = env::temp_dir().join(format!("tie-history-title-{}", new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_history").unwrap();
+        let first = ws.write_page(WritePageInput { title: Some("Shared".into()), markdown: Some("first".into()), ..Default::default() }).unwrap();
+        let second = ws.write_page(WritePageInput { title: Some("SHARED".into()), markdown: Some("second".into()), ..Default::default() }).unwrap();
+        ws.write_page(WritePageInput { page_id:Some(first.page.id.clone()), markdown:Some("modified first".into()), ..Default::default() }).unwrap();
+        let revision = ws.list_revisions(&first.page.id).unwrap()[0].id.clone();
+        let before_first = serde_json::to_value(ws.get_by_id(&first.page.id).unwrap().unwrap()).unwrap();
+        let before_second = serde_json::to_value(ws.get_by_id(&second.page.id).unwrap().unwrap()).unwrap();
+        assert!(ws.list_revisions("Shared").unwrap_err().contains("不唯一"));
+        assert!(ws.get_revision("Shared", &revision).unwrap_err().contains("不唯一"));
+        assert!(ws.restore_revision_checked("Shared", &revision, None).unwrap_err().contains("不唯一"));
+        assert_eq!(serde_json::to_value(ws.get_by_id(&first.page.id).unwrap().unwrap()).unwrap(), before_first);
+        assert_eq!(serde_json::to_value(ws.get_by_id(&second.page.id).unwrap().unwrap()).unwrap(), before_second);
+        assert_eq!(ws.list_revisions(&first.page.id).unwrap().len(), 1);
+        assert!(ws.list_revisions(&second.page.id).unwrap().is_empty());
+        assert!(ws.get_revision(&first.page.id, &revision).unwrap().markdown.contains("first"));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -147,7 +147,7 @@ describe('mcp http from settings', { concurrency: 1 }, () => {
     assert.equal(called.response.status, 200)
     assert.equal(called.body.result.ok, true)
     assert.equal(called.body.result.method, 'tools/list')
-    assert.deepEqual(called.body.result.tools, [{ name: 'tie_get' }])
+    assert.deepEqual(called.body.result.tools.map(tool => tool.name), ['tie_get', 'tie_secret_search', 'tie_secret_use', 'tie_secret_usage'])
 
     for (const name of ['tie_file_ingest', 'tie_file_open_hint', 'tie_export', 'tie_import']) {
       const localOnly = await request('/mcp', {

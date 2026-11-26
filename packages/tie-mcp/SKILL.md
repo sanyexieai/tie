@@ -35,6 +35,17 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 4. 新知识尽量选定合适的已有分类，通过 `parentId` 写入；更新已有页使用 `pageId`，不顺便重排分类
 5. 本机桥接用 `tie_file_ingest` 登记外部文件；原生 HTTP 仅用 `tie_file_list` / `tie_file_get` 查看已登记资源。正文与笔记通过 `tie_write` 写入（不要手写 frontmatter）
 
+## 查看历史、对比与恢复
+
+用户要求查看修改记录或恢复旧内容时，先定位页面，再按以下顺序操作。`id_or_title` 优先使用页面 ID，标题必须精确且唯一。
+
+1. `tie_history({id_or_title: "pg_example", limit: 10})` 列出由新到旧的历史快照，从结果取得历史 ID。每页最多保留 **80** 个历史版本，最旧版本会轮换淘汰；当前页不是历史快照。
+2. `tie_revision_get({id_or_title: "pg_example", revisionId: "历史ID"})` 读取指定旧版全文。
+3. `tie_diff({id_or_title: "pg_example", revisionId: "历史ID"})` 默认对比 **历史版本 → 当前页**。`compareTo` 可省略或写 `"current"`，也可指定另一历史 ID，方向为 `revisionId → compareTo`。一起检查正文 `diff` 和 `metadataChanges`，不能只看正文。
+4. 用户要求恢复时，调用 `tie_restore({id_or_title: "pg_example", revisionId: "历史ID", expectedUpdatedAt: "当前页更新时间", actor: "Codex"})`。`expectedUpdatedAt` 与 `actor` 可选；优先用刚读取的 `tie_get.updatedAt` 或 `tie_diff.currentUpdatedAt`，冲突时先重新读取与对比，不去掉校验强行重试。
+
+`tie_restore` 是单页整页恢复：正文和旧版中的标题、图标、标签、父节点、排序等会一起恢复，恢复前会保留当前版本。页面 ID、创建时间、当前回收站状态和存储绑定保持不变；它不是局部正文合并，也不回滚子页面或附件。不要直接改写 `.tie/history` 或手拼 frontmatter。只读查看、对比不会恢复内容。
+
 ## 按树检索与分类
 
 树节点就是页面，父子关系表达知识分类。`tie_tree` 只返回节点摘要，不返回正文：
@@ -56,9 +67,17 @@ description: "Use Tie MCP for durable project memory: decisions, bugs, preferenc
 
 写入时尽量复用最细且稳定的已有分类，逐级确定归属，例如已有的“研究 → 数据库 → PostgreSQL”。分类不是必填项：没有合适分类时可以直接写入，不因此阻断保存。不要为每条知识硬造多层目录，也不要自动搬动旧页面；只有用户明确需要时才新建分类页。
 
-本机 `tie_write`、`tie_import`、`tie_file_ingest` 成功后会尽力同步一次。结果中的 `sync.state` 为 `synced`（本轮成功）、`pending`（本地已保存但仍待同步）或 `skipped`（未绑定服务器）；向用户说明时区分落盘成功和同步完成。后台 HTTP 写入不反向启动同步。本机文件登记、打开提示及导入导出只由本机 CLI 提供，原生 HTTP Agent 不提供宿主文件访问。
+本机 `tie_write`、`tie_restore`、`tie_import`、`tie_file_ingest` 成功后会尽力同步一次。结果中的 `sync.state` 为 `synced`（本轮成功）、`pending`（本地已保存但仍待同步）或 `skipped`（未绑定服务器）；向用户说明时区分落盘成功和同步完成，恢复也一样。后台 HTTP 写入不反向启动同步。本机文件登记、打开提示及导入导出只由本机 CLI 提供，原生 HTTP Agent 不提供宿主文件访问。
 
 有服务器绑定时，宿主文件操作也先检查服务器；HTTP 故障未经用户确认不得执行。它们仍在本机处理，不将本机路径发送给后台，不能利用这些工具绕过降级确认。
+
+## 使用服务器凭据
+
+需要用服务器密钥访问服务时，用 `tie_secret_search({query?, service?, environment?, limit?})` 查找凭据元数据，取得 `secretRef`。不搜索、索要或把密钥原文写进知识库。凭据只由服务器 HTTP MCP 提供，不属于本地页面或页面历史，也不随知识库导出。
+
+调用 `tie_secret_use({secretRef, grantId?})` 使用所有者已经授予此 MCP 令牌或登录会话的有效授权。目标地址、HTTP 方法、认证和请求内容已经固定，不能传入另一目标或任意 shell 命令。缺少有效授权时，将错误中 `principal` 的类型和 ID 告知所有者，请其到服务器 `/me/` 的「凭据库」选择对应调用者授权，再重试；账号页当前会话不一定是 Agent 使用的会话。不要自行创建授权或让用户在对话中提供密钥。
+
+默认结果只有 HTTP 状态，所有者选定的标量字段仍会脱敏；不要将返回字段当作获取密钥的方式。用 `tie_secret_usage({secretRef?, limit?})` 查看可访问的使用记录，区分成功、失败和拒绝。所有者可按次、按期限授权或撤销授权；修改凭据会使旧版本授权失效。
 
 ## 正文链接协议（必须遵守）
 

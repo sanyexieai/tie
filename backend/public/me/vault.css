@@ -1,0 +1,25 @@
+.vault .toolbar { flex-wrap: wrap; align-items: flex-end; }
+.vault .toolbar label { margin: 0; min-width: 180px; }
+.vault .toolbar input { max-width: none; }
+.vault .token-actions button { padding: 6px 9px; }
+.vault td { white-space: normal; }
+.vault td code { overflow-wrap: anywhere; font-size: 12px; }
+.vault .vault-value { display: block; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 8px; }
+.vault .hint { margin: 5px 0; }
+.vault .vault-section { margin-top: 28px; }
+.vault .vault-notice:empty { display: none; }
+.vault-dialog { width: min(720px, calc(100% - 24px)); max-height: calc(100% - 40px); }
+.vault-dialog .vault-dialog-body { padding: 24px; }
+.vault-dialog form { padding: 0; }
+.vault-dialog textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; font: inherit; resize: vertical; }
+.vault-dialog .split { margin-top: 0; }
+.vault-dialog code, .vault-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.vault-dialog .vault-close { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 18px; }
+.vault-dialog .vault-close h3 { margin: 0; }
+.vault-dialog .vault-detail-target { margin-bottom: 20px; padding: 12px; background: var(--bg); border-radius: 8px; }
+.vault-dialog .vault-detail-target p { margin: 5px 0; }
+.vault-dialog .vault-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+@media (max-width: 600px) {
+  .vault .toolbar label { width: 100%; min-width: 0; }
+  .vault-dialog .vault-dialog-body { padding: 18px; }
+}

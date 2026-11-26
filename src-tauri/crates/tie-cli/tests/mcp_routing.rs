@@ -130,6 +130,13 @@ impl HttpServer {
                                 "tie_get" => {
                                     json!({"id": "pg_remote", "title": "Remote page", "markdown": "# Remote page\n\nRead through HTTP\n"})
                                 }
+                                "tie_history" => json!([{"id":"revision_remote", "savedAt":"2026-11-26T00:00:00Z", "title":"Remote revision"}]),
+                                "tie_revision_get" => json!({"id":"pg_remote", "title":"Remote revision", "markdown":"server history"}),
+                                "tie_diff" => json!({"pageId":"pg_remote", "fromRevisionId":"revision_remote", "toRevisionId":"current", "changed":true, "metadataChanges":[], "diff":"server diff"}),
+                                "tie_restore" => json!({"restored":true, "revisionId":"revision_remote", "page":{"id":"pg_remote", "title":"Restored on server"}}),
+                                "tie_secret_search" => json!([{"secretRef":"secret://sec_remote", "name":"Server credential"}]),
+                                "tie_secret_use" => json!({"ok":true,"httpStatus":204,"eventId":"use_remote"}),
+                                "tie_secret_usage" => json!([{"id":"use_remote","status":"succeeded"}]),
                                 other => panic!("unexpected remote tool: {other}"),
                             };
                             json!({"isError": false, "content": [{"type": "text", "text": serde_json::to_string(&value).unwrap()}]})
@@ -558,7 +565,78 @@ fn backend_http_child_never_starts_reverse_http_or_sync() {
         .get_by_id(value["page"]["id"].as_str().unwrap())
         .unwrap()
         .is_some());
+    let page_id = value["page"]["id"].as_str().unwrap();
+    agent.call("tie_write", json!({"pageId":page_id,"markdown":"changed server body"}));
+    let history = tool_value(&agent.call("tie_history", json!({"id_or_title":page_id})));
+    let restored = agent.call("tie_restore", json!({"id_or_title":page_id,"revisionId":history[0]["id"]}));
+    assert_eq!(restored["result"]["isError"], false);
+    assert!(tool_value(&restored).get("sync").is_none());
+    assert!(workspace.get_by_id(page_id).unwrap().unwrap().markdown.contains("server body"));
+    assert!(!workspace.get_by_id(page_id).unwrap().unwrap().markdown.contains("changed"));
     assert!(server.received.lock().unwrap().is_empty());
+}
+
+#[test]
+fn remote_history_tools_use_http_without_a_local_workspace_or_reverse_sync() {
+    let directory = TestDirectory::new();
+    let server = HttpServer::start(true);
+    let mut agent = Agent::start(&directory, None, &[
+        ("TIE_MCP_URL", server.endpoint.as_str()),
+        ("TIE_MCP_TOKEN", "test-user-token"),
+    ]);
+    let arguments = json!({"id_or_title":"pg_remote","revisionId":"revision_remote"});
+    let history = tool_value(&agent.call("tie_history", json!({"id_or_title":"pg_remote"})));
+    assert_eq!(history[0]["id"], "revision_remote");
+    let revision = tool_value(&agent.call("tie_revision_get", arguments.clone()));
+    assert_eq!(revision["markdown"], "server history");
+    let difference = tool_value(&agent.call("tie_diff", arguments.clone()));
+    assert_eq!(difference["diff"], "server diff");
+    let restored = tool_value(&agent.call("tie_restore", arguments));
+    assert_eq!(restored["restored"], true);
+    assert_eq!(restored["page"]["id"], "pg_remote");
+    assert!(restored.get("sync").is_none());
+    let received = server.received.lock().unwrap();
+    let names = received.iter().filter(|request| request.body["method"] == "tools/call")
+        .map(|request| request.body["params"]["name"].as_str().unwrap()).collect::<Vec<_>>();
+    assert_eq!(names, vec!["tie_history", "tie_revision_get", "tie_diff", "tie_restore"]);
+    assert!(!directory.0.join("pages").exists());
+}
+
+#[test]
+fn vault_tools_use_http_without_local_support() {
+    let directory = TestDirectory::new();
+    let server = HttpServer::start(true);
+    let mut agent = Agent::start(&directory, None, &[
+        ("TIE_MCP_URL", server.endpoint.as_str()),
+        ("TIE_MCP_TOKEN", "test-user-token"),
+    ]);
+    let secrets = tool_value(&agent.call("tie_secret_search", json!({"query":"Server"})));
+    assert_eq!(secrets[0]["secretRef"], "secret://sec_remote");
+    let used = tool_value(&agent.call("tie_secret_use", json!({"secretRef":secrets[0]["secretRef"]})));
+    assert_eq!(used["httpStatus"], 204);
+    assert!(used.get("sync").is_none());
+    let usage = tool_value(&agent.call("tie_secret_usage", json!({})));
+    assert_eq!(usage[0]["status"], "succeeded");
+    assert!(!directory.0.join("pages").exists());
+}
+
+#[test]
+fn vault_never_falls_back_even_after_content_fallback_is_confirmed() {
+    let directory = TestDirectory::new();
+    let workspace = directory.workspace();
+    let server = HttpServer::start(false);
+    bind(&workspace, &server);
+    let mut agent = Agent::start(&directory, Some(workspace.root()), &[("TIE_MCP_TOKEN", "test-user-token")]);
+    let status = tool_value(&agent.call("tie_connection", json!({})));
+    agent.call("tie_connection", json!({"action":"confirm_local", "confirmed":true, "confirmationId":status["confirmationId"]}));
+    let plain = workspace.root().join("pages/unregistered.md");
+    fs::write(plain, "# Unregistered\n\nDo not open local files.\n").unwrap();
+    for name in ["tie_secret_search", "tie_secret_use", "tie_secret_usage"] {
+        let blocked = agent.call(name, json!({"secretRef":"secret://sec_local"}));
+        assert_eq!(blocked["result"]["isError"], true);
+        assert!(blocked["result"]["content"][0]["text"].as_str().unwrap().contains("未降级本地"));
+    }
+    assert!(!workspace.root().join(".tie/meta").exists());
 }
 
 #[test]

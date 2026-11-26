@@ -9,7 +9,10 @@ use crate::paths::{
 };
 use tie_common::fs_path::paths_equal;
 use tie_common::{Page, PageRevision, StorageSource};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub fn source_root(sources: &[StorageSource], storage_source_id: &str) -> Result<PathBuf, String> {
     let source = sources
@@ -122,11 +125,16 @@ pub fn list_page_revisions(
     page_id: &str,
     storage_source_id: &str,
 ) -> Result<Vec<PageRevision>, String> {
-    let source = sources
-        .iter()
-        .find(|source| source.id == storage_source_id)
-        .ok_or("页面所属存储源不存在")?;
-    let directory = revision_dir(&PathBuf::from(&source.path), page_id);
+    let root = source_root(sources, storage_source_id)?;
+    list_page_revisions_from_root(&root, page_id)
+}
+
+pub(crate) fn list_page_revisions_from_root(
+    root: &Path,
+    page_id: &str,
+) -> Result<Vec<PageRevision>, String> {
+    validate_history_component(page_id, "页面 ID")?;
+    let directory = revision_dir(root, page_id);
     let mut revisions = Vec::new();
     if !directory.exists() {
         return Ok(revisions);
@@ -136,13 +144,13 @@ pub fn list_page_revisions(
         if !path.extension().is_some_and(|extension| extension == "md") {
             continue;
         }
-        let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-        let page = parse_page(&content).map_err(|error| format!("{}: {error}", path.display()))?;
         let id = path
             .file_stem()
             .and_then(|name| name.to_str())
             .ok_or("版本文件名无效")?
             .to_owned();
+        validate_history_component(&id, "版本 ID")?;
+        let page = parse_revision_file(&path, page_id)?;
         revisions.push(PageRevision {
             id,
             saved_at: page.updated_at,
@@ -158,14 +166,38 @@ pub fn read_page_revision(
     page: &Page,
     revision_id: &str,
 ) -> Result<Page, String> {
-    let source = sources
-        .iter()
-        .find(|source| source.id == page.storage_source_id)
-        .ok_or("页面所属存储源不存在")?;
-    let path = revision_dir(&PathBuf::from(&source.path), &page.id)
-        .join(format!("{revision_id}.md"));
+    let root = source_root(sources, &page.storage_source_id)?;
+    read_page_revision_from_root(&root, &page.id, revision_id)
+}
+
+pub(crate) fn read_page_revision_from_root(
+    root: &Path,
+    page_id: &str,
+    revision_id: &str,
+) -> Result<Page, String> {
+    validate_history_component(page_id, "页面 ID")?;
+    validate_history_component(revision_id, "版本 ID")?;
+    let path = revision_dir(root, page_id).join(format!("{revision_id}.md"));
+    parse_revision_file(&path, page_id)
+}
+
+fn validate_history_component(value: &str, label: &str) -> Result<(), String> {
+    if value.is_empty()
+        || matches!(value, "." | "..")
+        || value.chars().any(|character| matches!(character, '/' | '\\' | ':') || character.is_control())
+    {
+        return Err(format!("{label} 无效"));
+    }
+    Ok(())
+}
+
+fn parse_revision_file(path: &Path, page_id: &str) -> Result<Page, String> {
     let content = fs::read_to_string(path).map_err(|error| format!("无法读取历史版本：{error}"))?;
-    parse_page(&content)
+    let page = parse_page(&content)?;
+    if page.id != page_id {
+        return Err("历史版本不属于该页面".to_owned());
+    }
+    Ok(page)
 }
 
 pub fn restore_page_revision(
@@ -173,14 +205,7 @@ pub fn restore_page_revision(
     page: Page,
     revision_id: &str,
 ) -> Result<Page, String> {
-    let source = sources
-        .iter()
-        .find(|source| source.id == page.storage_source_id)
-        .ok_or("页面所属存储源不存在")?;
-    let path = revision_dir(&PathBuf::from(&source.path), &page.id)
-        .join(format!("{revision_id}.md"));
-    let content = fs::read_to_string(path).map_err(|error| format!("无法读取历史版本：{error}"))?;
-    let revision = parse_page(&content)?;
+    let revision = read_page_revision(sources, &page, revision_id)?;
     let restored = Page {
         id: page.id,
         storage_source_id: page.storage_source_id.clone(),
@@ -302,6 +327,34 @@ mod tests {
         assert!(written.contains("正文"));
         assert!(!root.join("pages").join("pg_aabbccddeeff0011.md").exists() || !written.starts_with("---"));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn history_io_rejects_path_components_and_foreign_page_snapshots() {
+        let root = env::temp_dir().join(format!("tie-history-io-{}", crate::page::new_page_id()));
+        let sources = vec![StorageSource {
+            id: "src".into(), name: "Fixture".into(), kind: "local_folder".into(),
+            path: root.to_string_lossy().into_owned(), available: true,
+        }];
+        let mut current = sample("pg_history_io", "History");
+        save_page_to_root(&root, current.clone(), None).unwrap();
+        current.markdown.push_str("changed\n");
+        save_page_to_root(&root, current.clone(), None).unwrap();
+        let revisions = list_page_revisions(&sources, &current.id, "src").unwrap();
+        assert_eq!(revisions.len(), 1);
+        assert!(!read_page_revision(&sources, &current, &revisions[0].id).unwrap().markdown.contains("changed"));
+        for invalid in ["", ".", "..", "../other/123", "/tmp/123", "C:\\history", "other\\123", "nul\0id"] {
+            assert!(read_page_revision(&sources, &current, invalid).unwrap_err().contains("版本 ID"));
+            assert!(restore_page_revision(&sources, current.clone(), invalid).is_err());
+        }
+        assert!(list_page_revisions(&sources, "../other", "src").unwrap_err().contains("页面 ID"));
+        let foreign = revision_dir(&root, &current.id).join("foreign.md");
+        fs::write(&foreign, crate::page::frontmatter(&sample("pg_other", "Other"))).unwrap();
+        assert!(read_page_revision(&sources, &current, "foreign").unwrap_err().contains("不属于"));
+        assert!(restore_page_revision(&sources, current.clone(), "foreign").unwrap_err().contains("不属于"));
+        assert!(list_page_revisions(&sources, &current.id, "src").unwrap_err().contains("不属于"));
+        assert_eq!(read_stored_page(&root, &find_page_file(&root, &current.id).unwrap()).unwrap().markdown, current.markdown);
+        let _ = fs::remove_dir_all(root);
     }
 }
 

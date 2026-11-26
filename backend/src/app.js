@@ -28,6 +28,7 @@ import { issueSession, revokeSession, rotateSession } from './sessions.js'
 import { mountAdmin } from './admin.js'
 import { fileURLToPath } from 'node:url'
 import { assertResourceId } from './resource-id.js'
+import { mountVault } from './vault-routes.js'
 
 export function createApp(options = {}) {
   const jwtSecret = resolveJwtSecret(options)
@@ -192,6 +193,7 @@ app.get('/api/v1/me', auth, (req, res) => {
 })
 
 mountAdmin(app, { auth, adminOnly, handleError })
+mountVault(app, { auth })
 
 app.get('/api/v1/admin/settings', auth, adminOnly, (_req, res) => {
   const settings = loadSettings()
