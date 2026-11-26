@@ -1,5 +1,5 @@
 use crate::page::{
-    archive_page_revision, normalize_page_sources, page_has_changed, parse_page, read_stored_page,
+    archive_page_revision, is_encrypted_markdown, normalize_page_sources, page_has_changed, parse_page, read_stored_page,
     remove_page_assets, write_page_meta,
 };
 use crate::paths::{
@@ -30,12 +30,17 @@ pub fn save_page_to_root(
 ) -> Result<Page, String> {
     let mut page = normalize_page_sources(page);
     page.title = repair_utf8_mojibake(&page.title);
-    page.markdown = repair_utf8_mojibake(&page.markdown);
+    if !is_encrypted_markdown(&page.markdown) {
+        page.markdown = repair_utf8_mojibake(&page.markdown);
+    }
     fs::create_dir_all(root.join("pages")).map_err(|error| error.to_string())?;
     let previous_path = find_page_file(root, &page.id);
     let mut previous_page = None;
     if let Some(path) = &previous_path {
         if let Ok(previous) = read_stored_page(root, path) {
+            if is_encrypted_markdown(&previous.markdown) && !is_encrypted_markdown(&page.markdown) {
+                return Err("加密页面处于锁定状态，不能用普通正文覆盖".to_owned());
+            }
             previous_page = Some(previous.clone());
             if let Some(expected) = expected_updated_at {
                 if previous.updated_at != expected {

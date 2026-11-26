@@ -6,6 +6,8 @@ import AppSidebar from '@/components/AppSidebar.vue'
 import ContextPanel from '@/components/ContextPanel.vue'
 import DocumentEditor from '@/components/DocumentEditor.vue'
 import CredentialPage from '@/components/CredentialPage.vue'
+import EncryptedDocumentEditor from '@/components/EncryptedDocumentEditor.vue'
+import { isEncryptedMarkdown, lockAllWorkspaceEncryption } from '@/services/encrypted-markdown'
 import MobileHomeView from '@/components/MobileHomeView.vue'
 import MobileStackShell from '@/components/MobileStackShell.vue'
 import TrashView from '@/components/TrashView.vue'
@@ -69,6 +71,10 @@ let resizeStartX = 0
 let resizeStartWidth = 0
 
 const usesMobileShell = computed(() => isMobileLayout.value || isMobileClient.value || usesMobileUi.value)
+const encryptedView = computed(() => store.showingEncryptedDraft || (Boolean(store.activePage && isEncryptedMarkdown(store.activePage.markdown))
+  && !store.showingCredentials && !store.showingSearch && !store.showingGraph && !store.showingRecent && !store.showingFavorites && !store.showingSkills && !store.showingTags && !store.showingTrash))
+const encryptionAccount = computed(() => `${backend.profile.endpoint}\n${backend.profile.user?.id ?? ''}`)
+watch(encryptionAccount, () => { lockAllWorkspaceEncryption(); mobileContextOpen.value = false })
 
 const shellStyle = computed(() => {
   const mobileShell = usesMobileShell.value
@@ -79,7 +85,7 @@ const shellStyle = computed(() => {
 })
 
 const showSidebarResize = computed(() => !focusMode.value && !sidebarCollapsed.value && !usesMobileShell.value)
-const showContextResize = computed(() => !store.showingCredentials && !focusMode.value && !contextCollapsed.value && !usesContextDrawer.value)
+const showContextResize = computed(() => !store.showingCredentials && !encryptedView.value && !focusMode.value && !contextCollapsed.value && !usesContextDrawer.value)
 
 const mobileOnHome = computed(() => (
   !store.activePageId
@@ -92,6 +98,7 @@ const mobileOnHome = computed(() => (
   && !store.showingSkills
   && !store.showingSkillManager
   && !store.showingCredentials
+  && !store.showingEncryptedDraft
 ))
 
 function clamp(value: number, min: number, max: number) {
@@ -177,7 +184,7 @@ function endResize(event: PointerEvent) {
 
 function toggleSidebar() { sidebarCollapsed.value = !sidebarCollapsed.value }
 function toggleContextPanel() {
-  if (store.showingCredentials) return
+  if (store.showingCredentials || encryptedView.value) return
   if (usesContextDrawer.value) {
     mobileContextOpen.value = !mobileContextOpen.value
     return
@@ -440,6 +447,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  lockAllWorkspaceEncryption()
   nativeWorkspaceReady = false
   unlistenOpenFiles?.()
   document.body.classList.remove('panel-resizing')
@@ -462,7 +470,7 @@ onBeforeUnmount(() => {
     class="app-shell"
     :class="{
       'sidebar-collapsed': sidebarCollapsed,
-      'context-collapsed': contextCollapsed || store.showingCredentials,
+      'context-collapsed': contextCollapsed || store.showingCredentials || encryptedView,
       'focus-mode': focusMode,
       'mobile-shell': usesMobileShell,
       'mobile-client': isMobileClient || usesMobileUi,
@@ -471,6 +479,13 @@ onBeforeUnmount(() => {
     :style="shellStyle"
   >
   <WebReadView v-if="webReadMode" />
+  <template v-else-if="encryptedView">
+    <button v-if="sidebarCollapsed && !usesMobileShell && !focusMode" class="mobile-sidebar-toggle" aria-label="打开侧边栏" @click="toggleSidebar">☰</button>
+    <AppSidebar v-if="!usesMobileShell && !focusMode" @close="toggleSidebar" @open-storage-settings="storageSettingsOpen = true" />
+    <EncryptedDocumentEditor :key="`${encryptionAccount}:${store.showingEncryptedDraft ? 'new' : store.activePageId}`"
+      :page="store.showingEncryptedDraft ? null : store.activePage" :source-id="store.showingEncryptedDraft ? store.encryptedDraftSourceId : store.activePage?.storageSourceId || ''"
+      :mobile-layout="usesMobileShell" @toggle-sidebar="toggleSidebar" @toggle-focus="toggleFocusMode" @mobile-back="goMobileHome" />
+  </template>
   <template v-else-if="store.showingCredentials">
     <button v-if="sidebarCollapsed && !usesMobileShell && !focusMode" class="mobile-sidebar-toggle" aria-label="打开侧边栏" @click="toggleSidebar">☰</button>
     <AppSidebar v-if="!usesMobileShell && !focusMode" @close="toggleSidebar" @open-storage-settings="storageSettingsOpen = true" />

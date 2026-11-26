@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import { closeLive } from '../src/live.js'
-import { frontmatter } from '../src/page-format.js'
+import { frontmatter, parsePage } from '../src/page-format.js'
 import { store } from '../src/store.js'
 import { getWorkspacePage, listWorkspacePages, listWorkspaceRevisions, readWorkspaceRevision, saveWorkspacePage } from '../src/workspace-pages.js'
 
@@ -225,5 +225,39 @@ describe('workspace page storage', { concurrency: 1 }, () => {
     assert.throws(() => saveWorkspacePage(workspaceId, original, original.updatedAt), { status: 409 })
     assert.deepEqual(listWorkspaceRevisions(workspaceId, original.id), historyBefore)
     assert.equal(getWorkspacePage(workspaceId, original.id).markdown, current.markdown)
+  })
+
+  it('preserves encrypted Markdown bytes and titles across storage, history and metadata edits', () => {
+    const first = '-----BEGIN TIE ENCRYPTED MARKDOWN-----\n{"version":1,"ciphertext":"opaque-first"}\n-----END TIE ENCRYPTED MARKDOWN-----\n'
+    const second = first.replace('opaque-first', 'opaque-second')
+    const original = demoPage(0, { title: 'Deployment credentials', markdown: first, tags: ['private'] })
+    saveWorkspacePage(workspaceId, original)
+    assert.equal(getWorkspacePage(workspaceId, original.id).markdown, first)
+    assert.equal(fs.readFileSync(path.join(store.workspacePagesDir(workspaceId), 'Deployment credentials.md'), 'utf8'), first)
+    saveWorkspacePage(workspaceId, { ...original, markdown: second, updatedAt: '2026-11-25T00:00:01.000Z' })
+    const [revision] = listWorkspaceRevisions(workspaceId, original.id)
+    assert.equal(revision.title, original.title)
+    const restored = readWorkspaceRevision(workspaceId, original.id, revision.id)
+    assert.equal(restored.markdown, first)
+    saveWorkspacePage(workspaceId, { ...restored, updatedAt: '2026-11-25T00:00:02.000Z' })
+    saveWorkspacePage(workspaceId, { id: original.id, title: 'Renamed credentials', updatedAt: '2026-11-25T00:00:03.000Z' })
+    const renamed = getWorkspacePage(workspaceId, original.id)
+    assert.equal(renamed.markdown, first)
+    assert.deepEqual(renamed.tags, ['private'])
+    const count = listWorkspaceRevisions(workspaceId, original.id).length
+    assert.throws(() => saveWorkspacePage(workspaceId, { ...renamed, markdown: 'ordinary replacement' }), { status: 409 })
+    assert.equal(listWorkspaceRevisions(workspaceId, original.id).length, count)
+    assert.equal(getWorkspacePage(workspaceId, original.id).markdown, first)
+  })
+
+  it('treats damaged encrypted wrappers as opaque rather than reading embedded headings', () => {
+    const damaged = '-----BEGIN TIE ENCRYPTED MARKDOWN-----\r\n# Not a title\r\ntie://file/legacy\r\n'
+    const original = demoPage(0, { title: 'Metadata title', markdown: damaged })
+    const snapshot = frontmatter(original)
+    assert.equal(parsePage(snapshot).markdown, damaged)
+    assert.equal(parsePage(snapshot).title, original.title)
+    saveWorkspacePage(workspaceId, original)
+    assert.equal(getWorkspacePage(workspaceId, original.id).markdown, damaged)
+    assert.equal(listWorkspacePages(workspaceId)[0].title, original.title)
   })
 })

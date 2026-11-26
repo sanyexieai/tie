@@ -23,7 +23,8 @@ export function frontmatter(page: Page): string {
   const tags = (page.tags ?? []).join(', ')
   const deleted = page.deletedAt ? `deleted_at: ${page.deletedAt}\n` : ''
   const icon = String(page.icon ?? '').replace(/[\n\r]/g, '')
-  return `---\ntie_version: 1\nid: ${page.id}\nparent_id: ${parent}\nsort_key: ${page.sortKey ?? 0}\nicon: ${icon}\ntags: [${tags}]\ncreated_at: ${page.createdAt}\nupdated_at: ${page.updatedAt}\n${deleted}---\n\n${page.markdown ?? ''}`
+  const title = String(page.title ?? '').replace(/[\n\r]/g, '')
+  return `---\ntie_version: 1\nid: ${page.id}\nparent_id: ${parent}\nsort_key: ${page.sortKey ?? 0}\nicon: ${icon}\ntitle: ${title}\ntags: [${tags}]\ncreated_at: ${page.createdAt}\nupdated_at: ${page.updatedAt}\n${deleted}---\n\n${page.markdown ?? ''}`
 }
 
 export function parsePage(content: string): Page {
@@ -46,7 +47,7 @@ export function parsePage(content: string): Page {
     .map((tag) => tag.trim())
     .filter(Boolean)
   const titleLine = markdown.split('\n').find((line) => line.startsWith('# '))
-  const title = titleLine ? titleLine.slice(2) : '无标题'
+  const title = titleLine ? titleLine.slice(2) : value(lines, 'title') || '无标题'
   const parentRaw = value(lines, 'parent_id')
   return normalizePageSources({
     id,

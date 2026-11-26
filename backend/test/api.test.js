@@ -243,6 +243,33 @@ describe('tie backend api', { concurrency: 1 }, () => {
     assert.deepEqual(listed.body.assets, ['a1.png'])
   })
 
+  it('syncs encrypted Markdown and metadata over HTTP while rejecting plaintext replacement', async () => {
+    const endpoint = `/api/v1/workspaces/${workspaceId}/pages/pg_encrypted_api`
+    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
+    const first = '-----BEGIN TIE ENCRYPTED MARKDOWN-----\n{"ciphertext":"opaque-first"}\n-----END TIE ENCRYPTED MARKDOWN-----\n'
+    const second = first.replace('opaque-first', 'opaque-second')
+    const original = { ...demoPage('pg_encrypted_api', '2026-11-26T00:00:00.000Z', workspaceId), title: 'Encrypted deployment', markdown: first }
+    const created = await request(endpoint, { method: 'PUT', headers, body: JSON.stringify(original) })
+    assert.equal(created.response.status, 200)
+    assert.equal(created.body.markdown, first)
+    assert.equal((await request(endpoint, { headers })).body.markdown, first)
+    const modified = await request(endpoint, { method: 'PUT', headers, body: JSON.stringify({ ...original, markdown: second, updatedAt: '2026-11-26T00:00:01.000Z' }) })
+    assert.equal(modified.response.status, 200)
+    const revisions = await request(`${endpoint}/revisions`, { headers })
+    assert.equal(revisions.body[0].title, original.title)
+    const revision = await request(`${endpoint}/revisions/${revisions.body[0].id}`, { headers })
+    assert.equal(revision.body.markdown, first)
+    const renamed = await request(endpoint, { method: 'PUT', headers, body: JSON.stringify({ title: 'Renamed encrypted deployment' }) })
+    assert.equal(renamed.response.status, 200)
+    assert.equal(renamed.body.markdown, second)
+    const rejected = await request(endpoint, { method: 'PUT', headers, body: JSON.stringify({ ...renamed.body, markdown: 'ordinary replacement' }) })
+    assert.equal(rejected.response.status, 409)
+    assert.match(rejected.body.message, /锁定/)
+    assert.equal((await request(endpoint, { headers })).body.markdown, second)
+    const file = path.join(dataDir, 'workspaces', workspaceId, 'pages', 'Renamed encrypted deployment.md')
+    assert.equal(fs.readFileSync(file, 'utf8'), second)
+  })
+
   it('rejects invalid resource ids before page, asset, or batch deletion access', async () => {
     const invalidId = encodeURIComponent('invalid/page')
     for (const suffix of ['', '/assets', '/assets/a1.png', '/revisions']) {

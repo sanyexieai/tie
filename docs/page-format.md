@@ -50,6 +50,8 @@ root_page: pg_0123456789abcdef
 
 `pages/*.md` 就是正文。新建和保存都不再往文件头写 Tie 字段。
 
+加密 Markdown 页面也存放在 `pages/<标题>.md`，正文为[加密封套](./encrypted-markdown.md)，仍沿用同一份 sidecar、页面树、历史、打包与同步。客户端解密后编辑，所有存储和同步入口只接收密文；文件内容不参与普通全文检索、标题提取或链接改写。
+
 ```markdown
 # 页面标题
 

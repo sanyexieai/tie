@@ -190,6 +190,9 @@ fn is_href_boundary(c: char) -> bool {
 
 /// Rewrite legacy `tie://file/{id}` / `tie://path/{rel}` to include `source_id`.
 pub fn rewrite_legacy_workspace_hrefs(markdown: &str, page_source_id: &str) -> String {
+    if crate::page::is_encrypted_markdown(markdown) {
+        return markdown.to_owned();
+    }
     let source = page_source_id.trim();
     if source.is_empty() || !is_storage_source_id(source) {
         return markdown.to_owned();

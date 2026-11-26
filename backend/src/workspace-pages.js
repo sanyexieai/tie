@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { frontmatter, isTieDocument, parsePage, revisionId } from './page-format.js'
+import { frontmatter, isEncryptedMarkdown, isTieDocument, parsePage, revisionId } from './page-format.js'
 import { filenameStem, repairUtf8Mojibake } from './page-names.js'
 import { syncRootTieFiles } from './solution-files.js'
 import { notifyWorkspace } from './live.js'
@@ -79,18 +79,19 @@ function resolveWorkspaceFile(workspaceId, relative) {
 }
 
 function headingTitle(markdown) {
+  if (isEncryptedMarkdown(markdown)) return ''
   const line = String(markdown ?? '').replace(/^\uFEFF/, '').split(/\r?\n/).find((item) => item.startsWith('# '))
   return line ? line.slice(2).trim() : ''
 }
 
 function repairPage(page) {
-  const markdown = repairUtf8Mojibake(page.markdown ?? '')
+  const markdown = isEncryptedMarkdown(page.markdown) ? page.markdown : repairUtf8Mojibake(page.markdown ?? '')
   const title = repairUtf8Mojibake(page.title || headingTitle(markdown) || '无标题')
   return { ...page, markdown, title: title || '无标题' }
 }
 
 function pageFromMeta(meta, markdown) {
-  const repaired = repairUtf8Mojibake(markdown)
+  const repaired = isEncryptedMarkdown(markdown) ? markdown : repairUtf8Mojibake(markdown)
   const title = headingTitle(repaired) || repairUtf8Mojibake(meta.title) || '无标题'
   return repairPage({
     id: meta.id,
@@ -247,6 +248,14 @@ export function saveWorkspacePage(workspaceId, page, expectedUpdatedAt, context 
   if (currentPath) {
     const current = readFilePage(workspaceId, currentPath)
     previous = current?.page ?? null
+    if (previous && isEncryptedMarkdown(previous.markdown)) {
+      if (page.markdown === undefined) page = { ...previous, ...page, markdown: previous.markdown }
+      if (!isEncryptedMarkdown(page.markdown)) {
+        const error = new Error('加密页面处于锁定状态，不能用普通正文覆盖')
+        error.status = 409
+        throw error
+      }
+    }
     if (current && expectedUpdatedAt && current.page.updatedAt !== expectedUpdatedAt) {
       const error = new Error('页面已在其他设备更新，请重新载入后再保存')
       error.status = 409

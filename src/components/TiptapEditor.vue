@@ -45,7 +45,7 @@ import {
   sourceById,
 } from '@/services/link-runtime'
 
-const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage: (title: string) => Promise<Page>; expandToChild?: (title: string) => Promise<Page>; enablePheromone?: boolean; backgroundStarted?: boolean }>()
+const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage?: (title: string) => Promise<Page>; expandToChild?: (title: string) => Promise<Page>; enablePheromone?: boolean; backgroundStarted?: boolean; privateDocument?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
 const lowlight = createLowlight(common)
 const showPagePicker = ref(false)
@@ -94,7 +94,7 @@ function linkContext(): LinkContext {
 const linkTargetSources = computed(() => linkableSources(props.sources, pageSourceId()))
 
 async function ensureWorkspaceFilesLoaded() {
-  if (props.backgroundStarted === false) return
+  if (props.privateDocument || props.backgroundStarted === false) return
   const sourceIds = new Set<string>()
   const relatives: Array<{ sourceId: string; relativePath: string }> = []
   const pageId = pageSourceId()
@@ -206,6 +206,21 @@ function createAssetImageExtension() {
     },
     addNodeView() {
       return ({ node, getPos, editor: viewEditor }) => {
+        if (props.privateDocument) {
+          // Image URLs in private Markdown must not make requests when the document opens.
+          const dom = document.createElement('span')
+          dom.className = 'private-markdown-image'
+          dom.contentEditable = 'false'
+          dom.textContent = markdownForImageAttrs(node.attrs)
+          return {
+            dom,
+            update: (updated) => {
+              if (updated.type.name !== 'image') return false
+              dom.textContent = markdownForImageAttrs(updated.attrs)
+              return true
+            },
+          }
+        }
         let currentNode = node
         const wrap = document.createElement('span')
         wrap.className = 'tie-image-wrap'
@@ -360,6 +375,7 @@ function createAssetImageExtension() {
 }
 
 function canEmbedImage(file: File) {
+  if (props.privateDocument) return false
   if (!isImageFile(file)) return false
   const page = activePage()
   if (!page || !canStorePageAssets(page)) {
@@ -411,6 +427,7 @@ function runImagePaste(event: ClipboardEvent, tiptapEditor: Editor) {
   if (!shouldHandleImagePaste(event)) return false
   event.preventDefault()
   event.stopImmediatePropagation()
+  if (props.privateDocument) return true
   const page = activePage()
   if (!page) {
     window.alert('请先打开一个页面。')
@@ -446,6 +463,7 @@ function createTieImagePasteExtension() {
               const image = [...(event.dataTransfer?.files ?? [])].find((file) => isImageFile(file))
               if (!image) return false
               event.preventDefault()
+              if (props.privateDocument) return true
               const dropPosition = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ?? view.state.selection.from
               void insertImageInView(tiptapEditor, image, { mode: 'insert', position: dropPosition })
               return true
@@ -490,6 +508,7 @@ function stripAssetAutolinks(currentEditor: Editor) {
  * 同时拆掉 asset URL 上的 link mark，避免光标点不进。
  */
 function hydrateAssetMarkdownImages(currentEditor: Editor) {
+  if (props.privateDocument) return
   const imageType = currentEditor.schema.nodes.image
   if (!imageType) return
   const pattern = /!\[([^\]]*)\]\((tie:\/\/asset\/[^)\s]+)(?:\s+"([^"]*)")?\)/g
@@ -530,7 +549,7 @@ function hydrateAssetMarkdownImages(currentEditor: Editor) {
 
 let rewritingInlineImages = false
 async function rewriteInlineImageNodes(currentEditor: Editor) {
-  if (rewritingInlineImages || syncingExternalValue) return
+  if (props.privateDocument || rewritingInlineImages || syncingExternalValue) return
   const page = activePage()
   if (!page || !canStorePageAssets(page)) return
 
@@ -613,6 +632,7 @@ function closeLinkSourcePicker() {
 }
 
 function beginLinkInsert(editor: Editor, kind: 'file' | 'directory' | 'relative') {
+  if (props.privateDocument) return
   const targets = linkTargetSources.value
   if (!targets.length) {
     window.alert('没有可登记或引用文件的存储源')
@@ -665,9 +685,12 @@ const slashCommands: SlashCommand[] = [
 ]
 
 const filteredCommands = computed(() => {
+  const commands = props.privateDocument
+    ? slashCommands.filter((command) => !['image', 'image-upload', 'local-file', 'local-directory', 'relative-path', 'child-page', 'expand-child'].includes(command.id))
+    : slashCommands
   const query = slashQuery.value?.trim().toLocaleLowerCase() ?? ''
-  if (!query) return slashCommands
-  return slashCommands.filter((command) => [command.label, command.hint, ...command.keywords].some((value) => value.toLocaleLowerCase().includes(query)))
+  if (!query) return commands
+  return commands.filter((command) => [command.label, command.hint, ...command.keywords].some((value) => value.toLocaleLowerCase().includes(query)))
 })
 
 function anchorHrefFromEvent(event: MouseEvent) {
@@ -853,6 +876,10 @@ function openLocalLinkFromEvent(event: MouseEvent) {
   if (!shouldOpenFromPointerEvent(event) || event.type !== 'click') return true
   const context = linkContext()
   void openLocalLink(href, context).catch(async (error) => {
+    if (props.privateDocument) {
+      window.alert(error instanceof Error ? error.message : '无法打开本地链接')
+      return
+    }
     const link = classifyLocalLink(href)
     const source = sourceById(context.sources, link ? resolvedSourceId(link, context) : null)
     const resource = link?.fileId ? cachedFileResource(source?.id, link.fileId) : null
@@ -1025,7 +1052,7 @@ function createPheromoneExtension() {
           key: pheromonePluginKey,
           props: {
             decorations(state) {
-              if (!props.enablePheromone) return DecorationSet.empty
+              if (props.privateDocument || !props.enablePheromone) return DecorationSet.empty
               const decorations = []
               for (const item of pheromonesFor(props.pageId, props.pages.find((page) => page.id === props.pageId)?.storageSourceId ?? '').filter((item) => item.status !== 'withdrawn')) {
                 const range = findQuoteRange(state.doc, item.quote)
@@ -1039,6 +1066,7 @@ function createPheromoneExtension() {
               return DecorationSet.create(state.doc, decorations)
             },
             handleClick(_view, _pos, event) {
+              if (props.privateDocument || !props.enablePheromone) return false
               const raw = event.target
               const element = raw instanceof Element ? raw : raw instanceof Node ? raw.parentElement : null
               const id = element?.closest('[data-pheromone-id]')?.getAttribute('data-pheromone-id')
@@ -1084,7 +1112,7 @@ const editor = useEditor({
     handlePaste: (_view, event) => {
       const text = event.clipboardData?.getData('text/plain') ?? ''
       const html = event.clipboardData?.getData('text/html') ?? ''
-      if (/file:\/\//i.test(text) || /file:\/\//i.test(html)) {
+      if (!props.privateDocument && (/file:\/\//i.test(text) || /file:\/\//i.test(html))) {
         event.preventDefault()
         const fromPlain = /file:\/\//i.test(text)
         const payload = fromPlain ? text : html
@@ -1266,6 +1294,7 @@ watch(() => props.spellcheck, (enabled) => editor.value?.view.dom.setAttribute('
 watch(() => props.pageId, () => scheduleDecorateFileLinks())
 watch(() => props.backgroundStarted, (ready) => { if (ready) scheduleDecorateFileLinks() })
 watch(() => pheromoneRevision(props.pageId, props.pages.find((page) => page.id === props.pageId)?.storageSourceId ?? ''), () => {
+  if (props.privateDocument || !props.enablePheromone) return
   const current = editor.value
   if (!current || current.isDestroyed) return
   current.view.dispatch(current.state.tr.setMeta('pheromone', true))
@@ -1278,6 +1307,7 @@ watch(() => pheromoneRevision(props.pageId, props.pages.find((page) => page.id =
 watch(() => props.sources.map((source) => `${source.id}:${source.path ?? ''}`).join('|'), () => scheduleDecorateFileLinks())
 
 function refreshAssetImages() {
+  if (props.privateDocument) return
   const root = editor.value?.view.dom
   if (!root) return
   root.querySelectorAll<HTMLImageElement>('img[data-tie-asset]').forEach((img) => {
@@ -1317,7 +1347,7 @@ function selectionForMenu(currentEditor: Editor) {
 function onEditorContextMenu(event: MouseEvent) {
   contextMenu.value = null
   const current = editor.value
-  if (!current) return
+  if (!current || props.privateDocument) return
   if (!props.expandToChild && !props.enablePheromone) return
   const selection = selectionForMenu(current)
   if (!selection) return
@@ -1357,7 +1387,7 @@ function rangeForText(current: Editor, from: number, to: number, text: string) {
 }
 
 async function replaceRangeWithChildCard(current: Editor, from: number, to: number, text: string) {
-  if (!props.expandToChild) return
+  if (props.privateDocument || !props.expandToChild) return
   const page = await props.expandToChild(text)
   const href = `tie://page/${page.id}`
   const range = rangeForText(current, from, to, text)
@@ -1383,6 +1413,7 @@ async function runContextAction(action: 'expand' | 'cut' | 'copy' | 'paste' | Ph
   const { from, to, text } = menu
   try {
     if (action === 'objection' || action === 'correction' || action === 'support') {
+      if (props.privateDocument || !props.enablePheromone) return
       closeContextMenu()
       startPheromoneDraft(props.pageId, text, action)
       return
@@ -1417,6 +1448,7 @@ async function runContextAction(action: 'expand' | 'cut' | 'copy' | 'paste' | Ph
 }
 
 async function expandParagraphToChild(current: Editor) {
+  if (props.privateDocument) return
   const { $from } = current.state.selection
   const text = $from.parent.textContent.replace(/\s+/g, ' ').trim()
   if (!text) {
@@ -1534,7 +1566,7 @@ function closePagePicker() {
 
 async function createWikiPage() {
   const title = wikiQuery.value.trim()
-  if (!title) return
+  if (!title || props.privateDocument || !props.createLinkedPage) return
   const page = await props.createLinkedPage(title)
   insertPageLink(page)
 }
@@ -1620,7 +1652,7 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
       <button v-for="(page, index) in matchingPages" :key="page.id" :class="{ selected: pagePickerMode === 'wiki' && selectedPageIndex === index }" @mousedown.prevent="insertPageLink(page)">
         <span>{{ DEFAULT_PAGE_ICON }} {{ page.title }}</span><small>{{ sourceLabel(page) }} · {{ page.parentId ? '子页面' : '顶层页面' }}</small>
       </button>
-      <button v-if="!matchingPages.length && pagePickerMode === 'wiki' && wikiQuery.trim()" class="page-picker-create" @mousedown.prevent="createWikiPage"><span>创建“{{ wikiQuery.trim() }}”</span><small>并插入页面链接</small></button>
+      <button v-if="!privateDocument && createLinkedPage && !matchingPages.length && pagePickerMode === 'wiki' && wikiQuery.trim()" class="page-picker-create" @mousedown.prevent="createWikiPage"><span>创建“{{ wikiQuery.trim() }}”</span><small>并插入页面链接</small></button>
       <p v-else-if="!matchingPages.length">没有匹配页面</p>
     </div>
     <div

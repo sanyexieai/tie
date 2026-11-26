@@ -3,7 +3,7 @@
 use crate::io::{list_page_revisions_from_root, read_page_revision_from_root, save_page_to_root};
 use crate::links::rewrite_legacy_workspace_hrefs;
 use crate::page::{
-    frontmatter, is_tie_document, new_page_id, normalize_page_sources,
+    frontmatter, is_encrypted_markdown, is_tie_document, new_page_id, normalize_page_sources,
     open_or_adopt_with_meta_index, parse_page, read_stored_page, remove_page_assets,
     remove_page_meta, PageMetaIndex,
 };
@@ -241,7 +241,7 @@ impl LocalWorkspace {
         let q = query.to_lowercase();
         let title = page.title.to_lowercase();
         let tags: Vec<String> = page.tags.iter().map(|t| t.to_lowercase()).collect();
-        let body = page.markdown.to_lowercase();
+        let body = if is_encrypted_markdown(&page.markdown) { String::new() } else { page.markdown.to_lowercase() };
         let mut score = 0;
         if title == q {
             score += 100;
@@ -271,6 +271,9 @@ impl LocalWorkspace {
     }
 
     fn snippet(page: &Page, query: &str) -> String {
+        if is_encrypted_markdown(&page.markdown) {
+            return "已加密，解锁后查看正文".to_owned();
+        }
         let q = query.to_lowercase();
         let lines: Vec<&str> = page.markdown.lines().collect();
         if let Some(hit) = lines.iter().find(|line| line.to_lowercase().contains(&q)) {
@@ -530,6 +533,9 @@ impl LocalWorkspace {
         by_id: &HashMap<String, Page>,
         by_title: &HashMap<String, String>,
     ) -> Vec<String> {
+        if is_encrypted_markdown(&page.markdown) {
+            return Vec::new();
+        }
         let mut targets = HashSet::new();
         for caps in page.markdown.match_indices("tie://page/") {
             let rest = &page.markdown[caps.0 + "tie://page/".len()..];
@@ -691,6 +697,11 @@ impl LocalWorkspace {
             .clone()
             .or_else(|| existing.as_ref().map(|page| page.markdown.clone()))
             .unwrap_or_default();
+        if existing.as_ref().is_some_and(|page| is_encrypted_markdown(&page.markdown))
+            && !is_encrypted_markdown(&raw_body)
+        {
+            return Err("加密页面处于锁定状态，不能通过普通写入替换正文；请在客户端解锁编辑".to_owned());
+        }
         let headed = ensure_title_markdown(
             if title.is_empty() {
                 existing
@@ -748,10 +759,12 @@ impl LocalWorkspace {
                 }),
         };
 
-        if let Some(heading) = markdown.lines().find(|line| line.starts_with("# ")) {
-            let heading_title = heading[2..].trim();
-            if !heading_title.is_empty() {
-                page.title = heading_title.to_owned();
+        if !is_encrypted_markdown(&markdown) {
+            if let Some(heading) = markdown.lines().find(|line| line.starts_with("# ")) {
+                let heading_title = heading[2..].trim();
+                if !heading_title.is_empty() {
+                    page.title = heading_title.to_owned();
+                }
             }
         }
 
@@ -1016,6 +1029,9 @@ impl LocalWorkspace {
 }
 
 pub fn ensure_title_markdown(title: &str, body: &str) -> String {
+    if is_encrypted_markdown(body) {
+        return body.to_owned();
+    }
     let clean_title = {
         let trimmed = title.trim();
         if trimmed.is_empty() {

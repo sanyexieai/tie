@@ -63,7 +63,7 @@ watch(() => store.backgroundStarted, (ready) => {
 }, { immediate: true })
 
 async function createTopLevel() { newPageMenuOpen.value = false; await store.createPage(null) }
-async function createCredential() { newPageMenuOpen.value = false; await store.openCredentialPage() }
+async function createCredential() { newPageMenuOpen.value = false; await store.openEncryptedPage() }
 async function reloadPages() {
   if (store.reloading) return
   await store.syncRemoteSources()

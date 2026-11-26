@@ -24,6 +24,19 @@ pub(super) fn diff(
         .filter(|field| before_value[field] != after_value[field])
         .map(|field| json!({ "field": field, "before": before_value[field], "after": after_value[field] }))
         .collect::<Vec<_>>();
+    if tie_local::is_encrypted_markdown(&before.markdown) || tie_local::is_encrypted_markdown(&after.markdown) {
+        return Ok(json!({
+            "pageId": current.id,
+            "fromRevisionId": revision_id,
+            "toRevisionId": target_id,
+            "currentUpdatedAt": current.updated_at,
+            "changed": before.markdown != after.markdown || !metadata_changes.is_empty(),
+            "contentChanged": before.markdown != after.markdown,
+            "metadataChanges": metadata_changes,
+            "locked": true,
+            "diff": ""
+        }));
+    }
     Ok(json!({
         "pageId": current.id,
         "fromRevisionId": revision_id,

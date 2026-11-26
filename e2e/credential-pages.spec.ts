@@ -61,18 +61,15 @@ async function openApp(page: Page, backend: Backend, mobile = false) {
   await page.goto('/')
   if (mobile) {
     const back = page.getByRole('button', { name: '返回列表', exact: true })
-    const create = page.getByRole('button', { name: '新建凭据页面', exact: true })
+    const create = page.getByRole('button', { name: '新建操作凭据', exact: true })
     await expect(back.or(create)).toBeVisible()
     if (await back.isVisible()) await back.click()
     await expect(create).toBeVisible()
   } else await expect(page.getByRole('textbox', { name: '页面标题', exact: true })).toHaveValue('普通文档')
 }
 
-async function createCredential(page: Page, backend: Backend, viaPageTypeMenu = false) {
-  if (viaPageTypeMenu) {
-    await page.getByRole('button', { name: '选择页面类型', exact: true }).click()
-    await page.getByRole('menuitem', { name: '凭据页面', exact: true }).click()
-  } else await page.getByRole('button', { name: '新建凭据页面', exact: true }).click()
+async function createCredential(page: Page, backend: Backend) {
+  await page.getByRole('button', { name: '新建操作凭据', exact: true }).click()
   const editor = page.getByRole('main', { name: '凭据页面', exact: true })
   await expect(editor).toBeVisible()
   await editor.getByLabel('凭据名称', { exact: true }).fill('服务器部署密钥')
@@ -118,7 +115,7 @@ test('adds and maintains a credential as a special page without writing an ordin
     if (/\/secrets\/[^/]+$/.test(route) && request.method() === 'PUT') credentialUpdates.push(request.postDataJSON())
   })
   await openApp(page, backend)
-  const { editor, metadata } = await createCredential(page, backend, true)
+  const { editor, metadata } = await createCredential(page, backend)
   expect(valueRequests).toEqual([])
   await expect(page.locator('.context-panel')).toHaveCount(0)
   await page.screenshot({ path: '/tmp/tie-credential-page-preview.png', fullPage: true })
@@ -246,7 +243,7 @@ test('new credential pages retain the selected workspace and support a multiline
   await openApp(page, backend)
   await createCredential(page, backend)
   await page.getByRole('combobox', { name: '凭据工作区', exact: true }).selectOption(second.id)
-  await page.getByRole('button', { name: '新建凭据页面', exact: true }).click()
+  await page.getByRole('button', { name: '新建操作凭据', exact: true }).click()
   const editor = page.getByRole('main', { name: '凭据页面', exact: true })
   await expect(page.getByRole('combobox', { name: '凭据工作区', exact: true })).toHaveValue(second.id)
   await expect(editor).toContainText('第二个凭据工作区')
@@ -268,7 +265,7 @@ test('new credential pages retain the selected workspace and support a multiline
 test('opens and saves a credential page from the mobile page list', async ({ page, backend }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await openApp(page, backend, true)
-  await page.getByRole('button', { name: '新建凭据页面', exact: true }).click()
+  await page.getByRole('button', { name: '新建操作凭据', exact: true }).click()
   const editor = page.getByRole('main', { name: '凭据页面', exact: true })
   await editor.getByLabel('凭据名称', { exact: true }).fill('手机凭据')
   await editor.getByLabel('密钥', { exact: true }).fill(privateValue)

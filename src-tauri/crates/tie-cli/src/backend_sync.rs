@@ -1159,6 +1159,52 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_markdown_pushes_and_pulls_without_changing_ciphertext() {
+        let dir = std::env::temp_dir().join(format!("tie-sync-encrypted-{}", tie_local::new_page_id()));
+        let local = LocalWorkspace::init(dir.join("local"), "src_test").unwrap();
+        let remote = LocalWorkspace::init(dir.join("remote"), "src_test").unwrap();
+        let first = format!("{}\n{{\"ciphertext\":\"opaque-first\"}}\n-----END TIE ENCRYPTED MARKDOWN-----\n", tie_local::ENCRYPTED_MARKDOWN_PREFIX);
+        let second = first.replace("opaque-first", "opaque-second");
+        let item = page("pg_encrypted", &first, "2026-01-01T00:00:00.000Z");
+        save_page_to_root(local.root(), item, None).unwrap();
+        let root = remote.root().to_owned();
+        let server = crate::test_http::Server::start(move |request, body| {
+            let request = request.replace("/api/v1/workspaces/ws_test", "");
+            let parts: Vec<_> = request.split_whitespace().collect();
+            let path: Vec<_> = parts[1].trim_start_matches('/').split('/').collect();
+            let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
+            match path.as_slice() {
+                ["pages"] => (200, serde_json::to_vec(&ws.load_all(true).unwrap()).unwrap()),
+                ["pages", _id] if parts[0] == "PUT" => {
+                    let saved = save_page_to_root(&root, serde_json::from_slice(body).unwrap(), None).unwrap();
+                    (200, serde_json::to_vec(&saved).unwrap())
+                }
+                ["pages", _id, "reviews"] => (200, b"{\"entries\":[]}".to_vec()),
+                _ => crate::resources_sync::tests::respond(&root, &request, body),
+            }
+        });
+        let target = BackendTarget { url: server.url.clone(), workspace_id: "ws_test".into() };
+        let pushed = sync_with(&target, "", &local, "test").unwrap();
+        assert_eq!(pushed.mode, "synced");
+        assert_eq!(pushed.pushed, 1);
+        let mut changed = remote.get_by_id("pg_encrypted").unwrap().unwrap();
+        assert_eq!(changed.markdown, first);
+        assert_eq!(changed.title, "标题");
+        changed.markdown = second.clone();
+        changed.updated_at = "2026-01-02T00:00:00.000Z".into();
+        save_page_to_root(remote.root(), changed, None).unwrap();
+        let pulled = sync_with(&target, "", &local, "test").unwrap();
+        assert_eq!(pulled.mode, "synced");
+        assert_eq!(pulled.pulled, 1);
+        assert_eq!(local.get_by_id("pg_encrypted").unwrap().unwrap().markdown, second);
+        let revision = &local.list_revisions("pg_encrypted").unwrap()[0];
+        assert_eq!(revision.title, "标题");
+        assert_eq!(local.get_revision("pg_encrypted", &revision.id).unwrap().markdown, first);
+        drop(server);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn plans_push_pull_and_conflict() {
         let local = page("pg_1", "本地", "2026-01-02T00:00:00.000Z");
         let remote = page("pg_1", "后台", "2026-01-02T00:00:00.000Z");

@@ -230,7 +230,7 @@ pub fn collect_page_closure(
 
 /// Rewrite `tie://page/{id}` and `tie://asset/{id}/…` using `id_map` (old → new).
 pub fn remap_page_links(markdown: &str, id_map: &HashMap<String, String>) -> String {
-    if id_map.is_empty() {
+    if id_map.is_empty() || crate::page::is_encrypted_markdown(markdown) {
         return markdown.to_owned();
     }
     const PREFIXES: [&str; 2] = ["tie://page/", "tie://asset/"];

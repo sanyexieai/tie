@@ -1,10 +1,17 @@
+const ENCRYPTED_MARKDOWN_PREFIX = '-----BEGIN TIE ENCRYPTED MARKDOWN-----'
+
+export function isEncryptedMarkdown(markdown) {
+  return typeof markdown === 'string' && markdown.replace(/^\uFEFF/, '').startsWith(ENCRYPTED_MARKDOWN_PREFIX)
+}
+
 export function frontmatter(page) {
   const parent = page.parentId ?? ''
   const tags = (page.tags ?? []).join(', ')
   const deleted = page.deletedAt ? `deleted_at: ${page.deletedAt}\n` : ''
   const icon = String(page.icon ?? '').replace(/[\n\r]/g, '')
+  const title = String(page.title ?? '').replace(/[\n\r]/g, '')
   // 绑定源不进正文；读旧文件仍解析 storage_source_*。
-  return `---\ntie_version: 1\nid: ${page.id}\nparent_id: ${parent}\nsort_key: ${page.sortKey ?? 0}\nicon: ${icon}\ntags: [${tags}]\ncreated_at: ${page.createdAt}\nupdated_at: ${page.updatedAt}\n${deleted}---\n\n${page.markdown ?? ''}`
+  return `---\ntie_version: 1\nid: ${page.id}\nparent_id: ${parent}\nsort_key: ${page.sortKey ?? 0}\nicon: ${icon}\ntitle: ${title}\ntags: [${tags}]\ncreated_at: ${page.createdAt}\nupdated_at: ${page.updatedAt}\n${deleted}---\n\n${page.markdown ?? ''}`
 }
 
 function value(lines, key) {
@@ -50,14 +57,25 @@ export function isTieDocument(content) {
 
 export function parsePage(content) {
   // Accept CRLF checkouts / editors on Windows; writers still emit LF.
-  const normalized = String(content ?? '').replace(/\r\n/g, '\n')
+  const original = String(content ?? '')
+  const normalized = original.replace(/\r\n/g, '\n')
   const start = normalized.indexOf('---\n')
   if (start === -1) throw new Error('缺少 Frontmatter 起始标记')
   const rest = normalized.slice(start + 4)
   const end = rest.indexOf('---\n')
   if (end === -1) throw new Error('缺少 Frontmatter 结束标记')
   const meta = rest.slice(0, end)
-  const markdown = rest.slice(end + 4).replace(/^\n/, '')
+  let markdown = rest.slice(end + 4).replace(/^\n/, '')
+  if (isEncryptedMarkdown(markdown)) {
+    let offset = 0
+    for (const [index, line] of (original.match(/[^\n]*\n|[^\n]+$/g) ?? []).entries()) {
+      offset += line.length
+      if (index > 0 && line.replace(/[\r\n]+$/, '') === '---') {
+        markdown = original.slice(offset).replace(/^[\r\n]+/, '')
+        break
+      }
+    }
+  }
   const lines = meta.split('\n')
   const id = value(lines, 'id')
   if (!id) throw new Error('页面缺少 id')
@@ -68,8 +86,8 @@ export function parsePage(content) {
     .split(',')
     .map((tag) => tag.trim())
     .filter(Boolean)
-  const titleLine = markdown.split('\n').find((line) => line.startsWith('# '))
-  const title = titleLine ? titleLine.slice(2) : '无标题'
+  const titleLine = isEncryptedMarkdown(markdown) ? undefined : markdown.split('\n').find((line) => line.startsWith('# '))
+  const title = titleLine ? titleLine.slice(2) : value(lines, 'title') || '无标题'
   const parentRaw = value(lines, 'parent_id')
   return normalizePageSources({
     id,

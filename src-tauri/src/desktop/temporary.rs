@@ -121,6 +121,11 @@ impl TemporaryStore {
         if page.parent_id.is_some() || page.deleted_at.is_some() {
             return Err(unsupported());
         }
+        if tie_storage::local::is_encrypted_markdown(&entry.page.markdown)
+            && !tie_storage::local::is_encrypted_markdown(&page.markdown)
+        {
+            return Err("加密页面处于锁定状态，不能用普通正文覆盖".to_owned());
+        }
         let current = fs::read(&entry.path).map_err(|error| format!("无法读取原 Markdown 文件，不能保存：{error}"))?;
         if let Some(expected) = expected {
             if entry.page.updated_at != expected || current != entry.saved_bytes {
@@ -166,7 +171,8 @@ impl TemporaryFile {
 }
 
 fn markdown_title(markdown: &str, path: &Path) -> String {
-    markdown.trim_start_matches('\u{feff}').lines()
+    let body = if tie_storage::local::is_encrypted_markdown(markdown) { "" } else { markdown };
+    body.trim_start_matches('\u{feff}').lines()
         .find_map(|line| line.strip_prefix("# ").map(str::trim).filter(|title| !title.is_empty()))
         .unwrap_or_else(|| path.file_stem().and_then(|name| name.to_str()).unwrap_or("Markdown"))
         .to_owned()
@@ -237,6 +243,21 @@ mod tests {
         assert!(closed.pages.is_empty() && closed.workspace.sources.is_empty());
         assert_eq!(fs::read_to_string(&path).unwrap(), edited.markdown);
         assert!(TemporaryStore::default().entries.is_empty());
+    }
+
+    #[test]
+    fn encrypted_temporary_markdown_preserves_wrapper_and_rejects_plaintext_overwrite() {
+        let fixture = Fixture::new();
+        let original = "-----BEGIN TIE ENCRYPTED MARKDOWN-----\r\n# Damaged payload heading\r\n";
+        let path = fixture.file("Encrypted document.md", original);
+        let mut store = TemporaryStore::default();
+        store.open(&path, "2026-11-26T00:00:00.000Z").unwrap();
+        let mut page = store.entries[0].page.clone();
+        assert_eq!(page.title, "Encrypted document");
+        assert_eq!(page.markdown, original);
+        page.markdown = "ordinary replacement".into();
+        assert!(store.save(page, None).unwrap_err().contains("锁定"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
     }
 
     #[test]

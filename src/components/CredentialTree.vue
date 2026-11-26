@@ -25,10 +25,10 @@ watch(() => store.showingCredentials, (open) => { if (open) expanded.value = tru
   <section class="credential-tree-section">
     <div class="sidebar-section-title">
       <button type="button" class="credential-section-toggle" :aria-expanded="expanded" @click="toggle">
-        <span aria-hidden="true">{{ expanded ? '▾' : '▸' }}</span> 凭据页面
+        <span aria-hidden="true">{{ expanded ? '▾' : '▸' }}</span> 操作凭据
       </button>
       <small v-if="credentials.entries.length">{{ credentials.entries.length }}</small>
-      <button type="button" aria-label="新建凭据页面" title="新建凭据页面" @click="store.openCredentialPage()">+</button>
+      <button type="button" aria-label="新建操作凭据" title="新建操作凭据" @click="store.openCredentialPage()">+</button>
     </div>
     <div v-if="expanded && backend.connected" class="credential-tree-content">
       <label v-if="credentials.workspaces.length > 1" class="credential-workspace-label">
@@ -47,7 +47,7 @@ watch(() => store.showingCredentials, (open) => { if (open) expanded.value = tru
       </div>
       <p v-if="credentials.loading" role="status">正在读取…</p>
       <p v-else-if="!credentials.entries.length && credentials.query">没有匹配的凭据</p>
-      <button v-else-if="!credentials.entries.length" type="button" class="credential-empty" @click="store.openCredentialPage()">添加第一张凭据页面…</button>
+      <button v-else-if="!credentials.entries.length" type="button" class="credential-empty" @click="store.openCredentialPage()">添加操作凭据…</button>
     </div>
   </section>
 </template>

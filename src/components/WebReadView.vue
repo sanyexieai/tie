@@ -6,6 +6,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { simpleMarkdownToHtml } from '@/services/simple-markdown'
+import { isEncryptedMarkdown } from '@/services/encrypted-markdown'
 
 const store = useWorkspaceStore()
 const pageId = ref<string | null>(null)
@@ -31,6 +32,7 @@ const page = computed(() => {
 
 const bodyHtml = computed(() => {
   if (!page.value) return ''
+  if (isEncryptedMarkdown(page.value.markdown)) return '<p>加密 Markdown · 请返回编辑页面并输入密码解锁。</p>'
   // Strip leading H1 (already shown as title)
   const lines = page.value.markdown.split('\n')
   const withoutTitle = lines[0]?.startsWith('# ') ? lines.slice(1).join('\n').replace(/^\n/, '') : page.value.markdown

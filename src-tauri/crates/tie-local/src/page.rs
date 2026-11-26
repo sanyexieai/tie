@@ -7,6 +7,13 @@ use tie_common::{Page, MAX_PAGE_REVISIONS};
 use std::{collections::HashMap, fs, path::Path};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub const ENCRYPTED_MARKDOWN_PREFIX: &str = "-----BEGIN TIE ENCRYPTED MARKDOWN-----";
+
+/// Recognize the wrapper even when its payload is damaged; storage never interprets it as Markdown.
+pub fn is_encrypted_markdown(markdown: &str) -> bool {
+    markdown.trim_start_matches('\u{feff}').starts_with(ENCRYPTED_MARKDOWN_PREFIX)
+}
+
 pub fn revision_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -109,9 +116,10 @@ pub fn frontmatter(page: &Page) -> String {
         .map(|value| format!("deleted_at: {value}\n"))
         .unwrap_or_default();
     let icon = page.icon.replace(['\n', '\r'], "");
+    let title = page.title.replace(['\n', '\r'], "");
     format!(
-        "---\ntie_version: 1\nid: {}\nparent_id: {}\nsort_key: {}\nicon: {}\ntags: [{}]\ncreated_at: {}\nupdated_at: {}\n{}---\n\n{}",
-        page.id, parent, page.sort_key, icon, tags, page.created_at, page.updated_at, deleted, page.markdown
+        "---\ntie_version: 1\nid: {}\nparent_id: {}\nsort_key: {}\nicon: {}\ntitle: {}\ntags: [{}]\ncreated_at: {}\nupdated_at: {}\n{}---\n\n{}",
+        page.id, parent, page.sort_key, icon, title, tags, page.created_at, page.updated_at, deleted, page.markdown
     )
 }
 
@@ -160,6 +168,9 @@ pub fn is_tie_document(content: &str) -> bool {
 }
 
 fn heading_title(markdown: &str) -> Option<String> {
+    if is_encrypted_markdown(markdown) {
+        return None;
+    }
     markdown.lines().find_map(|line| {
         let title = line.trim_end_matches('\r').strip_prefix("# ")?.trim();
         if title.is_empty() {
@@ -511,6 +522,7 @@ pub fn new_page_id() -> String {
 
 pub fn parse_page(content: &str) -> Result<Page, String> {
     // Accept CRLF checkouts / editors on Windows; writers still emit LF.
+    let original = content;
     let content = content.replace("\r\n", "\n");
     let (_, rest) = content
         .split_once("---\n")
@@ -530,12 +542,21 @@ pub fn parse_page(content: &str) -> Result<Page, String> {
         .filter(|tag| !tag.is_empty())
         .map(str::to_owned)
         .collect();
-    let markdown = markdown.trim_start_matches('\n').to_owned();
-    let title = markdown
-        .lines()
-        .find_map(|line| line.strip_prefix("# "))
-        .unwrap_or("无标题")
-        .to_owned();
+    let mut markdown = markdown.trim_start_matches('\n').to_owned();
+    if is_encrypted_markdown(&markdown) {
+        let mut offset = 0;
+        for (index, line) in original.split_inclusive('\n').enumerate() {
+            offset += line.len();
+            if index > 0 && line.trim_end_matches(['\r', '\n']) == "---" {
+                markdown = original[offset..].trim_start_matches(['\r', '\n']).to_owned();
+                break;
+            }
+        }
+    }
+    let fallback_title = value(&lines, "title");
+    let title = heading_title(&markdown)
+        .or_else(|| (!fallback_title.trim().is_empty()).then_some(fallback_title))
+        .unwrap_or_else(|| "无标题".to_owned());
     let parent_id = value(&lines, "parent_id");
     Ok(normalize_page_sources(Page {
         id,

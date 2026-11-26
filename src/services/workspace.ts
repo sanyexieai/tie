@@ -186,15 +186,15 @@ export const workspaceService = {
   async permanentlyDeletePages(pages: Page[]) {
     await storageRegistry.permanentlyDeletePages(pages)
   },
-  async createPage(parentId: PageId | null, storageSourceId: string): Promise<Page> {
+  async createPage(parentId: PageId | null, storageSourceId: string, initial?: Pick<Page, 'title' | 'markdown'>): Promise<Page> {
     const snapshot = await this.load()
     const page: Page = {
       id: id('pg'),
-      title: '无标题',
+      title: initial?.title ?? '无标题',
       icon: '',
       parentId,
       sortKey: snapshot.pages.filter((item) => item.parentId === parentId).length,
-      markdown: '# 无标题\n\n',
+      markdown: initial?.markdown ?? '# 无标题\n\n',
       tags: [],
       createdAt: now(),
       updatedAt: now(),

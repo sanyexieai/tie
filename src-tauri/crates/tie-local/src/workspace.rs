@@ -1,6 +1,6 @@
 use crate::io::{relocate_page_file_from_path, save_page_to_root};
 use crate::paths::repair_utf8_mojibake;
-use crate::page::{ensure_demo, merge_loaded_pages, normalize_page_sources, open_or_adopt_with_meta_index, PageMetaIndex};
+use crate::page::{ensure_demo, is_encrypted_markdown, merge_loaded_pages, normalize_page_sources, open_or_adopt_with_meta_index, PageMetaIndex};
 use crate::paths::{find_page_file, indexed_page_file};
 use crate::paths::default_workspace_root;
 use crate::settings::{load, save, source_from_path, workspace_sources};
@@ -39,7 +39,7 @@ pub fn load_file_workspace(
             if path.extension().is_some_and(|extension| extension == "md") {
                 let mut page = open_or_adopt_with_meta_index(&root, &path, &source.id, Some(&mut meta_index))?;
                 let title = repair_utf8_mojibake(&page.title);
-                let markdown = repair_utf8_mojibake(&page.markdown);
+                let markdown = if is_encrypted_markdown(&page.markdown) { page.markdown.clone() } else { repair_utf8_mojibake(&page.markdown) };
                 if title != page.title || markdown != page.markdown {
                     page.title = title;
                     page.markdown = markdown;
@@ -233,6 +233,23 @@ mod tests {
         assert!(!old.exists());
         assert_eq!(load_file_workspace(&data, "test").unwrap().pages[0].id, damaged.id);
         let _ = fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn desktop_load_never_repairs_bytes_inside_an_encrypted_wrapper() {
+        let (data, root) = fixture_root("encrypted");
+        let mut document = page("pg_desktop_encrypted", "Encrypted document", None);
+        let damaged = "中文".as_bytes().iter().map(|byte| char::from(*byte)).collect::<String>();
+        document.markdown = format!("{}\n{damaged}\n", crate::ENCRYPTED_MARKDOWN_PREFIX);
+        assert_ne!(repair_utf8_mojibake(&document.markdown), document.markdown);
+        let path = root.join("pages/Encrypted document.md");
+        fs::write(&path, &document.markdown).unwrap();
+        write_page_meta(&root, &document, "pages/Encrypted document.md").unwrap();
+        let loaded = load_file_workspace(&data, "test").unwrap();
+        assert_eq!(loaded.pages[0].markdown, document.markdown);
+        assert_eq!(loaded.pages[0].title, document.title);
+        assert_eq!(fs::read_to_string(path).unwrap(), document.markdown);
+        fs::remove_dir_all(data).unwrap();
     }
 
     #[cfg(unix)]

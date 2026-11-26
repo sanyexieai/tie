@@ -2,6 +2,7 @@
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { PageTreeNode, StorageSource } from '@/types'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
+import { isEncryptedMarkdown } from '@/services/encrypted-markdown'
 import { pageSourceIds, sourceShortLabel } from '@/services/page-sources'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
@@ -379,7 +380,7 @@ onBeforeUnmount(() => {
         <button class="disclosure" :class="{ invisible: !hasChildren }" @click.stop="toggleExpanded" :aria-label="expanded ? '收起子页面' : '展开子页面'">
           {{ expanded ? '▾' : '▸' }}
         </button>
-        <span class="page-glyph">{{ DEFAULT_PAGE_ICON }}</span>
+        <span class="page-glyph" :title="isEncryptedMarkdown(node.markdown) ? '加密 Markdown' : undefined">{{ isEncryptedMarkdown(node.markdown) ? '🔒' : DEFAULT_PAGE_ICON }}</span>
         <span class="tree-title">{{ node.title || '无标题' }}</span>
         <span
           v-if="backendSync"

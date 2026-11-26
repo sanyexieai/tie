@@ -419,14 +419,14 @@ fn tool_defs() -> Vec<Value> {
             "root": { "type": "string", "description": "分类节点 ID 或唯一标题，包含该节点及全部后代；省略时不限定" },
             "exclude": { "type": "array", "items": { "type": "string" }, "description": "忽略这些节点及各自全部后代；优先使用节点 ID" }
         }))),
-        tool("tie_search", "先用 tie_tree 逐级选择知识分类，再按关键词或标签搜索。root 限定相关子树，exclude 忽略无关分支；结果带分类路径。", obj_props(json!({
+        tool("tie_search", "先用 tie_tree 逐级选择知识分类，再按关键词或标签搜索。root 限定相关子树，exclude 忽略无关分支；结果带分类路径。加密页面只检索标题和标签，不检索密文正文。", obj_props(json!({
             "query": { "type": "string" },
             "tag": { "type": "string" },
             "limit": { "type": "integer" },
             "root": { "type": "string", "description": "分类节点 ID 或唯一标题，包含该节点及全部后代；省略时搜索全库" },
             "exclude": { "type": "array", "items": { "type": "string" }, "description": "排除节点及其全部后代；在评分及结果数量限制前裁剪" }
         }))),
-        tool("tie_get", "按页面 id 或精确标题读取全文", obj_props(json!({
+        tool("tie_get", "按页面 id 或精确标题读取全文；加密页面返回 locked: true 和原始密文，不能解密正文", obj_props(json!({
             "id_or_title": { "type": "string" }
         }))),
         tool("tie_history", "列出页面已保存的历史版本，最新在前；每页最多保留 80 份。返回版本 ID、时间和标题，不返回正文。", json!({
@@ -570,6 +570,9 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
                 .resolve(key)?
                 .ok_or_else(|| format!("页面不存在：{key}"))?;
             let mut value = serde_json::to_value(&page).map_err(|error| error.to_string())?;
+            if tie_local::is_encrypted_markdown(&page.markdown) {
+                value["locked"] = json!(true);
+            }
             value["path"] = json!(format!("pages/{}.md", page.id));
             value["backend"] = json!("tie");
             Ok(value)
@@ -594,7 +597,12 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
         "tie_revision_get" => {
             let key = required_str(args, "id_or_title")?;
             let revision_id = required_str(args, "revisionId")?;
-            Ok(json!(ws.get_revision(key, revision_id)?))
+            let revision = ws.get_revision(key, revision_id)?;
+            let mut value = json!(revision);
+            if tie_local::is_encrypted_markdown(&revision.markdown) {
+                value["locked"] = json!(true);
+            }
+            Ok(value)
         }
         "tie_diff" => history::diff(
             ws,
@@ -722,7 +730,12 @@ fn doctor(ws: &LocalWorkspace) -> Result<Value, String> {
 }
 
 fn write_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
-    let markdown = str_owned(args, "markdown").or_else(|| str_owned(args, "body"));
+    let markdown = ["markdown", "body"].into_iter().find_map(|name| {
+        args.get(name).and_then(Value::as_str)
+            .map(|body| if tie_local::is_encrypted_markdown(body) { body } else { body.trim() })
+            .filter(|body| !body.is_empty())
+            .map(str::to_owned)
+    });
     let tags = args.get("tags").and_then(Value::as_array).map(|items| {
         items
             .iter()
@@ -1054,6 +1067,31 @@ fn header_end(buf: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encrypted_markdown_mcp_reads_stay_locked_and_search_metadata_only() {
+        let dir = std::env::temp_dir().join(format!("tie-mcp-encrypted-{}", tie_local::new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_test").unwrap();
+        let encrypted = format!("{}\n{{\"ciphertext\":\"opaque-search-needle\"}}\n-----END TIE ENCRYPTED MARKDOWN-----\n", tie_local::ENCRYPTED_MARKDOWN_PREFIX);
+        let saved = call_tool(&ws, "tie_write", &json!({"title":"Private deployment","markdown":encrypted,"tags":["private"]})).unwrap();
+        let id = saved["page"]["id"].as_str().unwrap();
+        let loaded = call_tool(&ws, "tie_get", &json!({"id_or_title":id})).unwrap();
+        assert_eq!(loaded["locked"], true);
+        assert_eq!(loaded["markdown"], encrypted);
+        let body_search = call_tool(&ws, "tie_search", &json!({"query":"opaque-search-needle"})).unwrap();
+        assert!(body_search["results"].as_array().unwrap().is_empty());
+        let metadata_search = call_tool(&ws, "tie_search", &json!({"query":"deployment","tag":"private"})).unwrap();
+        assert_eq!(metadata_search["results"][0]["snippet"], "已加密，解锁后查看正文");
+        call_tool(&ws, "tie_write", &json!({"pageId":id,"title":"Renamed private deployment"})).unwrap();
+        assert_eq!(ws.get_by_id(id).unwrap().unwrap().markdown, encrypted);
+        assert!(call_tool(&ws, "tie_write", &json!({"pageId":id,"markdown":"ordinary replacement"})).unwrap_err().contains("锁定"));
+        let revision = &ws.list_revisions(id).unwrap()[0];
+        let diff = call_tool(&ws, "tie_diff", &json!({"id_or_title":id,"revisionId":revision.id})).unwrap();
+        assert_eq!(diff["locked"], true);
+        assert_eq!(diff["diff"], "");
+        assert_eq!(diff["changed"], true);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn lists_tie_tools() {

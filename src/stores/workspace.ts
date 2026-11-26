@@ -16,6 +16,7 @@ import { runFileHrefMigrationOnce } from '@/services/workspace-migrations'
 import { workspaceService } from '@/services/workspace'
 import { useBackendStore } from '@/stores/backend'
 import { useCredentialsStore } from '@/stores/credentials'
+import { isEncryptedMarkdown } from '@/services/encrypted-markdown'
 import type { SyncConflict, SyncResult } from '@/services/storage/types'
 import {
   connectSkill,
@@ -62,6 +63,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const showingFavorites = ref(false)
   const showingSkills = ref(false)
   const showingCredentials = ref(false)
+  const showingEncryptedDraft = ref(false)
+  const encryptedDraftSourceId = ref('')
   const showingSkillManager = ref(false)
   const activeSkillId = ref<string | null>(null)
   const skillConnections = ref<SkillConnection[]>([])
@@ -176,12 +179,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .map((page) => {
         const title = page.title.toLocaleLowerCase()
         const tagText = page.tags.join(' ').toLocaleLowerCase()
-        const body = page.markdown.replace(/^# .*\n?/, '').toLocaleLowerCase()
+        const encrypted = isEncryptedMarkdown(page.markdown)
+        const body = encrypted ? '' : page.markdown.replace(/^# .*\n?/, '').toLocaleLowerCase()
         const titleScore = title === query ? 120 : title.startsWith(query) ? 90 : title.includes(query) ? 70 : 0
         const tagScore = tagText.includes(query) ? 45 : 0
         const bodyPosition = body.indexOf(query)
         const bodyScore = bodyPosition >= 0 ? Math.max(10, 35 - Math.min(bodyPosition, 25)) : 0
-        const previewText = page.markdown.replace(/^# .*\n?/, '').replace(/[#>*_~`|()[\]]/g, ' ').replace(/\s+/g, ' ').trim()
+        const previewText = encrypted ? '加密 Markdown · 正文已锁定' : page.markdown.replace(/^# .*\n?/, '').replace(/[#>*_~`|()[\]]/g, ' ').replace(/\s+/g, ' ').trim()
         const originalPosition = previewText.toLocaleLowerCase().indexOf(query)
         const snippet = originalPosition >= 0 ? `${originalPosition > 42 ? '…' : ''}${previewText.slice(Math.max(0, originalPosition - 42), originalPosition + query.length + 72)}${previewText.length > originalPosition + query.length + 72 ? '…' : ''}` : previewText.slice(0, 114)
         const source = allSources.value.find((item) => item.id === page.storageSourceId)
@@ -936,6 +940,24 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return page
   }
 
+  async function openEncryptedPage() {
+    if (editorSaveHandler && !await editorSaveHandler()) return false
+    const sourceId = activePage.value?.storageSourceId
+    encryptedDraftSourceId.value = sourceId && !isTemporaryStorageSourceId(sourceId) ? sourceId : defaultStorageSourceId.value ?? ''
+    clearSpecialViews()
+    showingEncryptedDraft.value = true
+    return true
+  }
+
+  async function createEncryptedPage(title: string, markdown: string, sourceId: string) {
+    if (!isEncryptedMarkdown(markdown)) throw new Error('加密页面只能保存密文')
+    if (!allSources.value.some((source) => source.id === sourceId && !source.temporary)) throw new Error('请先选择一个正式工作区')
+    const page = await workspaceService.createPage(null, sourceId, { title: title.trim() || '无标题', markdown })
+    pages.value = mergePagesById([...pages.value, page])
+    scheduleBackendSync()
+    return page
+  }
+
   function markdownLink(title: string, pageId: PageId) {
     return `[${title.replaceAll('\\', '\\\\').replaceAll('[', '\\[').replaceAll(']', '\\]')}](tie://page/${pageId})`
   }
@@ -1142,6 +1164,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function persistUnlocked(page: Page, options?: { force?: boolean; restore?: boolean; sync?: boolean }) {
     const previous = pages.value.find((item) => item.id === page.id)
+    if (previous && isEncryptedMarkdown(previous.markdown) && !isEncryptedMarkdown(page.markdown)) throw new Error('加密页面不能保存为普通明文')
     // Re-check after acquiring the per-page save lock: queued editor drafts
     // must not resurrect a page that was trashed while they were waiting.
     if (previous?.deletedAt && !page.deletedAt && !options?.restore) {
@@ -1579,6 +1602,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function clearSpecialViews() {
+    showingEncryptedDraft.value = false
     showingCredentials.value = false
     showingTrash.value = false
     showingSearch.value = false
@@ -1783,7 +1807,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, registerEditorSaveHandler, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, pageBackendSync, saving, reloading, initialized, initializationStage, backgroundStarted, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingCredentials, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, initializeBackground, reloadWorkspace, syncBackendSources, syncBackendNow, scheduleBackendSync, backendSyncMode, backendSyncRunning, backendSyncProgress, backendSyncLastCompletedAt, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openCredentialPage, closeCredentialPage, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, registerEditorSaveHandler, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, pageBackendSync, saving, reloading, initialized, initializationStage, backgroundStarted, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingCredentials, showingEncryptedDraft, encryptedDraftSourceId, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, initializeBackground, reloadWorkspace, syncBackendSources, syncBackendNow, scheduleBackendSync, backendSyncMode, backendSyncRunning, backendSyncProgress, backendSyncLastCompletedAt, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, openEncryptedPage, createEncryptedPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openCredentialPage, closeCredentialPage, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })
 
 if (import.meta.hot) {
