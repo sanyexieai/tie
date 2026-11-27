@@ -248,6 +248,11 @@ export function saveWorkspacePage(workspaceId, page, expectedUpdatedAt, context 
   if (currentPath) {
     const current = readFilePage(workspaceId, currentPath)
     previous = current?.page ?? null
+    if (previous && !isEncryptedMarkdown(previous.markdown) && isEncryptedMarkdown(page.markdown ?? '')) {
+      const error = new Error('页面保护模式已改变，请通过页面保护转换同时处理历史、讨论和附件')
+      error.status = 409
+      throw error
+    }
     if (previous && isEncryptedMarkdown(previous.markdown)) {
       if (page.markdown === undefined) page = { ...previous, ...page, markdown: previous.markdown }
       if (!isEncryptedMarkdown(page.markdown)) {

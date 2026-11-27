@@ -184,6 +184,10 @@ impl HttpTransport {
         if let Some(workspace_id) = workspace_id {
             request = request.header("x-tie-workspace", workspace_id);
         }
+        if message.pointer("/params/arguments/password").is_some()
+            || message.pointer("/params/name").and_then(Value::as_str) == Some("tie_page_protection") {
+            request = request.timeout(Duration::from_secs(130));
+        }
         let response = request.send().map_err(|_| {
             "MCP_HTTP_UNREACHABLE: HTTP MCP 请求失败或超时，尚未切换到本地。".to_owned()
         })?;

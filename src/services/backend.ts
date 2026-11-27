@@ -2,6 +2,7 @@ import type { Page, PageRevision, StorageSource } from '@/types'
 import { currentChangeOrigin } from '@/services/change-origin'
 import type { ReviewEntry, ReviewFile } from '@/services/review-service'
 import type { DeviceFileBinding, FileBindingState } from '@/services/storage/file-meta'
+import type { PageProtectionBundle } from '@/services/page-protection-types'
 
 export interface BackendUser {
   id: string
@@ -615,6 +616,14 @@ export const backendService = {
   },
   async listPageRevisions(profile: BackendProfile, workspaceId: string, pageId: string) {
     return request<PageRevision[]>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/revisions`)
+  },
+  async readPageProtection(profile: BackendProfile, workspaceId: string, pageId: string) {
+    return request<PageProtectionBundle>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/protection`)
+  },
+  async replacePageProtection(profile: BackendProfile, workspaceId: string, bundle: PageProtectionBundle, expectedUpdatedAt: string) {
+    return request<Page>(profile, `/api/v1/workspaces/${workspaceId}/pages/${bundle.page.id}/protection`, {
+      method: 'PUT', body: JSON.stringify({ bundle, expectedUpdatedAt }),
+    })
   },
   async listPageReviews(profile: BackendProfile, workspaceId: string, pageId: string) {
     return request<ReviewFile>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}/reviews`)

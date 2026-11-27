@@ -13,9 +13,10 @@ pub(crate) fn sync_resources(
     base: &str,
     token: &str,
     ws: &LocalWorkspace,
+    blocked_pages: &HashSet<String>,
     observe: &mut dyn FnMut(BackendSyncProgress),
 ) -> Result<(), String> {
-    let pages = ws.load_all(true)?;
+    let pages = ws.load_all(true)?.into_iter().filter(|page| !blocked_pages.contains(&page.id)).collect::<Vec<_>>();
     report_progress(observe, BackendSyncStage::Assets, 0, pages.len());
     for (index, page) in pages.iter().enumerate() {
         sync_assets(client, base, token, ws.root(), &page.id)?;
@@ -360,7 +361,7 @@ pub(crate) mod tests {
             respond(&remote_root, request, body)
         });
         let client = Client::builder().no_proxy().build().unwrap();
-        sync_resources(&client, &server.url, "", &local, &mut |_| {}).unwrap();
+        sync_resources(&client, &server.url, "", &local, &HashSet::new(), &mut |_| {}).unwrap();
         assert_eq!(
             fs::read(local_assets.join("download.png")).unwrap(),
             b"download"
@@ -388,7 +389,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         local.files().upsert_metadata(&local_file).unwrap();
-        sync_resources(&client, &server.url, "", &local, &mut |_| {}).unwrap();
+        sync_resources(&client, &server.url, "", &local, &HashSet::new(), &mut |_| {}).unwrap();
         assert_eq!(
             fs::read(copy_path(remote.root(), &local_file).unwrap()).unwrap(),
             b"replacement"
@@ -401,7 +402,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         remote.files().upsert_metadata(&changed_remote).unwrap();
-        sync_resources(&client, &server.url, "", &local, &mut |_| {}).unwrap();
+        sync_resources(&client, &server.url, "", &local, &HashSet::new(), &mut |_| {}).unwrap();
         assert_eq!(
             fs::read(copy_path(local.root(), &changed_remote).unwrap()).unwrap(),
             b"remote replacement"
@@ -410,7 +411,7 @@ pub(crate) mod tests {
         fs::create_dir_all(&folder).unwrap();
         fs::write(folder.join("keep.txt"), b"keep").unwrap();
         let directory = local.files().ingest("copy", &folder, None).unwrap();
-        assert!(sync_resources(&client, &server.url, "", &local, &mut |_| {})
+        assert!(sync_resources(&client, &server.url, "", &local, &HashSet::new(), &mut |_| {})
             .unwrap_err()
             .contains("目录副本尚未同步"));
         assert!(local
@@ -440,7 +441,7 @@ pub(crate) mod tests {
         let remote_root = remote.root().to_owned();
         let server = crate::test_http::Server::start(move |request, body| respond(&remote_root, request, body));
         let client = Client::builder().no_proxy().build().unwrap();
-        sync_resources(&client, &server.url, "", &local, &mut |_| {}).unwrap();
+        sync_resources(&client, &server.url, "", &local, &HashSet::new(), &mut |_| {}).unwrap();
         let merged = local.files().get("file_device").unwrap().unwrap();
         let upstream = remote.files().get("file_device").unwrap().unwrap();
         assert_eq!(merged["deviceBindings"], upstream["deviceBindings"]);
@@ -451,7 +452,7 @@ pub(crate) mod tests {
         left["updatedAt"] = json!("2026-01-01T00:00:03Z");
         local.files().upsert_metadata(&left).unwrap();
         remote.files().upsert_metadata(&right).unwrap();
-        sync_resources(&client, &server.url, "", &local, &mut |_| {}).unwrap();
+        sync_resources(&client, &server.url, "", &local, &HashSet::new(), &mut |_| {}).unwrap();
         let merged = local.files().get("file_device").unwrap().unwrap();
         assert_eq!(tie_local::file_binding_path(&merged, "dev_a").as_deref(), Some("/new/source"));
         assert_eq!(tie_local::file_binding_path(&merged, "dev_b").as_deref(), Some("D:\\Source"));

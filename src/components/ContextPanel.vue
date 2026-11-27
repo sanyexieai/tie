@@ -24,8 +24,11 @@ import { listPageAuditEvents, type AuditEvent } from '@/services/audit'
 import { cancelPheromoneDraft, commitPheromoneDraft, focusPheromone, loadPheromones, PHEROMONE_KIND_LABEL, PHEROMONE_STATUS_LABEL, pheromoneActorLabel, pheromoneState, pheromonesFor, setPheromonePanelOpen, startPheromoneDraft, type Pheromone, type PheromoneKind } from '@/services/pheromone'
 import { CHANGE_FIELD_LABEL, CHANGE_TYPE_LABEL, resolvePageOpinion, reviewOriginDetails, reviewOriginLabel, reviewsForPage, type OpinionStatus } from '@/services/review-service'
 import { isBackendSourceId } from '@/services/backend'
+import { protectedPageAuthorization, protectedPagesRevision, protectedPageView } from '@/services/protected-pages'
+import { isEncryptedMarkdown } from '@/services/encrypted-markdown'
 
 const store = useWorkspaceStore()
+const activePageView = computed(() => store.activePage ? protectedPageView(store.activePage) : null)
 const CONTEXT_TAB_KEY = 'tie.context-tab'
 const contextTabs = ['outline', 'properties', 'links', 'graph', 'audit'] as const
 type ContextTab = (typeof contextTabs)[number]
@@ -53,6 +56,18 @@ const withdrawnCount = computed(() => pheromones.value.filter((item) => item.sta
 const reviewError = ref('')
 const reviewBusy = ref(false)
 const resolutionNotes = ref<Record<string, string>>({})
+watch([
+  () => store.activePage?.storageSourceId,
+  () => store.activePage?.id,
+  () => {
+    void protectedPagesRevision.value
+    const permission = store.activePage && protectedPageAuthorization(store.activePage)
+    return permission ? `${permission.epoch}:${permission.generation}` : null
+  },
+  () => store.activePage && isEncryptedMarkdown(store.activePage.markdown) ? store.activePage.markdown : null,
+], (scope, before) => {
+  if (scope[3] || before[3]) resolutionNotes.value = {}
+}, { flush: 'sync' })
 function reviewExcerpt(markdown: string | undefined) {
   const text = (markdown ?? '').replace(/\s+/g, ' ').trim()
   return text.length > 80 ? `${text.slice(0, 80)}…` : text || '（空）'
@@ -61,7 +76,7 @@ const pheromoneDraft = computed(() => {
   const draft = pheromoneState.draft
   return draft && draft.pageId === store.activePage?.id ? draft : null
 })
-const headings = computed(() => (store.activePage?.markdown.match(/^#{2,6} .+$/gm) ?? []).map((line, index) => ({ index, level: line.indexOf(' '), text: line.replace(/^#+ /, '') })))
+const headings = computed(() => (activePageView.value?.markdown.match(/^#{2,6} .+$/gm) ?? []).map((line, index) => ({ index, level: line.indexOf(' '), text: line.replace(/^#+ /, '') })))
 const outgoing = computed(() => store.activePage ? store.outgoingLinks(store.activePage.id) : [])
 const incoming = computed(() => store.activePage ? store.backlinks(store.activePage.id) : [])
 const mentions = computed(() => store.activePage ? store.unlinkedMentions(store.activePage.id) : [])
@@ -93,7 +108,7 @@ const filesWorkspaceRoot = computed(() => {
 })
 
 const outgoingFiles = computed(() => {
-  const page = store.activePage
+  const page = activePageView.value
   if (!page) return []
   const files = collectFileRefsFromMarkdown(page.markdown).map((ref) => {
     const sourceId = ref.sourceId || page.storageSourceId
@@ -146,8 +161,10 @@ const outgoingFiles = computed(() => {
   return [...files, ...paths]
 })
 
+let fileResourcesRequest = 0
 async function refreshFileResources() {
-  const page = store.activePage
+  const request = ++fileResourcesRequest
+  const page = activePageView.value
   if (!store.backgroundStarted || tab.value !== 'links' || !page) {
     fileResources.value = []
     return
@@ -166,7 +183,7 @@ async function refreshFileResources() {
   }
   try {
     const lists = await Promise.all(sources.map((source) => listRegisteredFiles(source)))
-    if (tab.value !== 'links' || store.activePage?.id !== page.id) return
+    if (request !== fileResourcesRequest || tab.value !== 'links' || store.activePage?.id !== page.id) return
     fileResources.value = lists.flat()
     await Promise.all(pathRefs.map(async (ref) => {
       const source = sourceById(store.allSources, ref.sourceId || page.storageSourceId)
@@ -178,12 +195,12 @@ async function refreshFileResources() {
       }
     }))
   } catch {
-    fileResources.value = []
+    if (request === fileResourcesRequest) fileResources.value = []
   }
 }
 
 watch(
-  [() => store.backgroundStarted, tab, () => store.activePage?.id, () => store.activePage?.markdown, filesWorkspaceRoot],
+  [() => store.backgroundStarted, tab, () => store.activePage?.id, () => activePageView.value?.markdown, filesWorkspaceRoot],
   () => { void refreshFileResources() },
   { immediate: true },
 )
@@ -227,12 +244,14 @@ async function rebindOutgoingFile(file: { id: string; sourceId: string; kind?: s
   }
 }
 
-async function linkMention(sourcePageId: string) {
-  const target = store.activePage
-  if (!target) return
-  linkingMentionId.value = sourcePageId
+async function linkMention(targetPageId: string) {
+  const source = store.activePage
+  if (!source) return
+  linkingMentionId.value = targetPageId
   try {
-    await store.linkUnlinkedMention(sourcePageId, target.id)
+    await store.linkUnlinkedMention(source.id, targetPageId)
+  } catch (reason) {
+    window.alert(reason instanceof Error ? reason.message : '关联页面失败')
   } finally {
     linkingMentionId.value = null
   }
@@ -241,11 +260,12 @@ async function linkMention(sourcePageId: string) {
 async function unlinkPage(pageId: string) {
   const source = store.activePage
   if (!source) return
-  await store.unlinkPageReference(source.id, pageId)
+  try { await store.unlinkPageReference(source.id, pageId) }
+  catch (reason) { window.alert(reason instanceof Error ? reason.message : '移除页面链接失败') }
 }
 
 function quoteStillPresent(quote: string) {
-  const markdown = store.activePage?.markdown ?? ''
+  const markdown = activePageView.value?.markdown ?? ''
   if (markdown.includes(quote)) return true
   return markdown.replace(/\s+/g, ' ').includes(quote)
 }
@@ -322,6 +342,7 @@ onMounted(() => {
   if (pheromoneState.draft || pheromoneState.openRequest > 0) tab.value = 'audit'
 })
 onBeforeUnmount(() => {
+  fileResourcesRequest += 1
   reviewLoad += 1
   window.removeEventListener('tie:reviews-changed', onReviewsChanged)
   setPheromonePanelOpen(false)
@@ -402,7 +423,7 @@ onBeforeUnmount(() => {
         <p v-if="!mentions.length" class="muted">没有检测到未链接的标题提及。</p>
         <div v-for="page in mentions" :key="`mention-${page.id}`" class="mention-row">
           <button title="正文中出现了该页面标题，但尚未建立页面链接" @click="store.openPage(page.id)"><span>⌁</span>{{ page.title }}</button>
-          <button class="mention-link-action" :disabled="linkingMentionId === page.id" :title="`将“${page.title}”中首次提及当前页的文字转换为页面链接`" @click="linkMention(page.id)">{{ linkingMentionId === page.id ? '关联中…' : '关联' }}</button>
+          <button class="mention-link-action" :disabled="linkingMentionId === page.id" :title="`将当前页首次提及“${page.title}”的文字转换为页面链接`" @click="linkMention(page.id)">{{ linkingMentionId === page.id ? '关联中…' : '关联' }}</button>
         </div>
         <p class="mention-hint">正文中出现标题但未建立链接；可在编辑器中输入 [[ 进行关联。</p>
       </section>

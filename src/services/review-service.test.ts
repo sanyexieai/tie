@@ -3,8 +3,11 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { Page } from '@/types'
 import { backendService } from './backend'
 import { useBackendStore } from '@/stores/backend'
-import { addPageOpinion, listPageReviews, resolvePageOpinion, reviewOriginLabel, reviewState, reviewsForPage, type ReviewEntry } from './review-service'
-import { loadPheromones, pheromoneState, pheromonesFor } from './pheromone'
+import { useWorkspaceStore } from '@/stores/workspace'
+import { addPageOpinion, listPageReviews, mergePageReviews, resolvePageOpinion, reviewOriginLabel, reviewState, reviewsForPage, type ReviewEntry } from './review-service'
+import { focusPheromone, loadPheromones, pheromoneState, pheromonesFor, startPheromoneDraft } from './pheromone'
+import { decryptMarkdown, encryptMarkdown, importEncryptionPassword, isEncryptedMarkdown } from './encrypted-markdown'
+import { clearProtectedPages, lockProtectedPage, unlockProtectedPage } from './protected-pages'
 
 const native = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }))
@@ -28,9 +31,10 @@ beforeEach(() => {
     accessExpiresAt: null, user: { id: 'usr_fixture', name: 'Owner', email: 'owner@example.test', createdAt: '' } })
   Object.keys(reviewState.byPage).forEach((key) => delete reviewState.byPage[key])
   pheromoneState.legacyByPage = {}
+  pheromoneState.draft = null
   native.invoke.mockReset()
 })
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+afterEach(() => { clearProtectedPages(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('durable shared reviews', () => {
   it('uses browser review/action endpoints and preserves withdrawal as a durable state', async () => {
@@ -55,6 +59,9 @@ describe('durable shared reviews', () => {
     expect(requests[1]).toMatchObject({ method: 'POST', path: path + '/signals/ph_shared/resolve', body: { status: 'withdrawn', resolutionNote: 'Superseded' } })
     expect(pheromonesFor(page.id, page.storageSourceId)[0]).toMatchObject({ id: opinion.id, status: 'withdrawn', durable: true })
     expect(requests.every((request) => request.method !== 'PUT')).toBe(true)
+    focusPheromone(opinion.id)
+    clearProtectedPages()
+    expect(pheromoneState.activeId).toBe(opinion.id)
   })
 
   it('keeps old local opinions when durable migration fails, and clears only the confirmed copy on retry', async () => {
@@ -132,5 +139,109 @@ describe('durable shared reviews', () => {
     await listPageReviews(temporary)
     expect(native.invoke).toHaveBeenCalledWith('list_page_reviews', { sourceId: temporary.storageSourceId, pageId: temporary.id })
     await expect(addPageOpinion(temporary, { opinionKind: 'support', quote: 'Original', body: 'Yes', baseUpdatedAt: temporary.updatedAt })).rejects.toThrow('临时文件不保存共享意见')
+  })
+})
+
+describe('authorized protected review views', () => {
+  async function fixture() {
+    const key = await importEncryptionPassword('fixture-review-password')
+    const stored = { ...page, markdown: await encryptMarkdown('Original passage.', key) }
+    const store = useWorkspaceStore()
+    store.pages = [stored]
+    store.activePageId = stored.id
+    await unlockProtectedPage(stored, key)
+    return { key, stored, store }
+  }
+
+  it('encrypts every write while exposing quotes, replies, processing and versions only in authorized memory', async () => {
+    const { stored, key, store } = await fixture()
+    const requests: Record<string, unknown>[] = []
+    let entries: ReviewEntry[] = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input, init) => {
+      const body = JSON.parse(String(init?.body || '{}'))
+      requests.push(body)
+      if (String(input).endsWith('/signals')) entries.push({ ...opinion, ...body })
+      else if (String(input).endsWith('/resolve')) entries = entries.map((entry) => entry.id === opinion.id ? { ...entry, ...body } : entry)
+      else if (init?.method === 'PUT') entries.push(...body.entries)
+      return Response.json({ entries })
+    }))
+    await addPageOpinion(stored, { id: opinion.id, opinionKind: 'correction', quote: opinion.quote!, body: opinion.body!, baseUpdatedAt: stored.updatedAt })
+    await addPageOpinion(stored, { id: 'ph_reply', opinionKind: 'support', quote: opinion.quote!, body: 'fixture-private-reply', baseUpdatedAt: stored.updatedAt, replyTo: opinion.id })
+    await resolvePageOpinion(stored, reviewsForPage(stored.id, stored.storageSourceId)[0]!, 'resolved', 'fixture-private-resolution')
+    const version: ReviewEntry = { id: 'v_private', at: '', actor: 'Owner', kind: 'version', status: 'open', markdown: 'fixture-private-version' }
+    await mergePageReviews(stored, [version])
+    expect(requests[0]?.quote).toBe('')
+    expect(isEncryptedMarkdown(String(requests[0]?.body))).toBe(true)
+    expect(JSON.parse(await decryptMarkdown(String(requests[0]?.body), key))).toEqual({ version: 1, quote: opinion.quote, body: opinion.body })
+    expect(isEncryptedMarkdown(String(requests[2]?.resolutionNote))).toBe(true)
+    expect(JSON.stringify(requests)).not.toContain('fixture-private-')
+    expect(JSON.stringify(reviewState.byPage)).not.toContain('fixture-private-')
+    expect(JSON.stringify(reviewState.byPage)).not.toContain(opinion.body)
+    expect(reviewsForPage(stored.id, stored.storageSourceId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: opinion.id, quote: opinion.quote, body: opinion.body, resolutionNote: 'fixture-private-resolution' }),
+      expect.objectContaining({ id: 'ph_reply', replyTo: opinion.id, body: 'fixture-private-reply' }),
+      expect.objectContaining(version),
+    ]))
+    startPheromoneDraft(stored.id, opinion.quote!, 'correction')
+    pheromoneState.draft!.body = 'fixture-unsaved-private-draft'
+    focusPheromone(opinion.id)
+    lockProtectedPage(stored)
+    expect(pheromoneState.draft).toBeNull()
+    expect(pheromoneState.activeId).toBeNull()
+    expect(reviewsForPage(stored.id, stored.storageSourceId)).toEqual([])
+    await expect(addPageOpinion(stored, { opinionKind: 'support', quote: '', body: 'Must not send', baseUpdatedAt: stored.updatedAt })).rejects.toThrow('请先解锁页面')
+    await unlockProtectedPage(stored, await importEncryptionPassword('fixture-review-password'))
+    expect((await listPageReviews(stored)).entries.find((entry) => entry.id === opinion.id)?.body).toBe(opinion.body)
+    store.pages[0] = { ...stored, markdown: await encryptMarkdown('new ciphertext', key) }
+    expect(reviewsForPage(stored.id, stored.storageSourceId)).toEqual([])
+  })
+
+  it('does not recache a decrypt or response completed after a lock or account change', async () => {
+    const { stored } = await fixture()
+    let complete!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(() => new Promise((resolve) => { complete = resolve })))
+    const key = await importEncryptionPassword('fixture-review-password')
+    const { protectReviewEntries } = await import('./protected-review-format')
+    const raw = await protectReviewEntries([opinion], key)
+    let decryptStarted!: () => void
+    let release!: () => void
+    const started = new Promise<void>((resolve) => { decryptStarted = resolve })
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const decrypt = crypto.subtle.decrypt.bind(crypto.subtle)
+    vi.spyOn(crypto.subtle, 'decrypt').mockImplementation(async (...args) => {
+      const result = await decrypt(...args)
+      decryptStarted(); await held
+      return result
+    })
+    const pending = listPageReviews(stored)
+    complete(Response.json({ entries: raw }))
+    await started
+    lockProtectedPage(stored)
+    release()
+    expect((await pending).entries).toEqual([])
+    expect(reviewsForPage(stored.id, stored.storageSourceId)).toEqual([])
+    vi.restoreAllMocks()
+    await unlockProtectedPage(stored, key)
+    const late = listPageReviews(stored)
+    useBackendStore().profile.user!.id = 'usr_another'
+    complete(Response.json({ entries: raw }))
+    await late
+    expect(reviewsForPage(stored.id, stored.storageSourceId)).toEqual([])
+    useBackendStore().profile.user!.id = 'usr_fixture'
+    expect(reviewsForPage(stored.id, stored.storageSourceId)).toEqual([])
+  })
+
+  it('never caches or migrates old plaintext protected discussions', async () => {
+    const { stored } = await fixture()
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ entries: [opinion] }))
+    vi.stubGlobal('fetch', fetcher)
+    await expect(listPageReviews(stored)).rejects.toThrow('意见格式无效')
+    expect(JSON.stringify(reviewState.byPage)).not.toContain(opinion.body)
+    pheromoneState.legacyByPage[stored.id] = [{ id: opinion.id, pageId: stored.id, kind: 'correction', actor: 'Old', quote: opinion.quote!, body: opinion.body!, createdAt: opinion.at }]
+    expect(pheromonesFor(stored.id, stored.storageSourceId)).toEqual([])
+    fetcher.mockResolvedValue(Response.json({ entries: [] }))
+    await loadPheromones(stored)
+    expect(fetcher.mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true)
+    expect(pheromoneState.legacyByPage[stored.id]).toHaveLength(1)
   })
 })

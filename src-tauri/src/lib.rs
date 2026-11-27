@@ -61,7 +61,13 @@ pub fn run() {
         .plugin(saf::init());
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    let builder = match update::updater_builder() {
+        Ok(updater) => builder.plugin(updater.build()),
+        Err(error) => {
+            eprintln!("自动更新暂不可用：{error}");
+            builder
+        }
+    };
 
     builder
         .setup(|_app| {
@@ -77,6 +83,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             launch_files::consume_open_file_paths,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            credentials::page_device_password_load,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            credentials::page_device_password_save,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            credentials::page_device_password_forget,
             update::download_update_file,
             load_mobile_workspace,
             s3::load_s3_provider_metadata,
@@ -124,6 +136,8 @@ pub fn run() {
             saf::pick_native_resource,
             saf::open_native_resource,
             local::commands::list_page_revisions,
+            local::commands::read_page_protection_bundle,
+            local::commands::replace_page_protection_bundle,
             local::commands::read_page_revision,
             local::commands::restore_page_revision,
             local::commands::export_page_markdown,

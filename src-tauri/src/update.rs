@@ -3,6 +3,33 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn updater_builder() -> Result<tauri_plugin_updater::Builder, String> {
+    let builder = tauri_plugin_updater::Builder::new();
+    #[cfg(windows)]
+    let builder = {
+        let executable =
+            std::env::current_exe().map_err(|error| format!("无法确定当前安装位置：{error}"))?;
+        // Windows releases use NSIS. Its /D= override must be last and unquoted,
+        // including when the directory contains spaces.
+        builder
+            .installer_arg("/TIE_CURRENT_INSTALL")
+            .installer_arg(nsis_install_directory_arg(&executable)?)
+    };
+    Ok(builder)
+}
+
+#[cfg(any(windows, test))]
+fn nsis_install_directory_arg(executable: &std::path::Path) -> Result<std::ffi::OsString, String> {
+    let directory = executable
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .ok_or_else(|| "无法确定当前安装位置，请下载安装包手动安装".to_owned())?;
+    let mut argument = std::ffi::OsString::from("/D=");
+    argument.push(directory);
+    Ok(argument)
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DownloadProgressPayload {
@@ -74,4 +101,37 @@ pub async fn download_update_file(
     }
 
     Ok(destination.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nsis_install_directory_arg;
+    use std::{ffi::OsString, path::PathBuf};
+
+    #[test]
+    fn update_uses_the_running_executable_directory_including_spaces_and_unicode() {
+        #[cfg(windows)]
+        let directory = PathBuf::from(r"D:\自定义软件\Tie Installed Here");
+        #[cfg(not(windows))]
+        let directory = PathBuf::from("/custom/自定义软件/Tie Installed Here");
+        let executable = directory.join("tie.exe");
+        let mut expected = OsString::from("/D=");
+        expected.push(&directory);
+        assert_eq!(nsis_install_directory_arg(&executable).unwrap(), expected);
+    }
+
+    #[test]
+    fn missing_install_directory_does_not_fall_back_to_a_default_directory() {
+        assert!(nsis_install_directory_arg(std::path::Path::new("tie.exe")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn update_preserves_a_network_install_directory() {
+        assert_eq!(
+            nsis_install_directory_arg(std::path::Path::new(r"\\fileserver\Apps\Tie\tie.exe"))
+                .unwrap(),
+            OsString::from(r"/D=\\fileserver\Apps\Tie")
+        );
+    }
 }

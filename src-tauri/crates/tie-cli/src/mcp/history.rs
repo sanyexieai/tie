@@ -6,17 +6,29 @@ pub(super) fn diff(
     key: &str,
     revision_id: &str,
     compare_to: Option<&str>,
+    password: Option<&str>,
 ) -> Result<Value, String> {
-    let before = ws.get_revision(key, revision_id)?;
+    let mut before = ws.get_revision(key, revision_id)?;
     let current = ws
         .get_by_id(&before.id)?
         .ok_or_else(|| format!("页面不存在：{key}"))?;
+    let current_encrypted = tie_local::is_encrypted_markdown(&current.markdown);
     let target_id = compare_to.unwrap_or("current");
-    let after = if target_id == "current" {
+    let mut after = if target_id == "current" {
         current.clone()
     } else {
         ws.get_revision(&current.id, target_id)?
     };
+    if let Some(password) = password {
+        if current_encrypted && target_id != "current" {
+            tie_local::encryption::decrypt_markdown(&current.markdown, password)?;
+        }
+        for page in [&mut before, &mut after] {
+            if tie_local::is_encrypted_markdown(&page.markdown) {
+                page.markdown = tie_local::encryption::decrypt_markdown(&page.markdown, password)?;
+            }
+        }
+    }
     let before_value = json!(before);
     let after_value = json!(after);
     let metadata_changes = ["title", "icon", "parentId", "sortKey", "tags", "deletedAt"]
@@ -24,7 +36,7 @@ pub(super) fn diff(
         .filter(|field| before_value[field] != after_value[field])
         .map(|field| json!({ "field": field, "before": before_value[field], "after": after_value[field] }))
         .collect::<Vec<_>>();
-    if tie_local::is_encrypted_markdown(&before.markdown) || tie_local::is_encrypted_markdown(&after.markdown) {
+    if (current_encrypted && password.is_none()) || tie_local::is_encrypted_markdown(&before.markdown) || tie_local::is_encrypted_markdown(&after.markdown) {
         return Ok(json!({
             "pageId": current.id,
             "fromRevisionId": revision_id,

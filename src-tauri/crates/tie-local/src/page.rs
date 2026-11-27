@@ -334,6 +334,15 @@ fn page_from_meta(meta: PageMeta, markdown: String, source_id: &str) -> Page {
 }
 
 pub fn write_page_meta(root: &Path, page: &Page, relative_file: &str) -> Result<(), String> {
+    let text = page_meta_text(page, relative_file)?;
+    let path = page_meta_path(root, &page.id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(path, text).map_err(|error| error.to_string())
+}
+
+pub(crate) fn page_meta_text(page: &Page, relative_file: &str) -> Result<String, String> {
     if !meta_id_ok(&page.id) {
         return Err(format!("页面 id 无效：{}", page.id));
     }
@@ -343,10 +352,6 @@ pub fn write_page_meta(root: &Path, page: &Page, relative_file: &str) -> Result<
         || relative_file.contains('\\')
     {
         return Err("页面相对路径无效".to_owned());
-    }
-    let path = page_meta_path(root, &page.id);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let parent_id = page.parent_id.clone().unwrap_or_default();
     let deleted = page.deleted_at.clone().unwrap_or_default();
@@ -365,7 +370,7 @@ pub fn write_page_meta(root: &Path, page: &Page, relative_file: &str) -> Result<
         page.updated_at,
         deleted
     );
-    fs::write(path, text).map_err(|error| error.to_string())
+    Ok(text)
 }
 
 pub fn remove_page_meta(root: &Path, page_id: &str) {

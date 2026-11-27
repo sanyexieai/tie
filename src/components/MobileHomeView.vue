@@ -163,7 +163,7 @@ async function remove(pageId: string) {
       <span>页面树</span>
       <div class="mobile-home-section-actions">
         <button type="button" :disabled="store.reloading" title="同步" @click="reloadPages">{{ store.reloading ? '…' : '↻' }}</button>
-        <button type="button" aria-label="新建凭据页面" title="新建加密 Markdown 页面" @click="store.openEncryptedPage()">🔒</button>
+        <button type="button" aria-label="新建加密页面" title="新建加密 Markdown 页面" @click="store.openEncryptedPage()">🔒</button>
         <button type="button" title="新建页面" :disabled="creating" @click="createPage">{{ creating ? '…' : '＋' }}</button>
       </div>
     </div>

@@ -846,6 +846,27 @@ pub(crate) fn list_page_revisions(
     io::list_page_revisions(&sources, &page_id, &storage_source_id)
 }
 
+fn protection_workspace(app: &AppHandle, source_id: &str) -> Result<tie_storage::local::LocalWorkspace, String> {
+    let (sources, _) = workspace_sources(app)?;
+    let source = sources.iter().find(|source| source.id == source_id).ok_or("页面所属工作区不存在")?;
+    if crate::saf::is_content_uri(&source.path) { return Err("当前目录授权方式暂不支持页面加密转换，请使用应用内工作区或本地文件夹".into()); }
+    tie_storage::local::LocalWorkspace::open(&source.path, Some(source_id))
+}
+
+#[tauri::command]
+pub(crate) async fn read_page_protection_bundle(app: AppHandle, source_id: String, page_id: String) -> Result<tie_storage::local::ProtectionBundle, String> {
+    tauri::async_runtime::spawn_blocking(move || protection_workspace(&app, &source_id)?.protection_bundle(&page_id))
+        .await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn replace_page_protection_bundle(app: AppHandle, source_id: String, bundle: tie_storage::local::ProtectionBundle, expected_updated_at: Option<String>) -> Result<Page, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let origin = crate::common::settings::app_change_origin(&app)?;
+        tie_storage::local::changes::with_change_context(origin, None, false, || protection_workspace(&app, &source_id)?.replace_page_protection(bundle, expected_updated_at.as_deref()))
+    }).await.map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 pub(crate) fn read_page_revision(
     app: AppHandle,

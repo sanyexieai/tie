@@ -115,7 +115,7 @@ async function renameWorkspace() {
       <button type="button" class="new-page-type-toggle" aria-label="选择页面类型" :aria-expanded="newPageMenuOpen" @click="newPageMenuOpen = !newPageMenuOpen">▾</button>
       <div v-if="newPageMenuOpen" class="new-page-type-menu" role="menu" @keydown.esc="newPageMenuOpen = false">
         <button type="button" role="menuitem" @click="createTopLevel">普通页面</button>
-        <button type="button" role="menuitem" @click="createCredential">凭据页面</button>
+        <button type="button" role="menuitem" @click="createCredential">加密页面</button>
       </div>
     </div>
 

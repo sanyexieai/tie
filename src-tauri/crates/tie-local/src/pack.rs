@@ -37,7 +37,7 @@ fn should_skip(rel: &Path) -> bool {
     matches!(
         first.as_ref(),
         ".git" | "node_modules" | "target" | ".DS_Store"
-    ) || first.ends_with(".tiez")
+    ) || first.ends_with(".tiez") || rel.starts_with(".tie/page-locks")
 }
 
 fn collect_pack_files(root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -273,10 +273,13 @@ mod tests {
         })
         .unwrap();
 
+        fs::create_dir_all(dir.join(".tie/page-locks")).unwrap();
+        fs::write(dir.join(".tie/page-locks/active.lock"), "").unwrap();
         let report = pack_tiez(&dir, &archive).unwrap();
         assert!(report.files >= 2);
         let unpacked = unpack_tiez(&archive, &out).unwrap();
         assert!(out.join("pages").is_dir());
+        assert!(!out.join(".tie/page-locks").exists());
         assert!(unpacked.solution.is_some());
 
         let ws2 = LocalWorkspace::open(&out, Some("src_local_packtest012345")).unwrap();

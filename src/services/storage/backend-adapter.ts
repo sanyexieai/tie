@@ -92,6 +92,19 @@ export const backendStorageAdapter: StorageAdapter = {
     const remote = await backendService.getPage(profile, parseBackendWorkspaceId(page.storageSourceId), page.id)
     return { ...remote, storageSourceId: page.storageSourceId }
   },
+  async readPageProtection(page) {
+    const profile = currentBackendProfile()
+    if (!profile.accessToken) throw new Error('请先连接自定义后台')
+    const bundle = await backendService.readPageProtection(profile, parseBackendWorkspaceId(page.storageSourceId), page.id)
+    return bundle
+  },
+  async replacePageProtection(bundle, expectedUpdatedAt) {
+    const profile = currentBackendProfile()
+    if (!profile.accessToken) throw new Error('请先连接自定义后台')
+    const sourceId = bundle.sourceId ?? bundle.page.storageSourceId
+    const saved = await backendService.replacePageProtection(profile, parseBackendWorkspaceId(sourceId), bundle, expectedUpdatedAt)
+    return { ...saved, storageSourceId: sourceId }
+  },
   async syncSource(sourceId, context?: SyncSourceContext) {
     try {
       const loaded = await this.loadPages(sourceId)

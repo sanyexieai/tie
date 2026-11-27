@@ -247,9 +247,9 @@ export const storageRegistry = {
   },
 
   async transferPageCrossAdapter(page: Page, targetSourceId: string): Promise<Page> {
-    const { listPageReviews, mergePageReviews } = await import('@/services/review-service')
+    const { readPageReviewStorage, mergePageReviewStorage } = await import('@/services/review-service')
     const reviews = isFileSourceId(page.storageSourceId) || isBackendSourceId(page.storageSourceId)
-      ? await listPageReviews(page) : { entries: [] }
+      ? await readPageReviewStorage(page) : { entries: [] }
     if (reviews.entries.length && !isFileSourceId(targetSourceId) && !isBackendSourceId(targetSourceId)) {
       throw new Error('目标存储源不支持共享变更与讨论，请选择本地工作区或服务器')
     }
@@ -258,7 +258,7 @@ export const storageRegistry = {
     await targetAdapter.savePage(transferred, { writeSourceId: targetSourceId, force: true })
     await this.copyPageHistory(page, page.storageSourceId, targetSourceId)
     await this.copyPageAssets(page, page.storageSourceId, targetSourceId)
-    if (reviews.entries.length) await mergePageReviews(transferred, reviews.entries)
+    if (reviews.entries.length) await mergePageReviewStorage(transferred, reviews.entries)
     for (const sourceId of pageSourceIds(page).filter((id) => id !== targetSourceId)) {
       try {
         await this.resolve(sourceId).permanentlyDeletePages(sourceId, [{ ...page, storageSourceId: sourceId }])

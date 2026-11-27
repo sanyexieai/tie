@@ -7,6 +7,7 @@ import { callVaultTool, isVaultTool, vaultTools } from './vault-mcp.js'
 import { requestChangeOrigin } from './change-origin.js'
 
 const LOCAL_FILE_TOOLS = new Set(['tie_file_ingest', 'tie_file_open_hint', 'tie_export', 'tie_import'])
+const INTERNAL_PROTECTION_TOOLS = new Set(['tie_internal_protection_read', 'tie_internal_protection_replace'])
 
 export function mcpStatus() {
   const settings = loadSettings()
@@ -166,6 +167,11 @@ export async function handleMcpRequest(req, res, jwtSecret) {
     })
     return
   }
+  if (message.method === 'tools/call' && INTERNAL_PROTECTION_TOOLS.has(message.params?.name)) {
+    res.json({ jsonrpc: '2.0', id: message.id ?? null, result: { isError: true,
+      content: [{ type: 'text', text: '此接口不属于公共 MCP 工具；页面保护转换请使用 tie_page_protection 并提供本次调用的解锁密码。' }] } })
+    return
+  }
   if (message.method === 'tools/call' && isVaultTool(message.params?.name)) {
     const result = await callVaultTool({ userId: caller.userId, workspaceId: workspace.id, principal: caller.principal }, message.params.name, message.params.arguments)
     if (caller.touch) touchMcpToken(caller.touch)
@@ -175,7 +181,8 @@ export async function handleMcpRequest(req, res, jwtSecret) {
   const workspaceDir = store.workspaceDir(workspace.id)
   try {
     const origin = requestChangeOrigin(req, { userId: caller.userId, actor: caller.userName, clientName: caller.clientName })
-    const response = await exchangeWithTie(status.cli, ['--workspace', workspaceDir, 'mcp'], message, 20000, {
+    const protectionCall = message.method === 'tools/call' && (message.params?.name === 'tie_page_protection' || message.params?.arguments?.password !== undefined)
+    const response = await exchangeWithTie(status.cli, ['--workspace', workspaceDir, 'mcp'], message, protectionCall ? 120000 : 20000, {
       TIE_CHANGE_ORIGIN: JSON.stringify(origin),
     })
     if (message.method === 'tools/list' && Array.isArray(response.result?.tools)) {

@@ -16,7 +16,8 @@ import { runFileHrefMigrationOnce } from '@/services/workspace-migrations'
 import { workspaceService } from '@/services/workspace'
 import { useBackendStore } from '@/stores/backend'
 import { useCredentialsStore } from '@/stores/credentials'
-import { isEncryptedMarkdown } from '@/services/encrypted-markdown'
+import { encryptMarkdown, isEncryptedMarkdown, lockAllWorkspaceEncryption } from '@/services/encrypted-markdown'
+import { cacheProtectedPage, clearProtectedPages, protectedPageAuthorization, protectedPageView } from '@/services/protected-pages'
 import type { SyncConflict, SyncResult } from '@/services/storage/types'
 import {
   connectSkill,
@@ -51,6 +52,8 @@ function pageIsLocalOnly(page: Pick<Page, 'storageSourceId' | 'storageSourceIds'
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   const backend = useBackendStore()
+  function protectionAccountKey() { return JSON.stringify([backend.profile.endpoint, backend.profile.user?.id, Boolean(backend.profile.accessToken)]) }
+  watch(protectionAccountKey, () => { clearProtectedPages(); lockAllWorkspaceEncryption() }, { flush: 'sync' })
   const workspace = ref<Workspace | null>(null)
   const pages = ref<Page[]>([])
   const activePageId = ref<PageId | null>(null)
@@ -167,7 +170,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const links = computed<PageLink[]>(() => {
     const linkPattern = /\]\(tie:\/\/page\/([A-Za-z0-9_-]+)\)/g
     return pages.value.filter((page) => !page.deletedAt).flatMap((page) => {
-      const matches = [...page.markdown.matchAll(linkPattern)]
+      const view = protectedPageView(page)
+      const matches = [...(view?.markdown ?? '').matchAll(linkPattern)]
       return matches.map((match) => ({ fromPageId: page.id, toPageId: match[1] }))
     })
   })
@@ -179,13 +183,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .map((page) => {
         const title = page.title.toLocaleLowerCase()
         const tagText = page.tags.join(' ').toLocaleLowerCase()
-        const encrypted = isEncryptedMarkdown(page.markdown)
-        const body = encrypted ? '' : page.markdown.replace(/^# .*\n?/, '').toLocaleLowerCase()
+        const view = protectedPageView(page)
+        const body = view?.markdown.replace(/^# .*\n?/, '').toLocaleLowerCase() ?? ''
         const titleScore = title === query ? 120 : title.startsWith(query) ? 90 : title.includes(query) ? 70 : 0
         const tagScore = tagText.includes(query) ? 45 : 0
         const bodyPosition = body.indexOf(query)
         const bodyScore = bodyPosition >= 0 ? Math.max(10, 35 - Math.min(bodyPosition, 25)) : 0
-        const previewText = encrypted ? '加密 Markdown · 正文已锁定' : page.markdown.replace(/^# .*\n?/, '').replace(/[#>*_~`|()[\]]/g, ' ').replace(/\s+/g, ' ').trim()
+        const previewText = view ? view.markdown.replace(/^# .*\n?/, '').replace(/[#>*_~`|()[\]]/g, ' ').replace(/\s+/g, ' ').trim() : '正文已锁定'
         const originalPosition = previewText.toLocaleLowerCase().indexOf(query)
         const snippet = originalPosition >= 0 ? `${originalPosition > 42 ? '…' : ''}${previewText.slice(Math.max(0, originalPosition - 42), originalPosition + query.length + 72)}${previewText.length > originalPosition + query.length + 72 ? '…' : ''}` : previewText.slice(0, 114)
         const source = allSources.value.find((item) => item.id === page.storageSourceId)
@@ -952,7 +956,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function createEncryptedPage(title: string, markdown: string, sourceId: string) {
     if (!isEncryptedMarkdown(markdown)) throw new Error('加密页面只能保存密文')
     if (!allSources.value.some((source) => source.id === sourceId && !source.temporary)) throw new Error('请先选择一个正式工作区')
+    const account = protectionAccountKey()
     const page = await workspaceService.createPage(null, sourceId, { title: title.trim() || '无标题', markdown })
+    if (account !== protectionAccountKey()) return page
     pages.value = mergePagesById([...pages.value, page])
     scheduleBackendSync()
     return page
@@ -1055,14 +1061,16 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function linkUnlinkedMention(sourcePageId: PageId, targetPageId: PageId) {
-    const source = pages.value.find((page) => page.id === sourcePageId && !page.deletedAt)
+    const source = await pageForLinkWrite(sourcePageId)
     const target = pages.value.find((page) => page.id === targetPageId && !page.deletedAt)
     if (!source || !target || source.id === target.id) return false
+    const view = protectedPageView(source)
+    if (!view) throw new Error('请先解锁页面')
     const escapedTitle = target.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     if (!escapedTitle) return false
     const mentionPattern = new RegExp(escapedTitle)
     const protectedLinkPattern = /(\[[^\]]*\]\(tie:\/\/page\/[A-Za-z0-9_-]+\))/g
-    const parts = source.markdown.split(protectedLinkPattern)
+    const parts = view.markdown.split(protectedLinkPattern)
     let linked = false
     const markdown = parts.map((part, index) => {
       if (linked || index % 2 === 1) return part
@@ -1071,18 +1079,51 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       return part.replace(mentionPattern, markdownLink(target.title, target.id))
     }).join('')
     if (!linked) return false
-    await persist({ ...source, markdown })
+    await persistLinkedPage(source, markdown)
     return true
   }
 
   async function unlinkPageReference(sourcePageId: PageId, targetPageId: PageId) {
-    const source = pages.value.find((page) => page.id === sourcePageId && !page.deletedAt)
+    const source = await pageForLinkWrite(sourcePageId)
     const target = pages.value.find((page) => page.id === targetPageId && !page.deletedAt)
     if (!source || !target) return false
-    const markdown = unlinkPageMarkdownReference(source.markdown, targetPageId)
-    if (markdown === source.markdown) return false
-    await persist({ ...source, markdown })
+    const view = protectedPageView(source)
+    if (!view) throw new Error('请先解锁页面')
+    const markdown = unlinkPageMarkdownReference(view.markdown, targetPageId)
+    if (markdown === view.markdown) return false
+    await persistLinkedPage(source, markdown)
     return true
+  }
+
+  async function pageForLinkWrite(pageId: PageId) {
+    const current = pages.value.find((page) => page.id === pageId && !page.deletedAt)
+    if (current && isEncryptedMarkdown(current.markdown) && editorSaveHandler) {
+      if (!await editorSaveHandler()) return undefined
+      return pages.value.find((page) => page.id === pageId && !page.deletedAt)
+    }
+    return current
+  }
+
+  async function persistLinkedPage(source: Page, markdown: string) {
+    if (!isEncryptedMarkdown(source.markdown)) {
+      await persist({ ...source, markdown })
+      return
+    }
+    const permission = protectedPageAuthorization(source)!
+    const key = permission.key
+    const account = protectionAccountKey()
+    const authorized = () => {
+      const current = protectedPageAuthorization(source)
+      return account === protectionAccountKey() && current?.key === key && current.ciphertext === permission.ciphertext
+        && current.generation === permission.generation && current.epoch === permission.epoch
+    }
+    const ciphertext = await encryptMarkdown(markdown, key)
+    if (!authorized()) throw new Error('页面解锁已取消，请重新解锁')
+    const current = pages.value.find((page) => page.id === source.id && page.storageSourceId === source.storageSourceId && !page.deletedAt)
+    if (!current || current.markdown !== source.markdown) throw new Error('页面已更新，请重新载入后再修改链接')
+    await persist({ ...current, markdown: ciphertext })
+    const saved = pages.value.find((page) => page.id === source.id && page.storageSourceId === source.storageSourceId && !page.deletedAt)
+    if (saved?.markdown === ciphertext && authorized()) cacheProtectedPage(saved, { ...saved, markdown }, key)
   }
 
   function registerSyncConflict(pageId: PageId, sourceId: string, localUpdatedAt: string, remoteUpdatedAt: string) {
@@ -1792,8 +1833,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   function unlinkedMentions(pageId: PageId) {
     const page = pageById(pageId)
     if (!page) return []
+    const view = protectedPageView(page)
+    if (!view) return []
     const linkedPageIds = new Set(outgoingLinks(pageId).map((linked) => linked.id))
-    const text = page.markdown
+    const text = view.markdown
       .replace(/```[\s\S]*?```/g, ' ')
       .replace(/!?\[[^\]]*\]\([^)]*\)/g, ' ')
       .toLocaleLowerCase()

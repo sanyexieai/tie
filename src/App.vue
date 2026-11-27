@@ -4,10 +4,11 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import AppSidebar from '@/components/AppSidebar.vue'
 import ContextPanel from '@/components/ContextPanel.vue'
-import DocumentEditor from '@/components/DocumentEditor.vue'
+import PageEditor from '@/components/PageEditor.vue'
+import CreateEncryptedPageDialog from '@/components/CreateEncryptedPageDialog.vue'
 import CredentialPage from '@/components/CredentialPage.vue'
-import EncryptedDocumentEditor from '@/components/EncryptedDocumentEditor.vue'
-import { isEncryptedMarkdown, lockAllWorkspaceEncryption } from '@/services/encrypted-markdown'
+import { lockAllWorkspaceEncryption } from '@/services/encrypted-markdown'
+import { clearProtectedPages } from '@/services/protected-pages'
 import MobileHomeView from '@/components/MobileHomeView.vue'
 import MobileStackShell from '@/components/MobileStackShell.vue'
 import TrashView from '@/components/TrashView.vue'
@@ -71,10 +72,8 @@ let resizeStartX = 0
 let resizeStartWidth = 0
 
 const usesMobileShell = computed(() => isMobileLayout.value || isMobileClient.value || usesMobileUi.value)
-const encryptedView = computed(() => store.showingEncryptedDraft || (Boolean(store.activePage && isEncryptedMarkdown(store.activePage.markdown))
-  && !store.showingCredentials && !store.showingSearch && !store.showingGraph && !store.showingRecent && !store.showingFavorites && !store.showingSkills && !store.showingTags && !store.showingTrash))
 const encryptionAccount = computed(() => `${backend.profile.endpoint}\n${backend.profile.user?.id ?? ''}`)
-watch(encryptionAccount, () => { lockAllWorkspaceEncryption(); mobileContextOpen.value = false })
+watch(encryptionAccount, () => { lockAllWorkspaceEncryption(); store.showingEncryptedDraft = false; mobileContextOpen.value = false })
 
 const shellStyle = computed(() => {
   const mobileShell = usesMobileShell.value
@@ -85,7 +84,7 @@ const shellStyle = computed(() => {
 })
 
 const showSidebarResize = computed(() => !focusMode.value && !sidebarCollapsed.value && !usesMobileShell.value)
-const showContextResize = computed(() => !store.showingCredentials && !encryptedView.value && !focusMode.value && !contextCollapsed.value && !usesContextDrawer.value)
+const showContextResize = computed(() => !store.showingCredentials && !focusMode.value && !contextCollapsed.value && !usesContextDrawer.value)
 
 const mobileOnHome = computed(() => (
   !store.activePageId
@@ -184,7 +183,7 @@ function endResize(event: PointerEvent) {
 
 function toggleSidebar() { sidebarCollapsed.value = !sidebarCollapsed.value }
 function toggleContextPanel() {
-  if (store.showingCredentials || encryptedView.value) return
+  if (store.showingCredentials) return
   if (usesContextDrawer.value) {
     mobileContextOpen.value = !mobileContextOpen.value
     return
@@ -448,6 +447,7 @@ watch(
 
 onBeforeUnmount(() => {
   lockAllWorkspaceEncryption()
+  clearProtectedPages()
   nativeWorkspaceReady = false
   unlistenOpenFiles?.()
   document.body.classList.remove('panel-resizing')
@@ -470,7 +470,7 @@ onBeforeUnmount(() => {
     class="app-shell"
     :class="{
       'sidebar-collapsed': sidebarCollapsed,
-      'context-collapsed': contextCollapsed || store.showingCredentials || encryptedView,
+      'context-collapsed': contextCollapsed || store.showingCredentials,
       'focus-mode': focusMode,
       'mobile-shell': usesMobileShell,
       'mobile-client': isMobileClient || usesMobileUi,
@@ -479,13 +479,6 @@ onBeforeUnmount(() => {
     :style="shellStyle"
   >
   <WebReadView v-if="webReadMode" />
-  <template v-else-if="encryptedView">
-    <button v-if="sidebarCollapsed && !usesMobileShell && !focusMode" class="mobile-sidebar-toggle" aria-label="打开侧边栏" @click="toggleSidebar">☰</button>
-    <AppSidebar v-if="!usesMobileShell && !focusMode" @close="toggleSidebar" @open-storage-settings="storageSettingsOpen = true" />
-    <EncryptedDocumentEditor :key="`${encryptionAccount}:${store.showingEncryptedDraft ? 'new' : store.activePageId}`"
-      :page="store.showingEncryptedDraft ? null : store.activePage" :source-id="store.showingEncryptedDraft ? store.encryptedDraftSourceId : store.activePage?.storageSourceId || ''"
-      :mobile-layout="usesMobileShell" @toggle-sidebar="toggleSidebar" @toggle-focus="toggleFocusMode" @mobile-back="goMobileHome" />
-  </template>
   <template v-else-if="store.showingCredentials">
     <button v-if="sidebarCollapsed && !usesMobileShell && !focusMode" class="mobile-sidebar-toggle" aria-label="打开侧边栏" @click="toggleSidebar">☰</button>
     <AppSidebar v-if="!usesMobileShell && !focusMode" @close="toggleSidebar" @open-storage-settings="storageSettingsOpen = true" />
@@ -525,7 +518,7 @@ onBeforeUnmount(() => {
       <MobileStackShell v-else-if="store.showingTrash" title="回收站" @back="goMobileHome">
         <TrashView />
       </MobileStackShell>
-      <DocumentEditor
+      <PageEditor
         v-else
         mobile-layout
         @mobile-back="goMobileHome"
@@ -562,7 +555,7 @@ onBeforeUnmount(() => {
     <SkillsView v-else-if="store.showingSkills" />
     <TagView v-else-if="store.showingTags" />
     <TrashView v-else-if="store.showingTrash" />
-    <DocumentEditor v-else @toggle-sidebar="toggleSidebar" @toggle-focus="toggleFocusMode" @toggle-context="toggleContextPanel" />
+    <PageEditor v-else @toggle-sidebar="toggleSidebar" @toggle-focus="toggleFocusMode" @toggle-context="toggleContextPanel" />
     <div
       v-if="showContextResize"
       class="panel-resize-handle panel-resize-handle-context"
@@ -582,6 +575,7 @@ onBeforeUnmount(() => {
     <ContextPanel v-if="mobileContextOpen" class="mobile-context-panel" @close="mobileContextOpen = false" />
   </template>
 
+    <CreateEncryptedPageDialog v-if="store.showingEncryptedDraft" @close="store.showingEncryptedDraft = false" />
     <CommandPalette v-if="store.showingCommandPalette" />
     <BackendConnectionDialog v-if="backendDialogOpen || browserTempOffer" :startup-prompt="backend.servers.some((server) => server.defaultPrompt) && !backend.connected" :offer-temporary="browserTempOffer" @close="backendDialogOpen = false; browserTempOffer = false" @temporary-settled="browserTempOffer = false" />
     <StorageSettingsDialog v-if="storageSettingsOpen" @close="storageSettingsOpen = false" @connect-backend="backendDialogOpen = true; storageSettingsOpen = false" />

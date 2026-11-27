@@ -111,6 +111,17 @@ export const fileStorageAdapter: StorageAdapter = {
     const loaded = await this.loadPages(page.storageSourceId)
     return loaded.pages.find((item) => item.id === page.id) ?? null
   },
+  async readPageProtection(page) {
+    if (!(await isTauri())) throw new Error('文件存储仅支持客户端')
+    if (isTemporaryStorageSourceId(page.storageSourceId)) throw new Error('请先将临时文件导入正式工作区后转换')
+    return invoke('read_page_protection_bundle', { sourceId: page.storageSourceId, pageId: page.id })
+  },
+  async replacePageProtection(bundle, expectedUpdatedAt) {
+    if (!(await isTauri())) throw new Error('文件存储仅支持客户端')
+    const saved = await invoke<Page>('replace_page_protection_bundle', { sourceId: bundle.sourceId ?? bundle.page.storageSourceId, bundle, expectedUpdatedAt })
+    syncQueue.removeForPage(saved.id)
+    return saved
+  },
   async renameSource(sourceId, name) {
     if (!(await isTauri())) throw new Error('文件存储仅支持桌面端')
     await invoke<StorageSource>('rename_storage_source', { sourceId, name })

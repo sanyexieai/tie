@@ -32,6 +32,47 @@ function assetKey(pageId: string, assetName: string) {
   return `asset:${pageId}:${assetName}`
 }
 
+export async function readBrowserPageAssets(pageId: string): Promise<{ name: string; bytes: Uint8Array }[]> {
+  const prefix = `asset:${pageId}:`
+  const keys = new Set([...memoryBlobs.keys()].filter((key) => key.startsWith(prefix)))
+  if (typeof indexedDB !== 'undefined') {
+    const db = await openDb()
+    try {
+      const stored = await new Promise<IDBValidKey[]>((resolve, reject) => {
+        const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAllKeys()
+        request.onsuccess = () => resolve(request.result)
+        request.onerror = () => reject(request.error)
+      })
+      for (const key of stored) if (typeof key === 'string' && key.startsWith(prefix)) keys.add(key)
+    } finally { db.close() }
+  }
+  return Promise.all([...keys].sort().map(async (key) => {
+    const bytes = await getBlob(key)
+    if (!bytes) throw new Error('无法读取页面图片')
+    return { name: key.slice(prefix.length), bytes }
+  }))
+}
+
+export async function replaceBrowserPageAssets(pageId: string, assets: { name: string; bytes: Uint8Array }[]): Promise<void> {
+  const prefix = `asset:${pageId}:`
+  const previous = await readBrowserPageAssets(pageId)
+  if (typeof indexedDB !== 'undefined') {
+    const db = await openDb()
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite')
+        const store = tx.objectStore(STORE_NAME)
+        for (const asset of previous) store.delete(assetKey(pageId, asset.name))
+        for (const asset of assets) store.put(Uint8Array.from(asset.bytes).buffer, assetKey(pageId, asset.name))
+        tx.oncomplete = () => resolve()
+        tx.onerror = tx.onabort = () => reject(tx.error ?? new Error('页面图片转换失败'))
+      })
+    } finally { db.close() }
+  }
+  for (const key of memoryBlobs.keys()) if (key.startsWith(prefix)) memoryBlobs.delete(key)
+  for (const asset of assets) memoryBlobs.set(assetKey(pageId, asset.name), cloneBytes(asset.bytes))
+}
+
 function hydrateIndex() {
   if (indexHydrated) return
   indexHydrated = true

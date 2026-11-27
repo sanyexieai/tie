@@ -1,7 +1,10 @@
-import { reactive } from 'vue'
+import { reactive, watch } from 'vue'
 import type { Page } from '@/types'
 import { clientKindLabel, isGenericChangeActor, resolveClientLabel } from '@/services/change-origin'
 import { addPageOpinion, listPageReviews, reviewOriginLabel, reviewsForPage, type OpinionKind, type OpinionStatus, type ReviewEntry, type ReviewFile } from '@/services/review-service'
+import { useWorkspaceStore } from '@/stores/workspace'
+import { isEncryptedMarkdown } from '@/services/encrypted-markdown'
+import { protectedPageAuthorization, protectedPageKey, protectedPagesRevision } from '@/services/protected-pages'
 
 export type PheromoneKind = OpinionKind
 export interface Pheromone {
@@ -55,6 +58,22 @@ export const pheromoneState = reactive({
   clientLabel: clientKindLabel(),
   agent: rememberedAgent(),
 })
+interface PrivateScope { page: Page; authorization: NonNullable<ReturnType<typeof protectedPageAuthorization>> }
+let privateDraft: PrivateScope | null = null
+let privateActive: PrivateScope | null = null
+function currentPrivateScope(scope: PrivateScope) {
+  const page = useWorkspaceStore().pages.find((page) => page.id === scope.page.id && page.storageSourceId === scope.page.storageSourceId)
+  const permission = page && protectedPageAuthorization(page)
+  return Boolean(permission && permission.key === scope.authorization.key && permission.ciphertext === scope.authorization.ciphertext
+    && permission.generation === scope.authorization.generation && permission.epoch === scope.authorization.epoch)
+}
+watch(protectedPagesRevision, () => {
+  if (privateDraft && !currentPrivateScope(privateDraft)) cancelPheromoneDraft()
+  if (privateActive && !currentPrivateScope(privateActive)) {
+    pheromoneState.activeId = null
+    privateActive = null
+  }
+}, { flush: 'sync' })
 export function pheromoneActorLabel(item: Pick<Pheromone, 'actor' | 'origin'>) {
   return reviewOriginLabel(item.origin, item.actor)
 }
@@ -70,7 +89,9 @@ export function pheromonesFor(pageId: string, sourceId: string): Pheromone[] {
     resolutionNote: item.resolutionNote, appliedUpdatedAt: item.appliedUpdatedAt, durable: true,
   }))
   const known = new Set(durable.map((item) => item.id))
-  const legacy = (pheromoneState.legacyByPage[pageId] ?? []).filter((item) => !known.has(item.id)).map((item) => ({ ...item, origin: null, status: 'open' as const, durable: false }))
+  const page = useWorkspaceStore().pages.find((page) => page.id === pageId && page.storageSourceId === sourceId)
+  const legacy = page && (isEncryptedMarkdown(page.markdown) || protectedPageKey(page)) ? []
+    : (pheromoneState.legacyByPage[pageId] ?? []).filter((item) => !known.has(item.id)).map((item) => ({ ...item, origin: null, status: 'open' as const, durable: false }))
   return [...durable, ...legacy].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
 }
 export function pheromoneRevision(pageId: string, sourceId: string) {
@@ -78,6 +99,7 @@ export function pheromoneRevision(pageId: string, sourceId: string) {
 }
 export async function loadPheromones(page: Page): Promise<ReviewFile> {
   let file = await listPageReviews(page)
+  if (isEncryptedMarkdown(page.markdown) || protectedPageKey(page)) return file
   for (const item of [...(pheromoneState.legacyByPage[page.id] ?? [])]) {
     let saved = file.entries.find((entry) => entry.id === item.id)
     if (!saved) {
@@ -100,10 +122,17 @@ function revealChangesPanel() {
   window.dispatchEvent(new CustomEvent('tie:show-changes'))
 }
 export function startPheromoneDraft(pageId: string, quote: string, kind: PheromoneKind, replyTo?: string) {
+  const page = useWorkspaceStore().activePage
+  privateDraft = null
+  if (page?.id === pageId && (isEncryptedMarkdown(page.markdown) || protectedPageKey(page))) {
+    const authorization = protectedPageAuthorization(page)
+    if (!authorization) return
+    privateDraft = { page, authorization }
+  }
   pheromoneState.draft = { pageId, quote, kind, agent: pheromoneState.agent, body: '', ...(replyTo ? { replyTo } : {}) }
   revealChangesPanel()
 }
-export function cancelPheromoneDraft() { pheromoneState.draft = null }
+export function cancelPheromoneDraft() { pheromoneState.draft = null; privateDraft = null }
 export async function commitPheromoneDraft(page: Page) {
   const draft = pheromoneState.draft
   if (!draft || draft.pageId !== page.id || !draft.body.trim()) return false
@@ -114,10 +143,15 @@ export async function commitPheromoneDraft(page: Page) {
   pheromoneState.agent = agent
   try { localStorage.setItem('tie.pheromone.agent', agent) } catch { /* Keep the current selection in memory. */ }
   pheromoneState.activeId = [...file.entries].reverse().find((item) => item.kind === 'opinion')?.id ?? null
-  if (pheromoneState.draft === draft) pheromoneState.draft = null
+  const permission = protectedPageAuthorization(page)
+  privateActive = permission ? { page, authorization: permission } : null
+  if (pheromoneState.draft === draft) cancelPheromoneDraft()
   return true
 }
 export function focusPheromone(id: string) {
   pheromoneState.activeId = id
+  const page = useWorkspaceStore().activePage
+  const permission = page && protectedPageAuthorization(page)
+  privateActive = page && permission ? { page, authorization: permission } : null
   revealChangesPanel()
 }

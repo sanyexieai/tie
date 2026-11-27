@@ -30,6 +30,7 @@ import { mountAdmin } from './admin.js'
 import { fileURLToPath } from 'node:url'
 import { assertResourceId } from './resource-id.js'
 import { mountVault } from './vault-routes.js'
+import { readPageProtection, replacePageProtection } from './page-protection.js'
 
 export function createApp(options = {}) {
   const jwtSecret = resolveJwtSecret(options)
@@ -47,7 +48,8 @@ export function createApp(options = {}) {
     }
     next()
   })
-  app.use(express.json({ limit: '12mb' }))
+  app.use('/api/v1/workspaces/:workspaceId/pages/:pageId/protection', express.json({ limit: '128mb' }))
+  app.use(express.json({ limit: '48mb' }))
   for (const name of ['pageId', 'revisionId']) {
     app.param(name, (_req, res, next, value) => {
       try {
@@ -364,6 +366,22 @@ app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/revisions', auth, async (
   try {
     res.json(await workspaceStorage.listRevisions(workspace, req.params.pageId))
   } catch (error) { handleError(res, error) }
+})
+
+app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/protection', auth, async (req, res) => {
+  res.set('Cache-Control', 'no-store')
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try { res.json(await readPageProtection(workspace, req.params.pageId)) }
+  catch (error) { handleError(res, error) }
+})
+
+app.put('/api/v1/workspaces/:workspaceId/pages/:pageId/protection', auth, async (req, res) => {
+  res.set('Cache-Control', 'no-store')
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  try { res.json(await replacePageProtection(workspace, req.params.pageId, req.body, changeContext(req))) }
+  catch (error) { handleError(res, error) }
 })
 
 app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/revisions/:revisionId', auth, async (req, res) => {

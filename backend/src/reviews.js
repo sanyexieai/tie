@@ -4,9 +4,12 @@ import { notifyWorkspace } from './live.js'
 import { store } from './store.js'
 import crypto from 'node:crypto'
 import { getWorkspacePage } from './workspace-pages.js'
+import { isEncryptedMarkdown } from './page-format.js'
 
 const STATUS_RANK = { open: 0, dropped: 1, kept: 1, final: 2 }
 const OPINION_STATUS_RANK = { open: 0, resolved: 1, adopted: 2, withdrawn: 3 }
+const CONTENT_FIELDS = ['quote', 'body', 'markdown', 'resolutionNote']
+const MAX_ENCRYPTED_REVIEW_BYTES = 128 * 1024
 
 function assertPageId(pageId) {
   const id = String(pageId ?? '')
@@ -58,6 +61,8 @@ export function mergeReviewEntries(current, incoming) {
 }
 
 export function saveMergedReviews(workspaceId, pageId, incoming) {
+  const next = Array.isArray(incoming) ? incoming : []
+  validateProtectedReviews(workspaceId, pageId, next)
   const file = reviewsFile(workspaceId, pageId)
   fs.mkdirSync(path.dirname(file), { recursive: true })
   const lock = file.replace(/\.json$/, '.lock')
@@ -73,7 +78,8 @@ export function saveMergedReviews(workspaceId, pageId, incoming) {
   const temporary = `${file}.${crypto.randomUUID()}.tmp`
   try {
     const current = readReviews(workspaceId, pageId)
-    const entries = mergeReviewEntries(current.entries, Array.isArray(incoming) ? incoming : [])
+    const entries = mergeReviewEntries(current.entries, next)
+    validateProtectedReviews(workspaceId, pageId, entries)
     fs.writeFileSync(temporary, `${JSON.stringify({ entries }, null, 2)}\n`)
     fs.renameSync(temporary, file)
     notifyWorkspace(workspaceId)
@@ -110,12 +116,29 @@ function invalid(message) {
   return error
 }
 
+function validateProtectedReviews(workspaceId, pageId, entries) {
+  const content = entries.flatMap((entry) => CONTENT_FIELDS.map((field) => entry?.[field])).filter((value) => value != null && value !== '')
+  if (!content.length) return
+  let page
+  try { page = getWorkspacePage(workspaceId, pageId) }
+  catch (error) { if (error.message === '页面不存在') return; throw error }
+  if (!isEncryptedMarkdown(page.markdown)) return
+  if (content.some((value) => typeof value !== 'string' || !isEncryptedMarkdown(value))) {
+    throw invalid('加密页面的讨论内容需要先解锁并加密后保存')
+  }
+  if (content.some((value) => Buffer.byteLength(value) > MAX_ENCRYPTED_REVIEW_BYTES)) throw invalid('加密讨论内容不能超过 128 KiB')
+}
+
+function contentLimit(value, plainLimit) {
+  return isEncryptedMarkdown(value) ? Buffer.byteLength(value) <= MAX_ENCRYPTED_REVIEW_BYTES : value.length <= plainLimit
+}
+
 export function addPageSignal(workspaceId, pageId, input, origin) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw invalid('信息素内容无效')
   const page = getWorkspacePage(workspaceId, pageId)
   if (!['support', 'objection', 'correction'].includes(input.opinionKind)) throw invalid('信息素类型无效')
-  if (typeof input.body !== 'string' || !input.body.trim() || input.body.length > 100000) throw invalid('信息素内容不能为空或过长')
-  if (input.quote != null && (typeof input.quote !== 'string' || input.quote.length > 20000)) throw invalid('引用内容无效')
+  if (typeof input.body !== 'string' || !input.body.trim() || !contentLimit(input.body, 100000)) throw invalid('信息素内容不能为空或过长')
+  if (input.quote != null && (typeof input.quote !== 'string' || !contentLimit(input.quote, 20000))) throw invalid('引用内容无效')
   if (input.baseUpdatedAt != null && (typeof input.baseUpdatedAt !== 'string' || input.baseUpdatedAt.length > 100)) throw invalid('引用版本无效')
   if (input.actor != null && (typeof input.actor !== 'string' || input.actor.length > 240 || /[\r\n\0]/.test(input.actor))) throw invalid('意见来源无效')
   if (input.actor?.trim()) origin = { ...origin, actor: input.actor.trim() }
@@ -123,11 +146,11 @@ export function addPageSignal(workspaceId, pageId, input, origin) {
   if (input.replyTo && !current.entries.some((item) => item.id === input.replyTo && item.kind === 'opinion')) throw invalid('回复的信息素不存在')
   const id = input.id || `op_${crypto.randomUUID().replaceAll('-', '')}`
   if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw invalid('信息素 id 无效')
-  if (current.entries.some((item) => item.id === id)) return current
+  if (current.entries.some((item) => item.id === id)) { validateProtectedReviews(workspaceId, pageId, [input]); return current }
   const at = new Date().toISOString()
   return saveMergedReviews(workspaceId, pageId, [{
     id, kind: 'opinion', pageId, status: 'open', at, updatedAt: at,
-    opinionKind: input.opinionKind, quote: input.quote || '', body: input.body.trim(),
+    opinionKind: input.opinionKind, quote: input.quote || '', body: isEncryptedMarkdown(input.body) ? input.body : input.body.trim(),
     baseUpdatedAt: input.baseUpdatedAt || page.updatedAt, replyTo: input.replyTo || null,
     actor: origin?.actor || origin?.clientName || '来源未记录', origin,
   }])
@@ -136,7 +159,7 @@ export function addPageSignal(workspaceId, pageId, input, origin) {
 export function resolvePageSignal(workspaceId, pageId, id, input, origin) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw invalid('处理状态无效')
   if (!['resolved', 'adopted', 'withdrawn'].includes(input.status)) throw invalid('处理状态无效')
-  if (input.resolutionNote != null && (typeof input.resolutionNote !== 'string' || input.resolutionNote.length > 20000)) throw invalid('处理说明无效')
+  if (input.resolutionNote != null && (typeof input.resolutionNote !== 'string' || !contentLimit(input.resolutionNote, 20000))) throw invalid('处理说明无效')
   const current = readReviews(workspaceId, pageId)
   const signal = current.entries.find((item) => item.kind === 'opinion' && item.id === id)
   if (!signal) throw invalid('信息素不存在')

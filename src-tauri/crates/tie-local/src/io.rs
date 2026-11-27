@@ -22,12 +22,38 @@ pub fn source_root(sources: &[StorageSource], storage_source_id: &str) -> Result
     Ok(PathBuf::from(&source.path))
 }
 
+struct PageLock(PathBuf);
+impl Drop for PageLock {
+    fn drop(&mut self) { let _ = fs::remove_file(&self.0); }
+}
+
+pub(crate) fn with_page_lock<T>(root: &Path, page_id: &str, run: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    validate_history_component(page_id, "页面 ID")?;
+    let directory = root.join(".tie/page-locks");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let path = directory.join(format!("{page_id}.lock"));
+    let started = std::time::Instant::now();
+    let _lock = loop {
+        match fs::OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(_) => break PageLock(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && started.elapsed() < std::time::Duration::from_secs(5) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(error) => return Err(format!("页面正忙或无法写入：{error}")),
+        }
+    };
+    run()
+}
+
 /// Write a page into a single workspace root (shared by Tauri multi-source and CLI).
 pub fn save_page_to_root(
     root: &std::path::Path,
     page: Page,
     expected_updated_at: Option<&str>,
 ) -> Result<Page, String> {
+    let id = page.id.clone();
+    with_page_lock(root, &id, || save_page_to_root_locked(root, page, expected_updated_at))
+}
+
+fn save_page_to_root_locked(root: &Path, page: Page, expected_updated_at: Option<&str>) -> Result<Page, String> {
     let mut page = normalize_page_sources(page);
     page.title = repair_utf8_mojibake(&page.title);
     if !is_encrypted_markdown(&page.markdown) {
@@ -38,8 +64,8 @@ pub fn save_page_to_root(
     let mut previous_page = None;
     if let Some(path) = &previous_path {
         if let Ok(previous) = read_stored_page(root, path) {
-            if is_encrypted_markdown(&previous.markdown) && !is_encrypted_markdown(&page.markdown) {
-                return Err("加密页面处于锁定状态，不能用普通正文覆盖".to_owned());
+            if is_encrypted_markdown(&previous.markdown) != is_encrypted_markdown(&page.markdown) {
+                return Err("[PROTECTION_REQUIRED] 页面保护状态不同，锁定保护禁止直接覆盖，请解锁并使用页面转换".to_owned());
             }
             previous_page = Some(previous.clone());
             if let Some(expected) = expected_updated_at {

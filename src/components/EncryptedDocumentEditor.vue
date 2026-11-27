@@ -1,304 +1,258 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { LockKeyhole } from '@lucide/vue'
-import TiptapEditor from '@/components/TiptapEditor.vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import DocumentEditor from '@/components/DocumentEditor.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
-import { decryptMarkdown, encryptMarkdown, getWorkspaceEncryptionKey, importEncryptionPassword, isEncryptedMarkdown, lockWorkspaceEncryption, setWorkspaceEncryptionKey } from '@/services/encrypted-markdown'
-import type { Page, PageRevision } from '@/types'
+import { useBackendStore } from '@/stores/backend'
+import { decryptMarkdown, encryptMarkdown, isEncryptedMarkdown, getWorkspaceEncryptionKey, importEncryptionPassword, lockWorkspaceEncryption, setWorkspaceEncryptionKey } from '@/services/encrypted-markdown'
+import { cacheProtectedPage, decryptProtectedSnapshot, lockProtectedPage, protectedPageAuthorization, protectedPageKey, protectedPageView } from '@/services/protected-pages'
+import { deviceUnlockAvailable, forgetDevicePagePassword, loadDevicePagePassword, saveDevicePagePassword } from '@/services/page-device-unlock'
+import { workspaceService } from '@/services/workspace'
+import type { DocumentSession } from '@/services/document-session'
+import type { Page } from '@/types'
+import { pageContentEqual } from '@/services/page-sources'
 
-const props = defineProps<{ page?: Page | null; sourceId: string; mobileLayout?: boolean }>()
-const emit = defineEmits<{ 'toggle-sidebar': []; 'toggle-focus': []; 'mobile-back': [] }>()
+const props = defineProps<{ page: Page; mobileLayout?: boolean }>()
+const emit = defineEmits<{ 'toggle-sidebar': []; 'toggle-focus': []; 'toggle-context': []; 'mobile-back': [] }>()
 const store = useWorkspaceStore()
-const title = ref(props.page?.title ?? '')
-const markdown = ref('')
+const backend = useBackendStore()
+const editor = ref<InstanceType<typeof DocumentEditor> | null>(null)
+const view = shallowRef<Page | null>(protectedPageView(props.page))
 const password = ref('')
-const confirmation = ref('')
-const selectedSourceId = ref(props.page?.storageSourceId || props.sourceId)
-const sourceMode = ref(false)
-const unlocked = ref(false)
+const remember = ref(false)
+const remembered = ref(false)
 const opening = ref(false)
-const saving = ref(false)
+const busy = ref(false)
 const error = ref('')
-const baseline = ref('')
-const richEditor = ref<InstanceType<typeof TiptapEditor> | null>(null)
-const historyOpen = ref(false)
-const revisions = ref<PageRevision[]>([])
-const preview = ref<{ revision: PageRevision; markdown: string } | null>(null)
-const historyLoading = ref(false)
-const remoteChanged = ref(false)
-const sources = computed(() => store.allSources.filter((source) => !source.temporary && source.available !== false))
-const source = computed(() => sources.value.find((item) => item.id === selectedSourceId.value))
-const isNew = computed(() => !props.page)
-const dirty = computed(() => unlocked.value && JSON.stringify([title.value, markdown.value]) !== baseline.value)
-const status = computed(() => opening.value ? '正在解锁…' : saving.value ? '保存中…' : error.value ? '操作失败' : !unlocked.value ? '已锁定' : dirty.value ? '未保存' : props.page ? '已保存' : '新建页面')
-const wordCount = computed(() => markdown.value.replace(/\s/g, '').length)
-let key: CryptoKey | undefined
-let lastCiphertext = props.page?.markdown ?? ''
-let disposed = false
+const dirty = ref(false)
+const deviceAvailable = deviceUnlockAvailable()
+const scope = computed(() => JSON.stringify([backend.profile.endpoint, backend.profile.user?.id ?? '', props.page.storageSourceId, props.page.id]))
 let generation = 0
-let saveTimer: ReturnType<typeof setTimeout> | undefined
-type Draft = { title: string; markdown: string; key: CryptoKey; page: Page | null; sourceId: string }
-let pendingDraft: Draft | null = null
-let saveTask: Promise<boolean> | null = null
-let savingFingerprint = ''
-let savingTitle = ''
-let remoteDecrypting = 0
+let disposed = false
+let key: CryptoKey | undefined = protectedPageKey(props.page)
+let savedCipher = props.page.markdown
+let savingCipher = ''
+let refreshing = false
 
-async function openWithKey(candidate: CryptoKey) {
+function currentContext(expectedScope: string, expectedGeneration: number) {
+  return !disposed && scope.value === expectedScope && generation === expectedGeneration
+}
+
+function authorized(page: Page, permission: NonNullable<ReturnType<typeof protectedPageAuthorization>>, expectedScope: string) {
+  const current = protectedPageAuthorization(page)
+  return scope.value === expectedScope && current?.key === permission.key && current.ciphertext === permission.ciphertext
+    && current.generation === permission.generation && current.epoch === permission.epoch
+}
+
+async function open(candidate: CryptoKey, expectedScope = scope.value, expectedGeneration = generation) {
+  if (!currentContext(expectedScope, expectedGeneration)) return
   const current = ++generation
-  const wasUnlocked = unlocked.value
-  const previousDraft = JSON.stringify([title.value, markdown.value])
-  const body = props.page ? await decryptMarkdown(props.page.markdown, candidate) : ''
-  if (disposed || current !== generation) return
-  if (wasUnlocked && previousDraft !== JSON.stringify([title.value, markdown.value])) {
-    remoteChanged.value = true
-    error.value = '页面已更新，重新载入后再编辑；当前草稿尚未覆盖新版本。'
-    return
-  }
+  const snapshot = props.page
+  const markdown = await decryptMarkdown(snapshot.markdown, candidate)
+  if (!currentContext(expectedScope, current) || props.page.markdown !== snapshot.markdown) return
+  const plain = { ...snapshot, markdown }
+  cacheProtectedPage(snapshot, plain, candidate)
   key = candidate
-  title.value = props.page?.title ?? title.value
-  markdown.value = body
-  baseline.value = JSON.stringify([title.value, body])
-  unlocked.value = true
-  remoteChanged.value = false
-  setWorkspaceEncryptionKey(selectedSourceId.value, candidate)
+  view.value = plain
+  savedCipher = snapshot.markdown
+  error.value = ''
+  setWorkspaceEncryptionKey(snapshot.storageSourceId, candidate)
 }
 
 async function unlock() {
-  error.value = ''
-  if (!selectedSourceId.value) { error.value = '请先选择一个工作区'; return }
-  if (isNew.value && password.value !== confirmation.value) { error.value = '两次密码不一致'; return }
-  opening.value = true
-  try { await openWithKey(await importEncryptionPassword(password.value)) }
-  catch (reason) { if (!disposed) error.value = reason instanceof Error ? reason.message : '无法解锁页面' }
-  finally { password.value = ''; confirmation.value = ''; opening.value = false }
-}
-
-function changed() {
-  if (saveTimer) clearTimeout(saveTimer)
-  if (remoteDecrypting) {
-    remoteChanged.value = true
-    error.value = '页面已更新，重新载入后再编辑；当前草稿尚未覆盖新版本。'
-    return
-  }
-  if (props.page) saveTimer = setTimeout(() => { void save() }, 650)
-}
-
-function save(): Promise<boolean> {
-  if (saveTimer) clearTimeout(saveTimer)
-  if (!unlocked.value || !key || (!dirty.value && props.page)) return saveTask ?? Promise.resolve(true)
-  if (remoteChanged.value) return Promise.resolve(false)
-  const name = title.value.trim() || '无标题'
-  if (saveTask && JSON.stringify([name, markdown.value]) === savingFingerprint && !pendingDraft) return saveTask
-  pendingDraft = { title: name, markdown: markdown.value, key, page: props.page ?? null, sourceId: selectedSourceId.value }
-  if (!saveTask) saveTask = flushSaves().finally(() => { saveTask = null })
-  return saveTask
-}
-
-async function flushSaves() {
-  saving.value = true
-  error.value = ''
+  opening.value = true; error.value = ''
+  const currentScope = scope.value
+  const current = generation
+  const entered = password.value
   try {
-    while (pendingDraft) {
-      const draft: Draft = pendingDraft
-      pendingDraft = null
-      savingFingerprint = JSON.stringify([draft.title, draft.markdown])
-      savingTitle = draft.title
-      const ciphertext = await encryptMarkdown(draft.markdown, draft.key)
-      lastCiphertext = ciphertext
-      if (draft.page) await store.persist({ ...draft.page, title: draft.title, markdown: ciphertext })
-      else {
-        title.value = draft.title
-        baseline.value = savingFingerprint
-        const created = await store.createEncryptedPage(draft.title, ciphertext, draft.sourceId)
-        if (!disposed) { unregisterSave(); store.openPage(created.id) }
-      }
-      if (!disposed) baseline.value = JSON.stringify([draft.title, draft.markdown])
+    const candidate = await importEncryptionPassword(entered)
+    await open(candidate, currentScope, current)
+    if (!disposed && view.value && remember.value && currentScope === scope.value) {
+      await saveDevicePagePassword(currentScope, entered)
+      if (!disposed) remembered.value = true
     }
-    return true
-  } catch (reason) {
-    pendingDraft = null
-    if (!disposed) error.value = reason instanceof Error ? reason.message : '加密页面保存失败'
-    return false
-  } finally { saving.value = false; savingFingerprint = ''; savingTitle = '' }
+  } catch (reason) { if (!disposed) error.value = reason instanceof Error ? reason.message : '无法解锁页面' }
+  finally { password.value = ''; opening.value = false }
 }
 
-async function lock() {
-  if (!await save()) return
-  lockWorkspaceEncryption(selectedSourceId.value)
-  clearPlaintext()
+async function forgetDevice() {
+  error.value = ''; opening.value = true
+  const currentScope = scope.value
+  const current = ++generation
+  try { await forgetDevicePagePassword(currentScope); if (currentContext(currentScope, current)) { remembered.value = false; remember.value = false } }
+  catch (reason) { if (currentContext(currentScope, current)) error.value = reason instanceof Error ? reason.message : '无法清除本机解锁凭据' }
+  finally { if (currentContext(currentScope, current)) opening.value = false }
 }
 
-function clearPlaintext() {
+async function save(page: Page, force = false) {
+  const candidate = key
+  const current = generation
+  const raw = props.page
+  const accountScope = scope.value
+  if (!candidate || !view.value) throw new Error('请先解锁页面')
+  const permittedView = { ...view.value }
+  const permission = protectedPageAuthorization(permittedView)
+  if (!permission || permission.key !== candidate) throw new Error('请先解锁页面')
+  if (!force && (raw.markdown !== savedCipher || !pageContentEqual({ ...raw, markdown: view.value.markdown }, view.value))) throw new Error('页面已在其他设备更新，请重新载入后再保存')
+  busy.value = true
+  try {
+    const ciphertext = raw.markdown === savedCipher && page.markdown === view.value.markdown ? raw.markdown : await encryptMarkdown(page.markdown, candidate)
+    if (!authorized(permittedView, permission, accountScope)) throw new Error('页面已锁定，请重新解锁后保存')
+    const latest = store.pages.find((item) => item.id === raw.id && item.storageSourceId === raw.storageSourceId)
+    if (!force && (!latest || latest.markdown !== raw.markdown || !pageContentEqual(latest, raw))) throw new Error('页面已在其他设备更新，请重新载入后再保存')
+    savingCipher = ciphertext
+    await store.persist({ ...raw, title: page.title, tags: page.tags, markdown: ciphertext }, { force })
+    const stored = store.pages.find((item) => item.id === page.id && item.storageSourceId === page.storageSourceId)
+    if (stored && stored.markdown === ciphertext && authorized(permittedView, permission, accountScope)) {
+      const plain = { ...stored, markdown: page.markdown }
+      cacheProtectedPage(stored, plain, candidate)
+      if (!disposed && current === generation) { savedCipher = ciphertext; view.value = plain; error.value = '' }
+    }
+  } finally { busy.value = false; savingCipher = '' }
+}
+
+async function refresh(isCurrent = () => true) {
+  const candidate = key
+  const current = ++generation
+  const currentScope = scope.value
+  if (!candidate) throw new Error('请先解锁页面')
+  refreshing = true
+  try {
+    const latest = await store.refreshPage(props.page.id)
+    if (!currentContext(currentScope, current) || !isCurrent()) return
+    const raw = latest ?? store.pages.find((item) => item.id === props.page.id)
+    if (!raw) throw new Error('页面不存在')
+    const markdown = await decryptMarkdown(raw.markdown, candidate)
+    if (!currentContext(currentScope, current) || !isCurrent() || props.page.markdown !== raw.markdown) return
+    const plain = { ...raw, markdown }
+    cacheProtectedPage(raw, plain, candidate)
+    view.value = plain; savedCipher = raw.markdown; error.value = ''
+  } finally { refreshing = false }
+}
+
+async function createPage(title: string, parentId: string | null) {
+  const candidate = key
+  const current = generation
+  if (!candidate || !view.value) throw new Error('请先解锁页面')
+  const permittedView = { ...view.value }
+  const permission = protectedPageAuthorization(permittedView)
+  const accountScope = scope.value
+  const sourceId = props.page.storageSourceId
+  if (!permission || permission.key !== candidate) throw new Error('请先解锁页面')
+  const cleanTitle = title.trim() || '无标题'
+  const markdown = `# ${cleanTitle}\n\n`
+  const ciphertext = await encryptMarkdown(markdown, candidate)
+  if (!authorized(permittedView, permission, accountScope)) throw new Error('页面已锁定，请重新解锁后创建')
+  const created = await workspaceService.createPage(parentId, sourceId, { title: cleanTitle, markdown: ciphertext })
+  if (!authorized(permittedView, permission, accountScope)) throw new Error('解锁状态已变化，请重新打开页面')
+  store.pages.push(created)
+  store.expandPage(props.page.id)
+  store.scheduleBackendSync()
+  const plain = { ...created, markdown }
+  if (!disposed && current === generation) cacheProtectedPage(created, plain, candidate)
+  return plain
+}
+
+function lock() {
   generation += 1
-  unlocked.value = false
-  key = undefined
-  markdown.value = ''; password.value = ''; confirmation.value = ''; baseline.value = ''
-  preview.value = null; historyOpen.value = false
+  lockProtectedPage(props.page)
+  lockWorkspaceEncryption(props.page.storageSourceId)
+  view.value = null; key = undefined; password.value = ''; error.value = ''
 }
 
-async function openHistory() {
-  if (!props.page) return
-  historyOpen.value = !historyOpen.value
-  if (!historyOpen.value) { preview.value = null; return }
-  historyLoading.value = true; error.value = ''
-  try { const result = await store.listPageRevisions(props.page.id); if (!disposed) revisions.value = result }
-  catch (reason) { if (!disposed) error.value = reason instanceof Error ? reason.message : '无法读取历史' }
-  finally { historyLoading.value = false }
+const session: DocumentSession = {
+  get page() { return view.value ?? { ...props.page, markdown: '' } },
+  get locked() { return !view.value },
+  get busy() { return busy.value },
+  get error() { return error.value },
+  save,
+  refresh,
+  async latest() {
+    const latest = await store.readLatestPage(props.page.id)
+    return latest ? decryptProtectedSnapshot(latest) : null
+  },
+  async readRevision(id) {
+    const snapshot = await store.readPageRevision(props.page.id, id)
+    if (!snapshot || !isEncryptedMarkdown(snapshot.markdown)) throw new Error('无法读取未加密的历史版本')
+    return decryptProtectedSnapshot(snapshot)
+  },
+  async restoreRevision(id) {
+    const snapshot = await store.readPageRevision(props.page.id, id)
+    if (!snapshot || !isEncryptedMarkdown(snapshot.markdown)) throw new Error('无法恢复未加密的历史版本')
+    const plain = await decryptProtectedSnapshot(snapshot)
+    await save({ ...props.page, title: plain.title, tags: plain.tags, markdown: plain.markdown })
+  },
+  createPage,
+  lock,
 }
 
-async function previewRevision(revision: PageRevision) {
-  if (!props.page || !key) return
-  const current = generation
-  error.value = ''
+watch(() => props.page, async (next) => {
+  if (!key || refreshing || next.markdown === savingCipher) return
+  const cached = protectedPageView(next)
+  if (cached) { if (!busy.value && !dirty.value) view.value = cached; return }
+  if (dirty.value || busy.value) { error.value = '页面已在其他设备更新，请重新载入后再保存'; return }
+  const current = ++generation
+  const candidate = key
   try {
-    const snapshot = await store.readPageRevision(props.page.id, revision.id)
-    if (!snapshot || !isEncryptedMarkdown(snapshot.markdown)) throw new Error('该版本不是加密页面，无法在这里恢复')
-    const body = await decryptMarkdown(snapshot.markdown, key)
-    if (!disposed && unlocked.value && current === generation) preview.value = { revision, markdown: body }
-  } catch (reason) { if (!disposed) error.value = reason instanceof Error ? reason.message : '无法读取历史' }
-}
-
-async function restoreRevision() {
-  if (!props.page || !preview.value || !await save()) return
-  const current = generation
-  error.value = ''
-  try {
-    const snapshot = await store.readPageRevision(props.page.id, preview.value.revision.id)
-    if (!snapshot || !isEncryptedMarkdown(snapshot.markdown)) throw new Error('无法恢复未加密的版本')
-    const body = await decryptMarkdown(snapshot.markdown, key!)
-    if (disposed || !unlocked.value || current !== generation) return
-    lastCiphertext = snapshot.markdown
-    await store.persist({ ...props.page, markdown: snapshot.markdown, title: snapshot.title, tags: snapshot.tags })
-    if (!disposed && unlocked.value && current === generation) {
-      title.value = snapshot.title; markdown.value = body; lastCiphertext = snapshot.markdown
-      baseline.value = JSON.stringify([snapshot.title, body]); preview.value = null; historyOpen.value = false
-    }
-  } catch (reason) { if (!disposed) error.value = reason instanceof Error ? reason.message : '恢复失败' }
-}
-
-function onKey(event: KeyboardEvent) {
-  if (!(event.ctrlKey || event.metaKey)) return
-  if (event.key.toLowerCase() === 's') { event.preventDefault(); event.stopImmediatePropagation(); void save() }
-  if (event.key === '/') { event.preventDefault(); event.stopImmediatePropagation(); if (unlocked.value) sourceMode.value = !sourceMode.value }
-}
-function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value || saving.value) { event.preventDefault(); event.returnValue = '' } }
-const unregisterSave = store.registerEditorSaveHandler(save)
-watch(() => props.page?.title, (name) => {
-  if (name === undefined || name === title.value) return
-  if (saving.value && name === savingTitle && props.page?.markdown === lastCiphertext) return
-  if (dirty.value || saving.value) {
-    remoteChanged.value = true
-    error.value = '页面标题已更新，请重新载入后继续编辑。'
-  } else {
-    title.value = name
-    if (unlocked.value) baseline.value = JSON.stringify([name, markdown.value])
-  }
+    const plain = await decryptProtectedSnapshot(next)
+    if (disposed || current !== generation) return
+    if (dirty.value) { error.value = '页面已在其他设备更新，请重新载入后再保存'; return }
+    cacheProtectedPage(next, plain, candidate)
+    view.value = plain; savedCipher = next.markdown
+  } catch (reason) { if (!disposed) error.value = reason instanceof Error ? reason.message : '无法解锁更新后的页面' }
 })
-watch(() => props.page?.markdown, (ciphertext) => {
-  if (!ciphertext || ciphertext === lastCiphertext || !unlocked.value) return
-  if (dirty.value || saving.value) {
-    remoteChanged.value = true
-    error.value = '页面已更新，重新载入后再编辑；当前草稿尚未覆盖新版本。'
-  } else if (key) {
-    remoteDecrypting += 1
-    void openWithKey(key).catch((reason) => {
-      if (disposed) return
-      if (dirty.value) remoteChanged.value = true
-      else clearPlaintext()
-      error.value = reason instanceof Error ? reason.message : '无法解锁更新后的页面'
-    }).finally(() => { remoteDecrypting -= 1 })
-  }
-})
+
 onMounted(async () => {
-  window.addEventListener('keydown', onKey, true)
-  window.addEventListener('beforeunload', beforeUnload)
-  const candidate = getWorkspaceEncryptionKey(selectedSourceId.value)
-  if (candidate) {
-    opening.value = true
-    try { await openWithKey(candidate) }
-    catch { if (!disposed) error.value = '请输入此页面的解锁密码' }
-    finally { opening.value = false }
-  }
+  if (view.value) return
+  opening.value = true
+  const currentScope = scope.value
+  try {
+    const cached = getWorkspaceEncryptionKey(props.page.storageSourceId)
+    if (cached) { try { await open(cached, currentScope); return } catch { /* A page may use a different password. */ } }
+    if (deviceAvailable) {
+      const current = generation
+      const stored = await loadDevicePagePassword(currentScope)
+      if (currentContext(currentScope, current) && stored) {
+        const candidate = await importEncryptionPassword(stored)
+        if (currentContext(currentScope, current)) { remembered.value = true; await open(candidate, currentScope, current) }
+      }
+    }
+  } catch (reason) { if (!disposed) error.value = reason instanceof Error ? reason.message : '请输入解锁密码' }
+  finally { opening.value = false }
 })
 onBeforeUnmount(() => {
-  if (dirty.value && JSON.stringify([title.value.trim() || '无标题', markdown.value]) !== savingFingerprint) void save()
-  disposed = true
-  if (saveTimer) clearTimeout(saveTimer)
-  unregisterSave()
-  clearPlaintext()
-  window.removeEventListener('keydown', onKey, true)
-  window.removeEventListener('beforeunload', beforeUnload)
+  const flushed = editor.value?.saveNow() ?? Promise.resolve(true)
+  disposed = true; generation += 1
+  void flushed.finally(() => {
+    view.value = null; key = undefined; password.value = ''
+  })
 })
 </script>
 
 <template>
-  <main class="editor-pane encrypted-document-pane" :class="{ 'mobile-editor-pane': mobileLayout }" aria-label="加密 Markdown 页面">
-    <header class="editor-header">
-      <button v-if="mobileLayout" type="button" class="mobile-editor-back" aria-label="返回列表" @click="emit('mobile-back')">←</button>
-      <nav v-if="!mobileLayout" class="breadcrumbs" aria-label="页面层级"><span>{{ source?.name || '我的知识库' }}</span><span>›</span><span>{{ title || '新建凭据页面' }}</span></nav>
-      <h1 v-else class="mobile-editor-title">{{ title || '新建凭据页面' }}</h1>
-      <div class="save-state">
-        <span class="save-dot" :class="{ synced: unlocked && !dirty, pending: dirty, saving: saving || opening, error: Boolean(error) }"></span>
-        <span aria-live="polite">{{ status }}</span>
-        <button v-if="unlocked" type="button" class="history-button" title="锁定加密页面" aria-label="锁定页面" @click="lock"><LockKeyhole :size="14" /></button>
-        <button v-if="page && unlocked" type="button" class="history-button" title="页面版本历史" aria-label="页面版本历史" @click="openHistory">◷</button>
-        <button v-if="unlocked" type="button" class="encrypted-save" :disabled="saving || (!dirty && !isNew)" @click="save">保存</button>
-      </div>
-    </header>
-    <aside v-if="historyOpen" class="encrypted-history" aria-label="加密页面历史">
-      <header><strong>页面历史</strong><button type="button" aria-label="关闭历史" @click="historyOpen = false; preview = null">×</button></header>
-      <p v-if="historyLoading">正在读取…</p><p v-else-if="!revisions.length">尚无历史版本</p>
-      <button v-for="revision in revisions" :key="revision.id" type="button" @click="previewRevision(revision)">{{ revision.title }} · {{ new Date(revision.savedAt).toLocaleString() }}</button>
-      <template v-if="preview"><pre>{{ preview.markdown }}</pre><button type="button" @click="restoreRevision">恢复此版本</button></template>
-    </aside>
-    <div class="editor-scroll">
-      <article class="document" :inert="isNew && saving">
-        <div class="document-title-row"><span class="document-page-icon" aria-hidden="true"><LockKeyhole :size="27" /></span><input v-model="title" class="document-title" aria-label="页面标题" placeholder="无标题" :disabled="!unlocked && !isNew" @input="changed" /></div>
-        <p class="encrypted-caption">加密 Markdown <span>· 标题用于目录搜索，正文加密保存</span></p>
-        <form v-if="!unlocked" class="encrypted-unlock" @submit.prevent="unlock">
-          <label v-if="isNew">工作区<select v-model="selectedSourceId" aria-label="加密页面工作区"><option v-for="item in sources" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
-          <p>{{ isNew ? '设置解锁密码后，就可以像普通页面一样编写正文。' : '输入密码，打开这篇加密文档。' }}</p>
-          <label>解锁密码<input v-model="password" aria-label="解锁密码" type="password" :autocomplete="isNew ? 'new-password' : 'current-password'" required :disabled="opening" /></label>
-          <label v-if="isNew">确认密码<input v-model="confirmation" aria-label="确认密码" type="password" autocomplete="new-password" required :disabled="opening" /></label>
-          <small v-if="isNew">其他设备使用相同密码解锁。密码不会随工作区保存，遗失后无法恢复正文。</small>
-          <button type="submit" :disabled="opening || !selectedSourceId">{{ opening ? '正在解锁…' : isNew ? '开始编写' : '解锁页面' }}</button>
-        </form>
-        <template v-else>
-          <textarea v-if="sourceMode" v-model="markdown" class="source-editor" aria-label="Markdown 源码" spellcheck="false" @input="changed"></textarea>
-          <TiptapEditor v-else ref="richEditor" :model-value="markdown" :pages="store.pages" :sources="[]" :page-id="page?.id || 'encrypted-draft'" :spellcheck="false" private-document :background-started="false" @update:model-value="markdown = $event; changed()" @navigate="store.openPage($event)" />
-        </template>
-        <p v-if="error" class="encrypted-error" role="alert">{{ error }} <button v-if="remoteChanged && key" type="button" @click="openWithKey(key)">放弃草稿并重新载入</button></p>
-      </article>
-    </div>
-    <footer class="editor-statusbar">
-      <button v-if="!mobileLayout" type="button" @click="emit('toggle-sidebar')">▤ 侧栏</button>
-      <button v-if="!mobileLayout" type="button" @click="emit('toggle-focus')">⛶ 专注</button>
-      <template v-if="unlocked"><button type="button" :disabled="sourceMode" @click="richEditor?.undo()">↶ 撤销</button><button type="button" :disabled="sourceMode" @click="richEditor?.redo()">↷ 重做</button><button type="button" :class="{ active: sourceMode }" @click="sourceMode = !sourceMode">&lt;/&gt; 源码</button><span class="word-count">字数 {{ wordCount }}</span></template>
-      <span class="encrypted-status-label"><LockKeyhole :size="11" /> {{ unlocked ? '加密保存' : '已锁定' }}</span>
-    </footer>
-  </main>
+  <DocumentEditor ref="editor" :session="session" :mobile-layout="mobileLayout"
+    @toggle-sidebar="emit('toggle-sidebar')" @toggle-focus="emit('toggle-focus')" @toggle-context="emit('toggle-context')" @mobile-back="emit('mobile-back')" @dirty-change="dirty = $event">
+    <template #unlock>
+      <form class="page-unlock" aria-label="解锁页面" @submit.prevent="unlock">
+        <h1>{{ page.title }}</h1>
+        <p>此页面已加密，解锁后即可正常查看、搜索和编辑。</p>
+        <label>密码<input v-model="password" type="password" aria-label="解锁密码" autocomplete="current-password" required :disabled="opening" autofocus /></label>
+        <label v-if="deviceAvailable" class="page-unlock-remember"><input v-model="remember" type="checkbox" /> 在此设备记住</label>
+        <div><button type="submit" :disabled="opening">{{ opening ? '正在解锁…' : '解锁页面' }}</button><button v-if="deviceAvailable" type="button" :disabled="opening" @click="forgetDevice">忘记本机解锁</button></div>
+        <p v-if="error" class="page-unlock-error" role="alert">{{ error }}</p>
+      </form>
+    </template>
+  </DocumentEditor>
 </template>
 
 <style scoped>
-.document-page-icon { display: flex; align-items: center; justify-content: center; }
-.encrypted-caption { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 32px 49px; color: var(--text-faint); font-size: 11px; line-height: 1.6; }
-.encrypted-caption span { color: var(--text-subtle); }
-.encrypted-unlock { display: flex; flex-direction: column; align-items: flex-start; gap: 16px; width: min(100%, 360px); margin: 12px 0 0 49px; }
-.encrypted-unlock p { margin: 0; color: var(--text-muted); font-size: 13px; line-height: 1.7; }
-.encrypted-unlock label { display: grid; gap: 7px; width: 100%; color: var(--text-muted); font-size: 12px; }
-.encrypted-unlock input, .encrypted-unlock select { min-width: 0; width: 100%; border: 1px solid var(--border-strong); border-radius: 6px; padding: 9px 10px; color: var(--text); background: var(--bg-elevated); font: inherit; outline: none; }
-.encrypted-unlock input:focus { border-color: var(--accent); }
-.encrypted-unlock small { color: var(--text-faint); font-size: 11px; line-height: 1.6; }
-.encrypted-unlock button { border: 0; border-radius: 5px; padding: 8px 14px; color: var(--accent-strong); background: var(--accent-soft); font-size: 12px; }
-.save-state .encrypted-save { border-radius: 4px; padding: 4px 9px; color: var(--accent-strong); background: var(--accent-soft); font-size: 11px; }
-.encrypted-document-pane button:disabled { opacity: .45; cursor: default; }
-.encrypted-status-label { display: flex; align-items: center; gap: 5px; margin-left: auto; padding: 0 5px; white-space: nowrap; }
-.encrypted-error { color: var(--danger); font-size: 12px; line-height: 1.6; }
-.encrypted-history { position: absolute; z-index: 10; top: 52px; right: 20px; display: grid; gap: 8px; width: min(440px, calc(100% - 32px)); max-height: 70%; overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-elevated); box-shadow: 0 8px 24px var(--shadow); font-size: 12px; }
-.encrypted-history header { display: flex; align-items: center; justify-content: space-between; }
-.encrypted-history button { border: 0; border-radius: 4px; padding: 7px; color: var(--text-muted); background: transparent; text-align: left; }
-.encrypted-history button:hover { background: var(--bg-hover); }
-.encrypted-history pre { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-@media (max-width: 720px) { .encrypted-caption, .encrypted-unlock { margin-left: 0; } .encrypted-history { top: 90px; } .encrypted-caption { margin-bottom: 22px; } }
+.page-unlock { display: grid; gap: 16px; width: min(100%, 360px); margin: 20px 0; }
+.page-unlock h1 { margin: 0; color: var(--text); font-size: 30px; line-height: 1.3; }
+.page-unlock p { margin: 0; color: var(--text-subtle); font-size: 13px; line-height: 1.7; }
+.page-unlock label { display: grid; gap: 8px; color: var(--text-muted); font-size: 12px; }
+.page-unlock input[type=password] { width: 100%; min-width: 0; border: 1px solid var(--border-strong); border-radius: 5px; padding: 9px 10px; color: var(--text); background: var(--bg-elevated); font: inherit; outline: none; }
+.page-unlock input:focus { border-color: var(--accent); }
+.page-unlock .page-unlock-remember { display: flex; align-items: center; }
+.page-unlock > div { display: flex; gap: 10px; }
+.page-unlock button { border: 0; border-radius: 5px; padding: 8px 14px; color: var(--accent-strong); background: var(--accent-soft); font-size: 12px; }
+.page-unlock .page-unlock-error { color: var(--danger); }
 </style>

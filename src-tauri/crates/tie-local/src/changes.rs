@@ -1,7 +1,8 @@
 //! Shared per-page changes and discussion records. Replication carries original event IDs.
 use crate::{
     api::format_utc_millis_pub,
-    page::{page_has_changed, revision_id},
+    page::{is_encrypted_markdown, page_has_changed, read_stored_page, revision_id},
+    paths::find_page_file,
 };
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, fs, path::Path};
@@ -142,6 +143,7 @@ pub fn list_reviews(root: &Path, id: &str) -> Result<ReviewFile, String> {
     }
 }
 pub fn write_reviews(root: &Path, id: &str, file: &ReviewFile) -> Result<(), String> {
+    validate_protected_reviews(root, id, &file.entries)?;
     let path = review_path(root, id)?;
     fs::create_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
     let temporary = path.with_extension(format!("{}.tmp", revision_id()));
@@ -161,7 +163,7 @@ impl Drop for ReviewLock {
         let _ = fs::remove_file(&self.0);
     }
 }
-fn with_review_lock<T>(
+pub(crate) fn with_review_lock<T>(
     root: &Path,
     id: &str,
     run: impl FnOnce() -> Result<T, String>,
@@ -193,10 +195,32 @@ pub fn merge_review_file(
     incoming: ReviewFile,
 ) -> Result<ReviewFile, String> {
     with_review_lock(root, id, || {
+        validate_protected_reviews(root, id, &incoming.entries)?;
         let merged = merge_reviews(list_reviews(root, id)?, incoming);
         write_reviews(root, id, &merged)?;
         Ok(merged)
     })
+}
+
+const MAX_ENCRYPTED_REVIEW_BYTES: usize = 128 * 1024;
+
+fn review_content(entry: &ReviewEntry) -> [&str; 4] {
+    [&entry.quote, &entry.body, &entry.markdown, entry.resolution_note.as_deref().unwrap_or("")]
+}
+
+fn validate_protected_reviews(root: &Path, id: &str, entries: &[ReviewEntry]) -> Result<(), String> {
+    if !entries.iter().flat_map(review_content).any(|value| !value.is_empty()) { return Ok(()); }
+    let Some(path) = find_page_file(root, id) else { return Ok(()); };
+    if !is_encrypted_markdown(&read_stored_page(root, &path)?.markdown) { return Ok(()); }
+    for value in entries.iter().flat_map(review_content).filter(|value| !value.is_empty()) {
+        if !is_encrypted_markdown(value) { return Err("加密页面的讨论内容需要先解锁并加密后保存".into()); }
+        if value.len() > MAX_ENCRYPTED_REVIEW_BYTES { return Err("加密讨论内容不能超过 128 KiB".into()); }
+    }
+    Ok(())
+}
+
+fn review_content_limit(value: &str, plaintext_limit: usize) -> bool {
+    value.len() <= if is_encrypted_markdown(value) { MAX_ENCRYPTED_REVIEW_BYTES } else { plaintext_limit }
 }
 
 pub fn change_entry(
@@ -369,8 +393,8 @@ pub fn add_signal(
         if id.is_empty()
             || id.len() > 160
             || body.trim().is_empty()
-            || body.len() > 100_000
-            || quote.len() > 100_000
+            || !review_content_limit(body, 100_000)
+            || !review_content_limit(quote, 100_000)
         {
             return Err("修改意见不完整".into());
         }
@@ -383,6 +407,7 @@ pub fn add_signal(
             if item.kind != "opinion" {
                 return Err("记录ID已被其他变更占用".into());
             }
+            validate_protected_reviews(root, page_id, &[ReviewEntry { quote: quote.into(), body: body.into(), ..Default::default() }])?;
             return Ok(file);
         }
         if reply_to.is_some_and(|id| {
@@ -407,7 +432,7 @@ pub fn add_signal(
             page_id: page_id.into(),
             status: "open".into(),
             quote: quote.into(),
-            body: body.trim().into(),
+            body: if is_encrypted_markdown(body) { body } else { body.trim() }.into(),
             opinion_kind: opinion_kind.into(),
             base_updated_at: base_updated_at.into(),
             reply_to: reply_to.map(str::to_owned),
@@ -478,6 +503,9 @@ mod tests {
         }
     }
     fn fixture() -> (std::path::PathBuf, crate::LocalWorkspace, Page) {
+        fixture_with_markdown("# Changes\n\nfirst".into())
+    }
+    fn fixture_with_markdown(markdown: String) -> (std::path::PathBuf, crate::LocalWorkspace, Page) {
         let root = std::env::temp_dir().join(format!("tie-change-test-{}", revision_id()));
         let ws = crate::LocalWorkspace::init(&root, "src_test").unwrap();
         let page = Page {
@@ -486,7 +514,7 @@ mod tests {
             icon: String::new(),
             parent_id: None,
             sort_key: 0,
-            markdown: "# Changes\n\nfirst".into(),
+            markdown,
             tags: vec![],
             created_at: "2026-01-01T00:00:00.000Z".into(),
             updated_at: "2026-01-01T00:00:00.000Z".into(),
@@ -660,5 +688,72 @@ mod tests {
             .with_extension("lock")
             .exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn envelope(value: &str) -> String {
+        format!("{}\n{{\"ciphertext\":\"{value}\"}}\n-----END TIE ENCRYPTED MARKDOWN-----\n", crate::ENCRYPTED_MARKDOWN_PREFIX)
+    }
+
+    #[test]
+    fn protected_discussions_keep_opaque_content_and_signal_state_semantics() {
+        let (root, ws, page) = fixture_with_markdown(envelope("opaque-page"));
+        let canary = "fixture-private-discussion-rejected-63912";
+        assert!(add_signal(&root, &page.id, "op_plain", "Test", "support", "", canary,
+            &page.updated_at, None, None, None).unwrap_err().contains("先解锁并加密"));
+        let body = envelope("opaque-opinion");
+        assert!(add_signal(&root, &page.id, "op_quote", "Test", "support", canary, &body,
+            &page.updated_at, None, None, None).is_err());
+        let initial = add_signal(&root, &page.id, "op_private", "Test", "correction", "", &body,
+            &page.updated_at, None, Some(origin("A")), None).unwrap();
+        assert_eq!(initial.entries.iter().find(|entry| entry.id == "op_private").unwrap().body, body);
+        let reply = add_signal(&root, &page.id, "op_reply", "Test", "support", "", &envelope("opaque-reply"),
+            &page.updated_at, Some("op_private"), None, None).unwrap();
+        assert_eq!(reply.entries.iter().find(|entry| entry.id == "op_reply").unwrap().reply_to.as_deref(), Some("op_private"));
+        assert!(resolve_signal(&root, &page.id, "op_private", "resolved", Some(canary), None, None).is_err());
+        assert!(resolve_signal(&root, &page.id, "op_private", "adopted", None, Some(&page.updated_at), None).is_err());
+        let mut edited = page.clone();
+        edited.markdown = envelope("opaque-edited-page");
+        let edited = ws.save_full_page(edited, Some(&page.updated_at)).unwrap();
+        let note = envelope("opaque-resolution");
+        let adopted = resolve_signal(&root, &page.id, "op_private", "adopted", Some(&note), Some(&edited.updated_at), Some(origin("B"))).unwrap();
+        let signal = adopted.entries.iter().find(|entry| entry.id == "op_private").unwrap();
+        assert_eq!(signal.status, "adopted");
+        assert_eq!(signal.resolution_note.as_deref(), Some(note.as_str()));
+        resolve_signal(&root, &page.id, "op_private", "withdrawn", None, None, None).unwrap();
+        assert!(resolve_signal(&root, &page.id, "op_private", "resolved", None, None, None).is_err());
+        let merged = merge_review_file(&root, &page.id, initial).unwrap();
+        assert_eq!(merged.entries.iter().find(|entry| entry.id == "op_private").unwrap().status, "withdrawn");
+        assert!(add_signal(&root, &page.id, "op_private", "Test", "support", "", canary, "", None, None, None).is_err());
+
+        for field in ["body", "quote", "markdown", "resolution_note"] {
+            let before = fs::read(review_path(&root, &page.id).unwrap()).unwrap();
+            let mut entry = ReviewEntry { id: format!("bad_{field}"), kind: "opinion".into(), ..Default::default() };
+            match field { "body" => entry.body = canary.into(), "quote" => entry.quote = canary.into(),
+                "markdown" => entry.markdown = canary.into(), _ => entry.resolution_note = Some(canary.into()) }
+            let file = ReviewFile { entries: vec![entry] };
+            assert!(merge_review_file(&root, &page.id, file.clone()).is_err());
+            assert!(write_reviews(&root, &page.id, &file).is_err());
+            assert_eq!(fs::read(review_path(&root, &page.id).unwrap()).unwrap(), before);
+        }
+        assert!(!fs::read_to_string(review_path(&root, &page.id).unwrap()).unwrap().contains(canary));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn encrypted_review_overhead_has_a_bounded_allowance_without_changing_plain_limits() {
+        let (root, _, page) = fixture();
+        assert!(add_signal(&root, &page.id, "op_long_plain", "Test", "support", "", &"x".repeat(100001),
+            "", None, None, None).is_err());
+        fs::remove_dir_all(root).unwrap();
+        let (root, _, page) = fixture_with_markdown(envelope("opaque-page"));
+        let body = envelope(&"a".repeat(105000));
+        let file = add_signal(&root, &page.id, "op_overhead", "Test", "support", "", &body,
+            "", None, None, None).unwrap();
+        assert_eq!(file.entries.iter().find(|entry| entry.id == "op_overhead").unwrap().body, body);
+        assert!(add_signal(&root, &page.id, "op_too_large", "Test", "support", "", &envelope(&"a".repeat(MAX_ENCRYPTED_REVIEW_BYTES)),
+            "", None, None, None).is_err());
+        let version = ReviewEntry { id: "rv_private".into(), kind: "version".into(), markdown: envelope("opaque-version"), ..Default::default() };
+        merge_review_file(&root, &page.id, ReviewFile { entries: vec![version] }).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }

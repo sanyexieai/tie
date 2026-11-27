@@ -2,6 +2,17 @@
 
 All notable changes to Tie are documented in this file.
 
+## [1.0.63] - 2026-11-27
+
+- 加密页面与普通页面共用编辑器、标签、查找替换、源码、收藏、关系、历史和讨论界面；锁定后撤回正文搜索、大纲、讨论明文与草稿。
+- 支持普通页面和加密页面双向转换，保留页面身份、分类与元数据，同时处理全部历史、讨论、处理说明和图片；防止旧明文版本或附件残留。
+- 桌面可选择通过系统凭据库记住本机解锁，密码不进入工作区、浏览器存储或同步数据；浏览器与移动端保留会话内解锁。
+- 本地与纯 HTTP MCP 支持每次调用授权后的正文搜索、读取、编辑、新建、关系、历史比较恢复和讨论处理，新增页面保护状态与双向转换工具，不共享客户端或其他令牌的解锁状态。
+- 保护模式变化时逐工作区转换完整记录；未获解锁授权的另一设备保留两侧数据并报告待处理冲突，避免自动覆盖或误报同步完成。
+- 私密图片随 Markdown 整体加密，子页继承加密；跨工作区迁移复制完整原始密文，旧明文记录仅在验证当前页面密码后可读取或转换。
+- 修复延迟保存与解密覆盖新草稿、转换响应丢失后无法重试、浏览器转换覆盖其他页面保存，以及 MCP 仅重命名时未更新正文标题的问题。
+- Windows 自动更新沿用正在运行的 Tie 所在安装目录，兼容空格、中文和网络路径；旧版首次升级需选择一次已有安装目录，取消时不卸载或复制，后续更新自动原位覆盖。
+
 ## [1.0.62] - 2026-11-26
 
 - 凭据页面改为工作区中的加密 Markdown 文档，沿用普通页面树、标题和编辑布局，支持本地使用、代码块、表格、源码模式与撤销。
@@ -272,7 +283,9 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.61...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.63...HEAD
+[1.0.63]: https://github.com/sanyexieai/tie/releases/tag/v1.0.63
+[1.0.62]: https://github.com/sanyexieai/tie/releases/tag/v1.0.62
 [1.0.61]: https://github.com/sanyexieai/tie/releases/tag/v1.0.61
 [1.0.60]: https://github.com/sanyexieai/tie/releases/tag/v1.0.60
 [1.0.59]: https://github.com/sanyexieai/tie/releases/tag/v1.0.59

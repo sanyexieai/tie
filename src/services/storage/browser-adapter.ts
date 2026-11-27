@@ -3,6 +3,10 @@ import { normalizePageSources, pageBoundToSource } from '@/services/page-sources
 import { mergeSyncPages } from '@/services/storage/sync-merge'
 import { browserBlobStore } from '@/services/storage/blobs'
 import type { LoadPagesResult, StorageAdapter, StorageCapabilities, SyncSourceContext } from '@/services/storage/types'
+import type { PageProtectionBundle } from '@/services/page-protection-types'
+import { readBrowserPageAssets, replaceBrowserPageAssets } from '@/services/storage/blobs-browser'
+import { encodeBase64, decodeBase64 } from '@/services/page-protection'
+import { isEncryptedMarkdown } from '@/services/encrypted-markdown'
 
 const fallbackKey = 'tie-demo-workspace-v1'
 const historyKey = 'tie-demo-page-history-v1'
@@ -66,6 +70,15 @@ function archiveLocalRevision(page: Page) {
   const revisions = history[page.id] ?? []
   history[page.id] = [{ id: id('rev'), page }, ...revisions].slice(0, 80)
   saveLocalHistory(history)
+}
+
+async function protectionBundle(page: Page): Promise<PageProtectionBundle> {
+  const stored = localSnapshot().pages.find((item) => item.id === page.id && pageBoundToSource(item, page.storageSourceId))
+  if (!stored) throw new Error('未找到页面')
+  const assets = (await readBrowserPageAssets(page.id)).map((asset) => ({ name: asset.name, data: encodeBase64(asset.bytes) }))
+  const content = { page: stored, revisions: localHistory()[page.id] ?? [], reviews: { entries: [] }, assets }
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(content)))
+  return { ...content, snapshot: encodeBase64(new Uint8Array(digest)) }
 }
 
 export const browserStorageAdapter: StorageAdapter = {
@@ -147,6 +160,39 @@ export const browserStorageAdapter: StorageAdapter = {
   async readLatestPage(page) {
     const loaded = await this.loadPages(page.storageSourceId)
     return loaded.pages.find((item) => item.id === page.id) ?? null
+  },
+  readPageProtection: protectionBundle,
+  async replacePageProtection(bundle, expectedUpdatedAt) {
+    const current = await protectionBundle(bundle.page)
+    if (current.snapshot !== bundle.snapshot || current.page.updatedAt !== expectedUpdatedAt) throw new Error('页面或历史记录已更新，请重新载入后转换')
+    if (isEncryptedMarkdown(current.page.markdown) === isEncryptedMarkdown(bundle.page.markdown)) throw new Error('页面保护状态没有变化')
+    const page = { ...bundle.page, updatedAt: new Date().toISOString() }
+    const previousAssets = current.assets.map((asset) => ({ name: asset.name, bytes: decodeBase64(asset.data) }))
+    await replaceBrowserPageAssets(page.id, bundle.assets.map((asset) => ({ name: asset.name, bytes: decodeBase64(asset.data) })))
+    try {
+      const snapshot = localSnapshot()
+      const history = localHistory()
+      const latest = snapshot.pages.find((item) => item.id === page.id)
+      if (JSON.stringify(latest) !== JSON.stringify(current.page) || JSON.stringify(history[page.id] ?? []) !== JSON.stringify(current.revisions)) throw new Error('页面或历史记录已更新，请重新载入后转换')
+      const beforeHistory = localStorage.getItem(historyKey)
+      const beforePages = localStorage.getItem(fallbackKey)
+      history[page.id] = [{ id: id('rev'), page: bundle.page }, ...bundle.revisions].slice(0, 80)
+      try {
+        saveLocalHistory(history)
+        snapshot.pages = snapshot.pages.map((item) => item.id === page.id ? page : item)
+        saveLocalSnapshot(snapshot)
+      } catch (error) {
+        if (beforeHistory === null) localStorage.removeItem(historyKey)
+        else localStorage.setItem(historyKey, beforeHistory)
+        if (beforePages === null) localStorage.removeItem(fallbackKey)
+        else localStorage.setItem(fallbackKey, beforePages)
+        throw error
+      }
+    } catch (error) {
+      await replaceBrowserPageAssets(page.id, previousAssets)
+      throw error
+    }
+    return page
   },
 }
 

@@ -1,5 +1,6 @@
 import type { Page, PageRevision, StorageKind, StorageSource } from '@/types'
 import type { SourceBlobStore } from '@/services/storage/blobs'
+import type { PageProtectionBundle } from '@/services/page-protection-types'
 
 export interface StorageCapabilities {
   load: boolean
@@ -79,6 +80,8 @@ export interface StorageAdapter {
   listPageRevisions?(page: Page): Promise<PageRevision[]>
   readPageRevision?(page: Page, revisionId: string): Promise<Page>
   readLatestPage?(page: Page): Promise<Page | null>
+  readPageProtection?(page: Page): Promise<PageProtectionBundle>
+  replacePageProtection?(bundle: PageProtectionBundle, expectedUpdatedAt: string): Promise<Page>
   syncSource?(sourceId: string, context?: SyncSourceContext): Promise<SyncResult>
   renameSource?(sourceId: string, name: string): Promise<void>
   removeSource?(sourceId: string): Promise<void>

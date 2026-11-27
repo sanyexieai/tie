@@ -6,6 +6,8 @@ pub mod changes;
 pub mod api;
 pub mod backend_session;
 pub mod export;
+pub mod encryption;
+pub mod protection;
 pub mod git_sync;
 pub mod files;
 pub mod io;
@@ -19,6 +21,7 @@ pub mod workspace;
 
 pub use api::*;
 pub use export::*;
+pub use protection::*;
 pub use files::*;
 pub use io::*;
 pub use links::*;

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { PHEROMONE_KIND_COLOR, pheromoneState, type PheromoneKind } from '@/services/pheromone'
+import { protectedPagesRevision } from '@/services/protected-pages'
 
 const paths = ref<Array<{ id: string; d: string; color: string; active: boolean }>>([])
 let frame = 0
@@ -80,6 +81,11 @@ watch(() => pheromoneState.panelOpen, (open) => {
   }
   frame = requestAnimationFrame(loop)
 }, { immediate: true })
+
+watch(protectedPagesRevision, () => {
+  paths.value = []
+  lastSignature = ''
+}, { flush: 'sync' })
 
 onBeforeUnmount(() => cancelAnimationFrame(frame))
 </script>

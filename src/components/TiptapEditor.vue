@@ -25,7 +25,8 @@ import { openUrl } from '@tauri-apps/plugin-opener'
 import type { Page, StorageSource } from '@/types'
 import { focusPheromone, pheromoneRevision, pheromoneState, pheromonesFor, startPheromoneDraft, type PheromoneKind } from '@/services/pheromone'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
-import { canStorePageAssets, embedImageFile, inlineImageSrcToFile, isImageFile, normalizeImageFile, parseAssetUrl, resolveAssetDisplayUrl, shouldHandleImagePaste, uploadPastedImage } from '@/services/attachments'
+import { canStorePageAssets, embedImageFile, inlineImageSrcToFile, isImageFile, normalizeImageFile, parseAssetUrl, resolveAssetDisplayUrl, resolvePastedImageFromEvent, shouldHandleImagePaste, uploadPastedImage } from '@/services/attachments'
+import { isProtectedImageDataUrl, protectedImageDataUrl } from '@/services/protected-images'
 import { cachedFileResource, canRebindRegisteredFile, listRegisteredFiles, probeRelativePath } from '@/services/files'
 import { pickLinkedResource, linkableSources, rebindLinkedResource, sourceChipLabel } from '@/services/link-actions'
 import {
@@ -45,9 +46,10 @@ import {
   sourceById,
 } from '@/services/link-runtime'
 
-const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage?: (title: string) => Promise<Page>; expandToChild?: (title: string) => Promise<Page>; enablePheromone?: boolean; backgroundStarted?: boolean; privateDocument?: boolean }>()
+const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage?: (title: string) => Promise<Page>; expandToChild?: (title: string) => Promise<Page>; enablePheromone?: boolean; backgroundStarted?: boolean; privateDocument?: boolean; protectedPageActions?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
 const lowlight = createLowlight(common)
+const pheromoneEnabled = computed(() => Boolean(props.enablePheromone && (!props.privateDocument || props.protectedPageActions)))
 const showPagePicker = ref(false)
 const pagePickerMode = ref<'slash' | 'wiki'>('slash')
 const pageQuery = ref('')
@@ -194,7 +196,7 @@ function createAssetImageExtension() {
           getAttrs: (element) => {
             if (!(element instanceof HTMLElement)) return false
             const src = element.getAttribute('src') ?? ''
-            if (!src || src.startsWith('blob:') || src.startsWith('data:')) return false
+            if (!src || src.startsWith('blob:') || (src.startsWith('data:') && !isProtectedImageDataUrl(src))) return false
             return {
               src,
               alt: element.getAttribute('alt'),
@@ -207,16 +209,33 @@ function createAssetImageExtension() {
     addNodeView() {
       return ({ node, getPos, editor: viewEditor }) => {
         if (props.privateDocument) {
-          // Image URLs in private Markdown must not make requests when the document opens.
           const dom = document.createElement('span')
-          dom.className = 'private-markdown-image'
+          dom.className = 'tie-image-wrap'
           dom.contentEditable = 'false'
-          dom.textContent = markdownForImageAttrs(node.attrs)
+          let currentSrc: string | null = null
+          const showImage = (attrs: typeof node.attrs) => {
+            const src = String(attrs.src ?? '')
+            if (src === currentSrc) return
+            currentSrc = src
+            dom.replaceChildren()
+            if (isProtectedImageDataUrl(src)) {
+              const image = document.createElement('img')
+              image.className = 'tiptap-image'
+              image.draggable = false
+              image.alt = String(attrs.alt ?? '')
+              image.src = src
+              dom.appendChild(image)
+            } else {
+              // Preserve remote URLs as text instead of requesting them on unlock.
+              dom.textContent = markdownForImageAttrs(attrs)
+            }
+          }
+          showImage(node.attrs)
           return {
             dom,
             update: (updated) => {
               if (updated.type.name !== 'image') return false
-              dom.textContent = markdownForImageAttrs(updated.attrs)
+              showImage(updated.attrs)
               return true
             },
           }
@@ -375,10 +394,9 @@ function createAssetImageExtension() {
 }
 
 function canEmbedImage(file: File) {
-  if (props.privateDocument) return false
   if (!isImageFile(file)) return false
   const page = activePage()
-  if (!page || !canStorePageAssets(page)) {
+  if (!props.privateDocument && (!page || !canStorePageAssets(page))) {
     window.alert('当前存储源不支持图片附件。请切换到本地/S3/后台工作区后再粘贴图片。')
     return false
   }
@@ -394,12 +412,15 @@ function rejectInlineImageUrl(src: string) {
 
 async function insertImageFile(editor: Editor, file: File) {
   const page = activePage()
-  if (!page || !canEmbedImage(file)) return
+  if ((!props.privateDocument && !page) || !canEmbedImage(file)) return
+  const pageId = props.pageId
+  const privateDocument = props.privateDocument
   try {
-    const src = await embedImageFile(page, file)
+    const src = props.privateDocument ? await protectedImageDataUrl(file) : await embedImageFile(page!, file)
+    if (editor.isDestroyed || pageId !== props.pageId || privateDocument !== props.privateDocument) return
     editor.chain().focus().setImage({ src }).run()
-  } catch {
-    window.alert('无法上传图片到存储源。')
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : '无法保存图片。')
   }
 }
 
@@ -410,9 +431,12 @@ async function insertImageInView(
 ) {
   const normalized = normalizeImageFile(file)
   const page = activePage()
-  if (!page || !canEmbedImage(normalized)) return
+  if ((!props.privateDocument && !page) || !canEmbedImage(normalized)) return
+  const pageId = props.pageId
+  const privateDocument = props.privateDocument
   try {
-    const src = await embedImageFile(page, normalized)
+    const src = props.privateDocument ? await protectedImageDataUrl(normalized) : await embedImageFile(page!, normalized)
+    if (currentEditor.isDestroyed || pageId !== props.pageId || privateDocument !== props.privateDocument) return
     if (options.mode === 'replace') {
       currentEditor.chain().focus().setImage({ src }).run()
       return
@@ -427,7 +451,15 @@ function runImagePaste(event: ClipboardEvent, tiptapEditor: Editor) {
   if (!shouldHandleImagePaste(event)) return false
   event.preventDefault()
   event.stopImmediatePropagation()
-  if (props.privateDocument) return true
+  if (props.privateDocument) {
+    const pageId = props.pageId
+    void resolvePastedImageFromEvent(event).then(async (image) => {
+      if (tiptapEditor.isDestroyed || pageId !== props.pageId || !props.privateDocument) return
+      if (!image) throw new Error('无法读取剪贴板图片')
+      await insertImageFile(tiptapEditor, image)
+    }).catch((error) => { window.alert(error instanceof Error ? error.message : '无法保存图片。') })
+    return true
+  }
   const page = activePage()
   if (!page) {
     window.alert('请先打开一个页面。')
@@ -463,7 +495,6 @@ function createTieImagePasteExtension() {
               const image = [...(event.dataTransfer?.files ?? [])].find((file) => isImageFile(file))
               if (!image) return false
               event.preventDefault()
-              if (props.privateDocument) return true
               const dropPosition = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ?? view.state.selection.from
               void insertImageInView(tiptapEditor, image, { mode: 'insert', position: dropPosition })
               return true
@@ -476,6 +507,14 @@ function createTieImagePasteExtension() {
 }
 
 function stripInlineImageHtml(html: string) {
+  if (props.privateDocument) return html.replace(/<img\b[^>]*>/gi, (tag) => {
+    const src = /\bsrc=["']([^"']*)["']/i.exec(tag)?.[1] ?? ''
+    if (isProtectedImageDataUrl(src)) {
+      const alt = (/\balt=["']([^"']*)["']/i.exec(tag)?.[1] ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!)
+      return `<img src="${src}" alt="${alt}">`
+    }
+    return markdownForImageAttrs({ src }).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+  })
   return html.replace(/<img\b[^>]*\bsrc=["'](?:blob:|data:)[^"']*["'][^>]*>/gi, '')
 }
 
@@ -673,7 +712,7 @@ const slashCommands: SlashCommand[] = [
     }
     if (src) editor.chain().focus().setImage({ src }).run()
   } },
-  { id: 'image-upload', label: '上传图片', hint: '保存到存储源附件目录', keywords: ['image', '图片', 'upload', '上传', '本地图片'], run: (editor) => pickLocalImage(editor) },
+  { id: 'image-upload', label: '上传图片', hint: '从设备选择图片', keywords: ['image', '图片', 'upload', '上传', '本地图片'], run: (editor) => pickLocalImage(editor) },
   { id: 'table', label: '表格', hint: '插入 3 × 3 表格', keywords: ['table', '表格'], run: (editor) => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run() },
   { id: 'divider', label: '分割线', hint: '分隔内容区域', keywords: ['divider', '分割', 'horizontal'], run: (editor) => editor.chain().focus().setHorizontalRule().run() },
   { id: 'page-link', label: '链接页面', hint: '关联知识库中的页面', keywords: ['link', 'page', '链接', '关联', '页面'], run: () => openSlashPagePicker() },
@@ -686,7 +725,7 @@ const slashCommands: SlashCommand[] = [
 
 const filteredCommands = computed(() => {
   const commands = props.privateDocument
-    ? slashCommands.filter((command) => !['image', 'image-upload', 'local-file', 'local-directory', 'relative-path', 'child-page', 'expand-child'].includes(command.id))
+    ? slashCommands.filter((command) => !['image', 'local-file', 'local-directory', 'relative-path', ...(!props.protectedPageActions ? ['child-page', 'expand-child'] : [])].includes(command.id))
     : slashCommands
   const query = slashQuery.value?.trim().toLocaleLowerCase() ?? ''
   if (!query) return commands
@@ -1052,7 +1091,7 @@ function createPheromoneExtension() {
           key: pheromonePluginKey,
           props: {
             decorations(state) {
-              if (props.privateDocument || !props.enablePheromone) return DecorationSet.empty
+              if (!pheromoneEnabled.value) return DecorationSet.empty
               const decorations = []
               for (const item of pheromonesFor(props.pageId, props.pages.find((page) => page.id === props.pageId)?.storageSourceId ?? '').filter((item) => item.status !== 'withdrawn')) {
                 const range = findQuoteRange(state.doc, item.quote)
@@ -1066,7 +1105,7 @@ function createPheromoneExtension() {
               return DecorationSet.create(state.doc, decorations)
             },
             handleClick(_view, _pos, event) {
-              if (props.privateDocument || !props.enablePheromone) return false
+              if (!pheromoneEnabled.value) return false
               const raw = event.target
               const element = raw instanceof Element ? raw : raw instanceof Node ? raw.parentElement : null
               const id = element?.closest('[data-pheromone-id]')?.getAttribute('data-pheromone-id')
@@ -1094,7 +1133,7 @@ const editor = useEditor({
     WikiLink.configure({ resolveHref: (title) => wikiPageHref(title, props.pages) }),
     Markdown,
     TieCodeBlock.configure({ lowlight }),
-    createAssetImageExtension().configure({ allowBase64: false, inline: true }),
+    createAssetImageExtension().configure({ allowBase64: true, inline: true }),
     createTieImagePasteExtension(),
     Placeholder.configure({ placeholder: '开始写作，支持 Markdown 快捷输入…' }),
     TaskList,
@@ -1108,7 +1147,7 @@ const editor = useEditor({
   editorProps: {
     attributes: { class: 'tiptap-content', spellcheck: String(props.spellcheck) },
     transformPastedHTML: (html) => stripInlineImageHtml(html),
-    transformPastedText: (text) => text.replace(/!\[[^\]]*\]\((blob:[^)\s]+|data:image\/[^)\s]+)\)/g, ''),
+    transformPastedText: (text) => text.replace(/!\[[^\]]*\]\((blob:[^)\s]+|data:image\/[^)\s]+)\)/g, (image, src: string) => props.privateDocument && isProtectedImageDataUrl(src) ? image : ''),
     handlePaste: (_view, event) => {
       const text = event.clipboardData?.getData('text/plain') ?? ''
       const html = event.clipboardData?.getData('text/html') ?? ''
@@ -1294,7 +1333,7 @@ watch(() => props.spellcheck, (enabled) => editor.value?.view.dom.setAttribute('
 watch(() => props.pageId, () => scheduleDecorateFileLinks())
 watch(() => props.backgroundStarted, (ready) => { if (ready) scheduleDecorateFileLinks() })
 watch(() => pheromoneRevision(props.pageId, props.pages.find((page) => page.id === props.pageId)?.storageSourceId ?? ''), () => {
-  if (props.privateDocument || !props.enablePheromone) return
+  if (!pheromoneEnabled.value) return
   const current = editor.value
   if (!current || current.isDestroyed) return
   current.view.dispatch(current.state.tr.setMeta('pheromone', true))
@@ -1339,7 +1378,7 @@ function selectionForMenu(currentEditor: Editor) {
   const { from, to, empty } = currentEditor.state.selection
   if (empty || from === to) return null
   const text = currentEditor.state.doc.textBetween(from, to, ' ').replace(/\s+/g, ' ').trim()
-  const limit = props.enablePheromone ? 280 : 120
+  const limit = pheromoneEnabled.value ? 280 : 120
   if (!text || text.length > limit) return null
   return { from, to, text, canExpand: text.length <= 120 && Boolean(props.expandToChild) }
 }
@@ -1347,14 +1386,14 @@ function selectionForMenu(currentEditor: Editor) {
 function onEditorContextMenu(event: MouseEvent) {
   contextMenu.value = null
   const current = editor.value
-  if (!current || props.privateDocument) return
-  if (!props.expandToChild && !props.enablePheromone) return
+  if (!current || (props.privateDocument && !props.protectedPageActions)) return
+  if (!props.expandToChild && (!pheromoneEnabled.value)) return
   const selection = selectionForMenu(current)
   if (!selection) return
-  if (!props.enablePheromone && !selection.canExpand) return
+  if ((!pheromoneEnabled.value) && !selection.canExpand) return
   event.preventDefault()
   const menuWidth = 168
-  const menuHeight = props.enablePheromone ? 248 : 148
+  const menuHeight = pheromoneEnabled.value ? 248 : 148
   contextMenu.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -1387,7 +1426,7 @@ function rangeForText(current: Editor, from: number, to: number, text: string) {
 }
 
 async function replaceRangeWithChildCard(current: Editor, from: number, to: number, text: string) {
-  if (props.privateDocument || !props.expandToChild) return
+  if ((props.privateDocument && !props.protectedPageActions) || !props.expandToChild) return
   const page = await props.expandToChild(text)
   const href = `tie://page/${page.id}`
   const range = rangeForText(current, from, to, text)
@@ -1413,7 +1452,7 @@ async function runContextAction(action: 'expand' | 'cut' | 'copy' | 'paste' | Ph
   const { from, to, text } = menu
   try {
     if (action === 'objection' || action === 'correction' || action === 'support') {
-      if (props.privateDocument || !props.enablePheromone) return
+      if (!pheromoneEnabled.value) return
       closeContextMenu()
       startPheromoneDraft(props.pageId, text, action)
       return
@@ -1448,7 +1487,7 @@ async function runContextAction(action: 'expand' | 'cut' | 'copy' | 'paste' | Ph
 }
 
 async function expandParagraphToChild(current: Editor) {
-  if (props.privateDocument) return
+  if (props.privateDocument && !props.protectedPageActions) return
   const { $from } = current.state.selection
   const text = $from.parent.textContent.replace(/\s+/g, ' ').trim()
   if (!text) {
@@ -1566,7 +1605,7 @@ function closePagePicker() {
 
 async function createWikiPage() {
   const title = wikiQuery.value.trim()
-  if (!title || props.privateDocument || !props.createLinkedPage) return
+  if (!title || (props.privateDocument && !props.protectedPageActions) || !props.createLinkedPage) return
   const page = await props.createLinkedPage(title)
   insertPageLink(page)
 }
@@ -1652,7 +1691,7 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
       <button v-for="(page, index) in matchingPages" :key="page.id" :class="{ selected: pagePickerMode === 'wiki' && selectedPageIndex === index }" @mousedown.prevent="insertPageLink(page)">
         <span>{{ DEFAULT_PAGE_ICON }} {{ page.title }}</span><small>{{ sourceLabel(page) }} · {{ page.parentId ? '子页面' : '顶层页面' }}</small>
       </button>
-      <button v-if="!privateDocument && createLinkedPage && !matchingPages.length && pagePickerMode === 'wiki' && wikiQuery.trim()" class="page-picker-create" @mousedown.prevent="createWikiPage"><span>创建“{{ wikiQuery.trim() }}”</span><small>并插入页面链接</small></button>
+      <button v-if="(!privateDocument || protectedPageActions) && createLinkedPage && !matchingPages.length && pagePickerMode === 'wiki' && wikiQuery.trim()" class="page-picker-create" @mousedown.prevent="createWikiPage"><span>创建“{{ wikiQuery.trim() }}”</span><small>并插入页面链接</small></button>
       <p v-else-if="!matchingPages.length">没有匹配页面</p>
     </div>
     <div
@@ -1665,9 +1704,9 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
       @contextmenu.prevent
     >
       <button v-if="contextMenu.canExpand" type="button" role="menuitem" data-action="expand">展开为子页面</button>
-      <button v-if="enablePheromone" type="button" role="menuitem" data-action="objection">提出异议</button>
-      <button v-if="enablePheromone" type="button" role="menuitem" data-action="correction">提出修正</button>
-      <button v-if="enablePheromone" type="button" role="menuitem" data-action="support">表示支持</button>
+      <button v-if="pheromoneEnabled" type="button" role="menuitem" data-action="objection">提出异议</button>
+      <button v-if="pheromoneEnabled" type="button" role="menuitem" data-action="correction">提出修正</button>
+      <button v-if="pheromoneEnabled" type="button" role="menuitem" data-action="support">表示支持</button>
       <button type="button" role="menuitem" class="menu-split" data-action="cut">剪切</button>
       <button type="button" role="menuitem" data-action="copy">复制</button>
       <button type="button" role="menuitem" data-action="paste">粘贴</button>

@@ -267,6 +267,7 @@ fn sync_with_progress(
     let mut pushed = 0u32;
     let mut pulled = 0u32;
     let mut conflicts = Vec::new();
+    let mut protection_required = HashSet::new();
     let pages_total = local_pages.iter().map(|page| page.id.as_str())
         .chain(remote_by_id.keys().map(String::as_str)).collect::<HashSet<_>>().len();
     let mut pages_completed = HashSet::new();
@@ -274,6 +275,14 @@ fn sync_with_progress(
 
     for local in &local_pages {
         let remote = remote_by_id.remove(&local.id);
+        if remote.as_ref().is_some_and(|remote| tie_local::is_encrypted_markdown(&remote.markdown) != tie_local::is_encrypted_markdown(&local.markdown)) {
+            protection_required.insert(local.id.clone());
+            conflicts.push(local.id.clone());
+            if pages_completed.insert(local.id.clone()) {
+                report_progress(observe, BackendSyncStage::Pages, pages_completed.len(), pages_total);
+            }
+            continue;
+        }
         match plan(Some(local), remote.as_ref(), cursor.get(&local.id)) {
             Action::Skip => {
                 if let Some(remote) = remote.as_ref() {
@@ -359,6 +368,7 @@ fn sync_with_progress(
         &format!("{}/api/v1/workspaces/{}", target.url.trim_end_matches('/'), target.workspace_id),
         token,
         ws,
+        &protection_required,
         observe,
     )?;
     write_cursor(ws.root(), &cursor)?;
@@ -366,13 +376,18 @@ fn sync_with_progress(
     review_ids.extend(remote_review_ids);
     review_ids.extend(local_pages.iter().map(|page| page.id.clone()));
     review_ids.sort(); review_ids.dedup();
+    review_ids.retain(|id| !protection_required.contains(id));
     report_progress(observe, BackendSyncStage::Reviews, 0, review_ids.len());
     for (index, page_id) in review_ids.iter().enumerate() {
         exchange_reviews(&client, target, token, ws.root(), &page_id)?;
         report_progress(observe, BackendSyncStage::Reviews, index + 1, review_ids.len());
     }
     let mode = if conflicts.is_empty() { "synced" } else { "conflict" };
-    let message = if conflicts.is_empty() {
+    let message = if !protection_required.is_empty() {
+        let mut pages = protection_required.into_iter().collect::<Vec<_>>();
+        pages.sort();
+        format!("[PROTECTION_REQUIRED] 这些页面的本地与服务器保护模式不同，已保留两侧正文、历史、讨论和附件；请解锁并显式转换两侧后重试同步：{}", pages.join("、"))
+    } else if conflicts.is_empty() {
         String::new()
     } else {
         format!("这些页面在本地和后台都改过，未覆盖：{}", conflicts.join("、"))
@@ -1202,6 +1217,43 @@ mod tests {
         assert_eq!(local.get_revision("pg_encrypted", &revision.id).unwrap().markdown, first);
         drop(server);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn protection_mode_mismatch_preserves_both_sides_and_skips_reviews_and_assets() {
+        for local_encrypted in [false, true] {
+            let dir = std::env::temp_dir().join(format!("tie-sync-protection-{}", tie_local::new_page_id()));
+            let local = LocalWorkspace::init(dir.join("local"), "src_test").unwrap();
+            let remote = LocalWorkspace::init(dir.join("remote"), "src_test").unwrap();
+            let cipher = format!("{}\n{{\"ciphertext\":\"opaque-protected\"}}\n-----END TIE ENCRYPTED MARKDOWN-----\n", tie_local::ENCRYPTED_MARKDOWN_PREFIX);
+            save_page_to_root(local.root(), page("pg_protection", if local_encrypted { &cipher } else { "local plaintext" }, "2026-01-01T00:00:00Z"), None).unwrap();
+            save_page_to_root(remote.root(), page("pg_protection", if local_encrypted { "remote plaintext" } else { &cipher }, "2026-01-02T00:00:00Z"), None).unwrap();
+            for workspace in [&local, &remote] {
+                let assets = tie_local::page_asset_dir(workspace.root(), "pg_protection");
+                fs::create_dir_all(&assets).unwrap();
+                fs::write(assets.join("asset.png"), workspace.root().to_string_lossy().as_bytes()).unwrap();
+            }
+            let before_local = serde_json::to_value(local.protection_bundle("pg_protection").unwrap()).unwrap();
+            let before_remote = serde_json::to_value(remote.protection_bundle("pg_protection").unwrap()).unwrap();
+            let root = remote.root().to_owned();
+            let server = crate::test_http::Server::start(move |request, body| {
+                let request = request.replace("/api/v1/workspaces/ws_test", "");
+                assert!(!request.contains("/pages/pg_protection"), "protected page operation must wait for explicit unlock: {request}");
+                if request.starts_with("GET /pages ") {
+                    let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
+                    (200, serde_json::to_vec(&ws.load_all(true).unwrap()).unwrap())
+                } else { crate::resources_sync::tests::respond(&root, &request, body) }
+            });
+            let target = BackendTarget { url: server.url.clone(), workspace_id: "ws_test".into() };
+            let report = sync_with(&target, "", &local, "test").unwrap();
+            assert_eq!(report.mode, "conflict");
+            assert!(report.message.contains("PROTECTION_REQUIRED"));
+            assert_eq!(report.conflicts, ["pg_protection"]);
+            assert_eq!(serde_json::to_value(local.protection_bundle("pg_protection").unwrap()).unwrap(), before_local);
+            assert_eq!(serde_json::to_value(remote.protection_bundle("pg_protection").unwrap()).unwrap(), before_remote);
+            drop(server);
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

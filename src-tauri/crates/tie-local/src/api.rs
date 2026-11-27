@@ -309,6 +309,20 @@ impl LocalWorkspace {
         root: Option<&str>,
         exclude: &[String],
     ) -> Result<Vec<SearchHit>, String> {
+        self.search_scoped_authorized(query, tag, limit, include_deleted, root, exclude, None)
+    }
+
+    /// Password authorization is limited to this search; stored pages stay encrypted.
+    pub fn search_scoped_authorized(
+        &self,
+        query: &str,
+        tag: Option<&str>,
+        limit: usize,
+        include_deleted: bool,
+        root: Option<&str>,
+        exclude: &[String],
+        password: Option<&str>,
+    ) -> Result<Vec<SearchHit>, String> {
         let q = query.trim();
         let tag_filter = tag.map(str::trim).filter(|t| !t.is_empty()).map(|t| t.to_lowercase());
         let mut pages = self.load_all(include_deleted)?;
@@ -335,6 +349,19 @@ impl LocalWorkspace {
         });
         if let Some(tag) = &tag_filter {
             pages.retain(|page| page.tags.iter().any(|item| item.to_lowercase() == *tag));
+        }
+        if q.is_empty() {
+            pages.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            pages.truncate(limit.clamp(1, 50));
+        }
+        if let Some(password) = password {
+            for page in &mut pages {
+                if is_encrypted_markdown(&page.markdown) {
+                    if let Ok(markdown) = crate::encryption::decrypt_markdown(&page.markdown, password) {
+                        page.markdown = markdown;
+                    }
+                }
+            }
         }
         let limit = limit.clamp(1, 50);
         if q.is_empty() && tag_filter.is_none() {
@@ -564,10 +591,26 @@ impl LocalWorkspace {
     }
 
     pub fn related(&self, id_or_title: &str) -> Result<RelatedPages, String> {
-        let page = self
+        self.related_authorized(id_or_title, None)
+    }
+
+    pub fn related_authorized(&self, id_or_title: &str, password: Option<&str>) -> Result<RelatedPages, String> {
+        let mut page = self
             .resolve(id_or_title)?
             .ok_or_else(|| format!("页面不存在：{id_or_title}"))?;
-        let all = self.load_all(false)?;
+        let mut all = self.load_all(false)?;
+        if let Some(password) = password {
+            if is_encrypted_markdown(&page.markdown) {
+                page.markdown = crate::encryption::decrypt_markdown(&page.markdown, password)?;
+            }
+            for other in &mut all {
+                if is_encrypted_markdown(&other.markdown) {
+                    if let Ok(markdown) = crate::encryption::decrypt_markdown(&other.markdown, password) {
+                        other.markdown = markdown;
+                    }
+                }
+            }
+        }
         let by_id: HashMap<String, Page> = all.iter().cloned().map(|p| (p.id.clone(), p)).collect();
         let by_title: HashMap<String, String> = all
             .iter()
@@ -692,11 +735,14 @@ impl LocalWorkspace {
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| self.default_source_id.clone());
 
-        let raw_body = input
+        let mut raw_body = input
             .markdown
             .clone()
             .or_else(|| existing.as_ref().map(|page| page.markdown.clone()))
             .unwrap_or_default();
+        if existing.is_some() && input.markdown.is_none() && !title.is_empty() {
+            raw_body = rename_title_markdown(&title, &raw_body);
+        }
         if existing.as_ref().is_some_and(|page| is_encrypted_markdown(&page.markdown))
             && !is_encrypted_markdown(&raw_body)
         {
@@ -1049,6 +1095,15 @@ pub fn ensure_title_markdown(title: &str, body: &str) -> String {
         return format!("# {clean_title}\n\n");
     }
     format!("# {clean_title}\n\n{trimmed}\n")
+}
+
+pub fn rename_title_markdown(title: &str, body: &str) -> String {
+    if is_encrypted_markdown(body) { return body.to_owned(); }
+    let text = body.trim_start_matches('\u{feff}');
+    if text.starts_with("# ") {
+        let rest = text.find('\n').map(|offset| &text[offset..]).unwrap_or("");
+        format!("# {}{rest}", title.trim())
+    } else { ensure_title_markdown(title, text) }
 }
 
 pub fn format_utc_millis_pub(millis: u64) -> String {

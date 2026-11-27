@@ -15,8 +15,15 @@ import { suggestTags, type TagSuggestion } from '@/services/tagging'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { workspaceService } from '@/services/workspace'
 import { isMobileClient, usesMobileUi } from '@/services/platform'
+import type { DocumentSession } from '@/services/document-session'
+import { LockKeyhole } from '@lucide/vue'
+import PageProtectionControl from '@/components/PageProtectionControl.vue'
 
+const props = defineProps<{ mobileLayout?: boolean; session?: DocumentSession }>()
+const emit = defineEmits<{ 'toggle-sidebar': []; 'toggle-focus': []; 'toggle-context': []; 'mobile-back': []; 'dirty-change': [dirty: boolean] }>()
 const store = useWorkspaceStore()
+const activePage = computed(() => props.session?.page ?? store.activePage)
+const locked = computed(() => Boolean(props.session?.locked))
 const backend = useBackendStore()
 const isDesktop = '__TAURI_INTERNALS__' in window
 const title = ref('')
@@ -28,6 +35,8 @@ const copiedLinkNotice = ref(false)
 const exportedNotice = ref(false)
 const refreshedNotice = ref(false)
 const refreshing = ref(false)
+const protectionBusy = ref(false)
+const protectionPage = computed(() => store.activePage && !rawActiveSource.value?.temporary ? store.activePage : null)
 const hasUnsavedChanges = ref(false)
 const saveError = ref<string | null>(null)
 const conflictRemotePage = ref<Page | null>(null)
@@ -58,11 +67,16 @@ let autoSaveFlushing = false
 let autoSavePending = false
 let autoSaveFlushDone: Promise<void> = Promise.resolve()
 let resolveAutoSaveFlushDone: (() => void) | null = null
+let loadedPage: Page | null = null
+let disposed = false
 
-const pageSync = computed(() => store.pageBackendSync(store.activePage?.id))
+const pageSync = computed(() => store.pageBackendSync(activePage.value?.id))
 const syncedToBackend = computed(() => pageSync.value === 'synced')
 const awaitingBackendSync = computed(() => pageSync.value === 'pending' || pageSync.value === 'conflict')
 const status = computed(() => {
+  if (locked.value) return '已锁定'
+  if (props.session?.busy) return '保存中'
+  if (props.session?.error) return '失败'
   if (store.saving) return '保存中'
   if (refreshing.value) return '刷新中'
   if (saveError.value) return '失败'
@@ -76,8 +90,8 @@ const status = computed(() => {
   return activeSource.value?.kind === 's3' ? '云端' : '本地'
 })
 const statusTitle = computed(() => {
-  if (saveError.value) return saveError.value
-  if (store.activePage && store.syncConflicts.has(store.activePage.id)) return '本地和后台都改过，较新的一份在正文里'
+  if (saveError.value || props.session?.error) return saveError.value || props.session!.error
+  if (activePage.value && store.syncConflicts.has(activePage.value.id)) return '本地和后台都改过，较新的一份在正文里'
   switch (status.value) {
     case '已同步': return '已保存，并同步到后台'
     case '冲突': return '本地和后台都改过，较新的一份在正文里'
@@ -90,12 +104,12 @@ const statusTitle = computed(() => {
     default: return status.value
   }
 })
-const isFavorite = computed(() => Boolean(store.activePage && store.favoritePageIds.includes(store.activePage.id)))
-const rawActiveSource = computed(() => store.allSources.find((source) => source.id === store.activePage?.storageSourceId) ?? null)
+const isFavorite = computed(() => Boolean(activePage.value && store.favoritePageIds.includes(activePage.value.id)))
+const rawActiveSource = computed(() => store.allSources.find((source) => source.id === activePage.value?.storageSourceId) ?? null)
 const boundSourceIds = computed(() => {
-  if (!store.activePage) return []
+  if (!activePage.value) return []
   const known = new Set(store.allSources.map((source) => source.id))
-  return pageSourceIds(store.activePage).filter((id) => known.has(id))
+  return pageSourceIds(activePage.value).filter((id) => known.has(id))
 })
 function cloudWorkspaceId(source: StorageSource) {
   if (source.id.startsWith('backend:')) return source.id.slice('backend:'.length)
@@ -140,10 +154,10 @@ const workspaceBadgeTitle = computed(() => {
   return `${source.name}\n${source.path}\n${mode}`
 })
 const hasRemoteSaveConflict = computed(() => {
-  const message = saveError.value ?? ''
+  const message = saveError.value || props.session?.error || ''
   return message.includes('其他设备更新') || message.includes('其他程序修改')
 })
-const hasSyncConflict = computed(() => Boolean(store.activePage && store.syncConflicts.has(store.activePage.id)))
+const hasSyncConflict = computed(() => Boolean(activePage.value && store.syncConflicts.has(activePage.value.id)))
 const hasRemoteConflict = computed(() => hasRemoteSaveConflict.value || hasSyncConflict.value)
 const isLocalDiskSource = computed(() => {
   const kind = activeSource.value?.kind
@@ -193,7 +207,7 @@ const conflictDiff = computed(() => {
   return { local, remote: remoteResult }
 })
 const breadcrumbs = computed(() => {
-  const current = store.activePage
+  const current = activePage.value
   if (!current) return []
   const items: Page[] = []
   const seen = new Set<string>()
@@ -206,7 +220,7 @@ const breadcrumbs = computed(() => {
   return items
 })
 const childPages = computed(() => {
-  const parentId = store.activePage?.id
+  const parentId = activePage.value?.id
   if (!parentId) return []
   return store.pages
     .filter((page) => page.parentId === parentId && !page.deletedAt)
@@ -224,11 +238,12 @@ function composeStoredMarkdown(cleanTitle: string, body: string) {
 }
 
 function loadActivePage() {
-  const page = store.activePage
+  const page = activePage.value
+  loadedPage = page ? { ...page, tags: [...page.tags] } : null
   const markdown = page?.markdown ?? ''
   headingInFile.value = markdown.startsWith('# ')
   title.value = page?.title ?? ''
-  bodyMarkdown.value = headingInFile.value ? markdown.replace(/^# .*\n?/, '') : markdown
+  bodyMarkdown.value = headingInFile.value ? markdown.replace(/^# .*(?:\r?\n){0,2}/, '') : markdown
   tags.value = page?.tags ?? []
   tagDraft.value = ''
   tagSuggestions.value = []
@@ -236,16 +251,26 @@ function loadActivePage() {
   saveError.value = null
 }
 
-watch(() => store.activePageId, loadActivePage, { immediate: true })
+watch(() => activePage.value?.id, loadActivePage, { immediate: true })
+watch(hasUnsavedChanges, (dirty) => emit('dirty-change', dirty))
+watch(locked, (value) => {
+  if (!value) { loadActivePage(); return }
+  cancelAutoSave()
+  loadActivePage()
+  closeFind()
+  showingHistory.value = false
+  selectedRevision.value = null
+  conflictRemotePage.value = null
+})
 
 watch(
   () => {
-    const page = store.activePage
+    const page = activePage.value
     return page ? `${page.id}\0${page.updatedAt}` : ''
   },
   async (signature, previous) => {
     if (!signature || !previous || signature === previous) return
-    const page = store.activePage
+    const page = activePage.value
     if (!page) return
     const cleanTitle = title.value.trim() || '无标题'
     const editorMarkdown = composeStoredMarkdown(cleanTitle, bodyMarkdown.value)
@@ -316,9 +341,11 @@ async function flushAutoSave() {
       const page = draft()
       if (!page) break
       try {
-        await store.persist(page)
-        if (revision === changeRevision) hasUnsavedChanges.value = false
-        saveError.value = null
+        await persistDocument(page)
+        if (!disposed && loadedPage?.id === page.id) {
+          if (revision === changeRevision) hasUnsavedChanges.value = false
+          saveError.value = null
+        }
       } catch (reason) {
         saveError.value = saveFailureMessage(reason)
         if (hasRemoteConflict.value) maybeAutoOpenConflictPreview()
@@ -354,27 +381,31 @@ function cancelAutoSave() {
 }
 
 async function loadConflictPreview() {
-  if (conflictLoading.value || !store.activePage) return
+  if (conflictLoading.value || !activePage.value) return
   if (!hasRemoteConflict.value && !saveError.value?.includes('其他设备') && !saveError.value?.includes('其他程序')) return
   conflictLoading.value = true
-  try { conflictRemotePage.value = await store.readLatestPage(store.activePage.id) }
+  try { conflictRemotePage.value = props.session ? await props.session.latest() : await store.readLatestPage(activePage.value.id) }
   catch (reason) { saveError.value = saveFailureMessage(reason) }
   finally { conflictLoading.value = false }
 }
 
-const props = defineProps<{ mobileLayout?: boolean }>()
-const emit = defineEmits<{ 'toggle-sidebar': []; 'toggle-focus': []; 'toggle-context': []; 'mobile-back': [] }>()
 
 function draft() {
-  if (!store.activePage) return null
+  if (!loadedPage || locked.value) return null
   const cleanTitle = title.value.trim() || '无标题'
-  return { ...store.activePage, icon: '', title: cleanTitle, markdown: composeStoredMarkdown(cleanTitle, bodyMarkdown.value), tags: tags.value }
+  return { ...loadedPage, icon: '', title: cleanTitle, markdown: composeStoredMarkdown(cleanTitle, bodyMarkdown.value), tags: [...tags.value] }
+}
+
+async function persistDocument(page: Page) {
+  if (props.session) await props.session.save(page)
+  else await store.persist(page)
+  if (!disposed && loadedPage?.id === page.id) loadedPage = activePage.value ? { ...activePage.value } : null
 }
 
 function onInput() {
   const page = draft()
   if (!page) return
-  const current = store.activePage
+  const current = activePage.value
   // TipTap / 源码区可能在无实质改动时也冒泡 update；无差异则不进自动保存、不刷 updatedAt。
   if (current && pageContentEqual(page, current)) {
     if (hasUnsavedChanges.value) {
@@ -395,33 +426,26 @@ function onInput() {
 }
 
 async function saveNow() {
+  if (locked.value) return true
   if (autoSaveTimer) window.clearTimeout(autoSaveTimer)
-  autoSavePending = false
+  if (!hasUnsavedChanges.value) return !saveError.value && !props.session?.error
+  await flushAutoSave()
   if (autoSaveFlushing) await autoSaveFlushDone
-  const page = draft()
-  if (!page) return false
-  if (store.activePage && pageContentEqual(page, store.activePage) && !hasUnsavedChanges.value) {
-    return true
-  }
-  try {
-    await store.persist(page)
-    hasUnsavedChanges.value = false
-    saveError.value = null
-    return true
-  } catch (reason) {
-    saveError.value = saveFailureMessage(reason)
-    maybeAutoOpenConflictPreview()
-    return false
-  }
+  return !hasUnsavedChanges.value && !saveError.value && !props.session?.error
 }
 
+async function lockDocument() { if (props.session && await saveNow()) props.session.lock() }
+
 async function reloadRemotePage() {
-  const pageId = store.activePage?.id
+  const pageId = activePage.value?.id
   if (!pageId) return
   if (!conflictConfirm(`将重新载入${remoteConflictLabel.value}版本，当前未保存的本地修改会丢失。是否继续？`)) return
   cancelAutoSave()
+  const revision = changeRevision
+  const isCurrent = () => !disposed && loadedPage?.id === pageId && revision === changeRevision
   try {
-    await store.resolveConflictLoadRemote(pageId)
+    props.session ? await props.session.refresh(isCurrent) : await store.resolveConflictLoadRemote(pageId)
+    if (!isCurrent()) return
     loadActivePage()
     saveError.value = null
     conflictRemotePage.value = null
@@ -436,7 +460,7 @@ async function forceOverwriteRemote() {
   if (!conflictConfirm(`将用本地草稿覆盖${remoteConflictLabel.value}版本，其他设备上的修改会丢失。是否继续？`)) return
   cancelAutoSave()
   try {
-    await store.resolveConflictOverwriteLocal(page)
+    props.session ? await props.session.save(page, true) : await store.resolveConflictOverwriteLocal(page)
     hasUnsavedChanges.value = false
     saveError.value = null
     conflictRemotePage.value = null
@@ -460,7 +484,7 @@ async function copyConflictDraft() {
 }
 
 async function copyPageLink() {
-  const page = store.activePage
+  const page = activePage.value
   if (!page) return
   const text = `[${page.title || '无标题'}](tie://page/${page.id})`
   try {
@@ -481,7 +505,7 @@ async function copyPageLink() {
 }
 
 async function revealPageFile() {
-  const page = store.activePage
+  const page = activePage.value
   const source = activeSource.value
   if (!page || !source || !isDesktop) return
   try {
@@ -514,7 +538,7 @@ root_page: ${pageId}
 }
 
 async function exportTie() {
-  const page = store.activePage
+  const page = activePage.value
   if (!page) return
   const filename = tieExportFilename(page.title || '无标题')
   try {
@@ -554,7 +578,7 @@ async function exportTie() {
 }
 
 async function exportPageClosure() {
-  const page = store.activePage
+  const page = activePage.value
   if (!page || !isDesktop) return
   try {
     const { invoke } = await import('@tauri-apps/api/core')
@@ -580,7 +604,7 @@ async function exportPageClosure() {
 }
 
 async function refreshCurrentPage() {
-  if (!store.activePage || refreshing.value) return
+  if (locked.value || !activePage.value || refreshing.value) return
   if (hasUnsavedChanges.value && !window.confirm('当前有未保存修改，从存储刷新将丢弃这些修改。是否继续？')) return
   if (autoSaveTimer) {
     window.clearTimeout(autoSaveTimer)
@@ -588,8 +612,12 @@ async function refreshCurrentPage() {
   }
   refreshing.value = true
   saveError.value = null
+  const pageId = activePage.value.id
+  const revision = changeRevision
+  const isCurrent = () => !disposed && loadedPage?.id === pageId && revision === changeRevision
   try {
-    await store.refreshPage(store.activePage.id)
+    props.session ? await props.session.refresh(isCurrent) : await store.refreshPage(pageId)
+    if (!isCurrent()) return
     loadActivePage()
     conflictRemotePage.value = null
     showingHistory.value = false
@@ -604,31 +632,32 @@ async function refreshCurrentPage() {
 }
 
 async function openHistory() {
-  if (!store.activePage) return
+  if (locked.value || !activePage.value) return
   showingHistory.value = true
   selectedRevision.value = null
   selectedRevisionId.value = null
   revisionPreviewError.value = null
   historyLoading.value = true
-  try { revisions.value = await store.listPageRevisions(store.activePage.id) } finally { historyLoading.value = false }
+  try { revisions.value = await store.listPageRevisions(activePage.value.id) } finally { historyLoading.value = false }
 }
 
 async function previewRevision(revision: PageRevision) {
-  if (!store.activePage) return
+  if (!activePage.value) return
   selectedRevisionId.value = revision.id
   selectedRevision.value = null
   revisionPreviewError.value = null
   revisionPreviewLoading.value = true
   try {
-    selectedRevision.value = await store.readPageRevision(store.activePage.id, revision.id)
+    selectedRevision.value = props.session ? await props.session.readRevision(revision.id) : await store.readPageRevision(activePage.value.id, revision.id)
   } catch {
     revisionPreviewError.value = '无法读取该历史版本，可能已被外部同步工具移除。'
   } finally { revisionPreviewLoading.value = false }
 }
 
 async function restoreRevision(revision: PageRevision) {
-  if (!store.activePage || !window.confirm(`恢复“${revision.title}”的历史版本？当前内容会先自动保留为新版本。`)) return
-  const restored = await store.restorePageRevision(store.activePage.id, revision.id)
+  if (!activePage.value || !window.confirm(`恢复“${revision.title}”的历史版本？当前内容会先自动保留为新版本。`)) return
+  if (hasUnsavedChanges.value && !await saveNow()) return
+  const restored = props.session ? (await props.session.restoreRevision(revision.id), true) : await store.restorePageRevision(activePage.value.id, revision.id)
   if (!restored) return
   loadActivePage()
   showingHistory.value = false
@@ -662,7 +691,7 @@ async function generateTagSuggestions() {
       workspaceTags: store.tagIndex.map((tag) => tag.name),
     }
     const aiConfig = loadAiTaggingConfig()
-    const aiSuggestions = aiTaggingReady(aiConfig)
+    const aiSuggestions = !props.session && aiTaggingReady(aiConfig)
       ? await suggestTagsWithAi(aiConfig, input, backend.profile).catch((error) => {
         console.warn('AI 标签提取失败', error)
         return []
@@ -758,6 +787,7 @@ function replaceAll() {
 }
 
 function onShortcut(event: KeyboardEvent) {
+  if (locked.value || protectionBusy.value) return
   if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 's') {
     event.preventDefault()
     void saveNow()
@@ -785,6 +815,7 @@ function onShortcut(event: KeyboardEvent) {
 }
 
 function onWorkspaceCommand(event: Event) {
+  if (locked.value || protectionBusy.value) return
   if (event.type === 'tie:find-in-page') openFind()
   else if (event.type === 'tie:toggle-source-mode') toggleSourceMode()
   else if (event.type === 'tie:open-page-history') void openHistory()
@@ -827,7 +858,8 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   unregisterEditorSave?.()
-  if (hasUnsavedChanges.value) void saveNow()
+  if (hasUnsavedChanges.value) void saveNow().finally(() => { bodyMarkdown.value = ''; selectedRevision.value = null; conflictRemotePage.value = null })
+  disposed = true
   window.removeEventListener('keydown', onShortcut)
   document.removeEventListener('visibilitychange', saveWhenHidden)
   window.removeEventListener('tie:find-in-page', onWorkspaceCommand)
@@ -842,10 +874,11 @@ onBeforeUnmount(() => {
 })
 
 async function expandToChild(title: string) {
-  const parent = store.activePage
+  const parent = activePage.value
   if (!parent) throw new Error('没有打开的页面')
   const cleanTitle = title.trim().replace(/\s+/g, ' ').slice(0, 120)
   if (!cleanTitle) throw new Error('请先选中要展开的文字')
+  if (props.session) return props.session.createPage(cleanTitle, parent.id)
   const created = await workspaceService.createPage(parent.id, parent.storageSourceId)
   const saved = await workspaceService.savePage({
     ...created,
@@ -861,13 +894,16 @@ async function expandToChild(title: string) {
   return saved
 }
 async function createChild() {
-  if (store.activePage) await store.createChildPage(store.activePage.id)
+  if (!activePage.value) return
+  if (props.session) { const child = await props.session.createPage('无标题', activePage.value.id); store.openPage(child.id) }
+  else await store.createChildPage(activePage.value.id)
 }
-async function createLinkedPage(title: string) { return store.createLinkedPage(title) }
+async function createLinkedPage(title: string) { return props.session ? props.session.createPage(title, null) : store.createLinkedPage(title) }
+defineExpose({ saveNow })
 </script>
 
 <template>
-  <main v-if="store.activePage" class="editor-pane" :class="{ 'mobile-editor-pane': props.mobileLayout }">
+  <main v-if="activePage" class="editor-pane" :class="{ 'mobile-editor-pane': props.mobileLayout }">
     <header class="editor-header">
       <button
         v-if="props.mobileLayout || isMobileClient"
@@ -877,8 +913,8 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
         @click="emit('mobile-back')"
       >←</button>
       <nav v-if="!props.mobileLayout" class="breadcrumbs" aria-label="页面层级"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><template v-for="(page, index) in breadcrumbs" :key="page.id"><span>›</span><button :class="{ current: index === breadcrumbs.length - 1 }" :title="page.title" @click="store.openPage(page.id)">{{ page.title }}</button></template></nav>
-      <h1 v-else class="mobile-editor-title">{{ store.activePage.title }}</h1>
-      <div class="save-state"><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span class="source-select-trigger is-label" :title="workspaceBadgeTitle">{{ sourceShortLabel(activeSource.name) }}</span></div><span class="save-dot" :class="{ saving: store.saving, pending: status === '未同步', synced: status === '已同步', conflict: status === '冲突', local: status === '本地' || status === '云端', error: Boolean(saveError) }" :title="statusTitle"></span><span v-if="status !== '已同步' && status !== '未同步' && status !== '冲突'" :title="statusTitle">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" :title="saveError || '重新尝试保存当前页面'" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从工作区刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button v-if="!isDesktop" class="copy-link-button" title="导入 .tiez" @click="store.importTiezBrowser()">导入</button><button v-if="!isDesktop" class="copy-link-button" title="导出当前工作区为 .tiez" @click="store.exportTiezBrowser()">.tiez</button><button class="copy-link-button" title="导出 .tie，以当前页面为根" @click="exportTie">⇩</button><button v-if="isDesktop" class="copy-link-button" title="导出此页及引用（闭包）" @click="exportPageClosure">⇪</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(store.activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
+      <h1 v-else class="mobile-editor-title">{{ activePage.title }}</h1>
+      <div class="save-state" :inert="locked || protectionBusy"><PageProtectionControl v-if="protectionPage" :page="protectionPage" :prepare="saveNow" @busy="protectionBusy = $event" /><button v-if="session && !locked" type="button" class="history-button" aria-label="锁定页面" title="锁定页面" @click="lockDocument"><LockKeyhole :size="14" /></button><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span class="source-select-trigger is-label" :title="workspaceBadgeTitle">{{ sourceShortLabel(activeSource.name) }}</span></div><span class="save-dot" :class="{ saving: store.saving, pending: status === '未同步', synced: status === '已同步', conflict: status === '冲突', local: status === '本地' || status === '云端', error: Boolean(saveError) }" :title="statusTitle"></span><span v-if="status !== '已同步' && status !== '未同步' && status !== '冲突'" :title="statusTitle">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" :title="saveError || '重新尝试保存当前页面'" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从工作区刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button v-if="!isDesktop" class="copy-link-button" title="导入 .tiez" @click="store.importTiezBrowser()">导入</button><button v-if="!isDesktop" class="copy-link-button" title="导出当前工作区为 .tiez" @click="store.exportTiezBrowser()">.tiez</button><button class="copy-link-button" title="导出 .tie，以当前页面为根" @click="exportTie">⇩</button><button v-if="isDesktop" class="copy-link-button" title="导出此页及引用（闭包）" @click="exportPageClosure">⇪</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
     </header>
     <aside v-if="showingHistory" class="history-popover">
       <div class="history-popover-heading"><strong>页面历史</strong><button aria-label="关闭页面历史" @click="showingHistory = false">×</button></div>
@@ -894,8 +930,10 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
         <footer><button @click="copyConflictDraft">复制本地草稿</button><button @click="conflictRemotePage = null">保留草稿</button><button :disabled="store.saving" @click="forceOverwriteRemote">{{ store.saving ? '覆盖中…' : `覆盖${remoteConflictLabel}版本` }}</button><button class="conflict-load-button" @click="reloadRemotePage">载入{{ remoteConflictLabel }}版本</button></footer>
       </section>
     </div>
-    <div class="editor-scroll" @click="onEditorSurfaceClick">
+    <div class="editor-scroll" :inert="protectionBusy" @click="onEditorSurfaceClick">
       <article ref="documentRoot" class="document" @click="onEditorSurfaceClick">
+        <slot v-if="locked" name="unlock"></slot>
+        <template v-else>
         <div v-if="showingFind" class="document-find" role="search">
           <input v-model="findQuery" autofocus placeholder="在当前页面查找" aria-label="在当前页面查找" @input="findNext(1)" @keydown.enter.prevent="findNext($event.shiftKey ? -1 : 1)" @keydown.escape.prevent="closeFind" />
           <span>{{ findQuery ? (findResult.count ? `${findResult.index}/${findResult.count}` : '无结果') : '' }}</span>
@@ -910,7 +948,7 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
           <DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" />
           <textarea ref="sourceEditor" v-model="bodyMarkdown" class="source-editor" aria-label="Markdown 源码" :spellcheck="store.spellcheckEnabled" @input="onInput"></textarea>
         </div>
-        <TiptapEditor v-else ref="richEditor" :model-value="bodyMarkdown" :pages="store.pages" :sources="store.allSources" :page-id="store.activePage.id" :spellcheck="store.spellcheckEnabled" :background-started="store.backgroundStarted" :create-linked-page="createLinkedPage" :expand-to-child="expandToChild" enable-pheromone @update:model-value="onBodyChange" @navigate="navigateToPage" @create-child="createChild">
+        <TiptapEditor v-else ref="richEditor" :model-value="bodyMarkdown" :pages="store.pages" :sources="store.allSources" :page-id="activePage.id" :spellcheck="store.spellcheckEnabled" :background-started="store.backgroundStarted" :create-linked-page="createLinkedPage" :expand-to-child="expandToChild" enable-pheromone :private-document="Boolean(session)" :protected-page-actions="Boolean(session)" @update:model-value="onBodyChange" @navigate="navigateToPage" @create-child="createChild">
           <template #meta><DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" /></template>
         </TiptapEditor>
         <section v-if="childPages.length" class="document-child-pages" aria-label="子页面">
@@ -925,13 +963,14 @@ async function createLinkedPage(title: string) { return store.createLinkedPage(t
             >{{ page.title || '无标题' }}</button>
           </div>
         </section>
+        </template>
       </article>
     </div>
     <footer class="editor-statusbar">
       <button v-if="!props.mobileLayout && !isMobileClient" title="收起或展开左侧栏" @click="emit('toggle-sidebar')">▤ 侧栏</button>
       <button class="statusbar-mobile-hide" title="切换专注模式（Ctrl/Cmd + Shift + Enter）" @click="emit('toggle-focus')">⛶ 专注</button>
-      <template v-if="!store.sourceMode"><button class="statusbar-mobile-hide" title="撤销（Ctrl/Cmd + Z）" @click="undo">↶ 撤销</button><button class="statusbar-mobile-hide" title="重做（Ctrl/Cmd + Shift + Z）" @click="redo">↷ 重做</button></template>
-      <button :class="{ active: store.sourceMode }" title="切换 Markdown 源码模式（Ctrl/Cmd + /）" @click="toggleSourceMode">&lt;/&gt; 源码</button>
+      <template v-if="!store.sourceMode"><button :disabled="locked" class="statusbar-mobile-hide" title="撤销（Ctrl/Cmd + Z）" @click="undo">↶ 撤销</button><button :disabled="locked" class="statusbar-mobile-hide" title="重做（Ctrl/Cmd + Shift + Z）" @click="redo">↷ 重做</button></template>
+      <button :disabled="locked" :class="{ active: store.sourceMode }" title="切换 Markdown 源码模式（Ctrl/Cmd + /）" @click="toggleSourceMode">&lt;/&gt; 源码</button>
       <span class="status-divider"></span>
       <button :class="{ active: store.spellcheckEnabled }" :title="store.spellcheckEnabled ? '关闭拼写检查' : '开启拼写检查'" @click="store.toggleSpellcheck">✓ 拼写检查</button>
       <span class="word-count">字数 {{ wordCount }}</span>

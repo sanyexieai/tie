@@ -7,6 +7,7 @@ use tie_local::{
 };
 
 mod history;
+mod protection;
 
 pub fn serve(root: Option<&Path>, source_id: Option<&str>) -> Result<(), String> {
     let mut runtime = McpRuntime::new(root, source_id)?;
@@ -100,7 +101,7 @@ impl McpRuntime {
                 } else {
                     "有服务器绑定时，内容请求优先使用 HTTP。HTTP 异常不会自动切换本地；调用 tie_connection 查看原因，并先向用户确认，获准后才能 confirm_local。无本地登录会话时请用户提供 MCP token。工具列表成功不代表 HTTP 已连通，请看 tie_doctor.transport。"
                 };
-                result["instructions"] = json!(format!("{connection_instructions} 检索知识先用 tie_tree 按层选择分类，再用 tie_search 的 root/exclude 缩小范围，必要时 tie_get 读全文。写入尽量用 parentId 归入合适的已有分类，分类非必填，不自动重排旧树。需要讨论先用 tie_signal_list，再用 tie_signal_add 留下支持/异议/修正；tie_signal_resolve 处理意见，采用前须先保存正文。"));
+                result["instructions"] = json!(format!("{connection_instructions} 检索知识先用 tie_tree 按层选择分类，再用 tie_search 的 root/exclude 缩小范围，必要时 tie_get 读全文。写入尽量用 parentId 归入合适的已有分类，分类非必填，不自动重排旧树。需要讨论先用 tie_signal_list，再用 tie_signal_add 留下支持/异议/修正；tie_signal_resolve 处理意见，采用前须先保存正文。加密页面的内容操作可提供本次调用的 password；它不继承客户端解锁状态，也不会授权后续调用。改变已有页面保护模式请使用 tie_page_protection，同时转换历史和讨论。"));
             }
             return Some(response);
         }
@@ -314,10 +315,11 @@ fn local_only_request(message: &Value) -> bool {
 
 fn local_write_request(message: &Value) -> bool {
     message.get("method").and_then(Value::as_str) == Some("tools/call")
-        && matches!(
+        && (matches!(
             message.pointer("/params/name").and_then(Value::as_str),
             Some("tie_write" | "tie_restore" | "tie_import" | "tie_file_ingest" | "tie_signal_add" | "tie_signal_resolve")
-        )
+        ) || (message.pointer("/params/name").and_then(Value::as_str) == Some("tie_page_protection")
+            && message.pointer("/params/arguments/action").and_then(Value::as_str) == Some("convert")))
 }
 
 fn tool_ok_error(value: Value) -> Value {
@@ -419,16 +421,25 @@ fn tool_defs() -> Vec<Value> {
             "root": { "type": "string", "description": "分类节点 ID 或唯一标题，包含该节点及全部后代；省略时不限定" },
             "exclude": { "type": "array", "items": { "type": "string" }, "description": "忽略这些节点及各自全部后代；优先使用节点 ID" }
         }))),
-        tool("tie_search", "先用 tie_tree 逐级选择知识分类，再按关键词或标签搜索。root 限定相关子树，exclude 忽略无关分支；结果带分类路径。加密页面只检索标题和标签，不检索密文正文。", obj_props(json!({
+        tool("tie_search", "先用 tie_tree 逐级选择知识分类，再按关键词或标签搜索。root 限定相关子树，exclude 忽略无关分支；结果带分类路径。加密页面默认仅搜索元数据；提供 password 时只在本次查询内尝试解锁相关正文，不保存密码或授权。", obj_props(json!({
             "query": { "type": "string" },
             "tag": { "type": "string" },
             "limit": { "type": "integer" },
             "root": { "type": "string", "description": "分类节点 ID 或唯一标题，包含该节点及全部后代；省略时搜索全库" },
             "exclude": { "type": "array", "items": { "type": "string" }, "description": "排除节点及其全部后代；在评分及结果数量限制前裁剪" }
         }))),
-        tool("tie_get", "按页面 id 或精确标题读取全文；加密页面返回 locked: true 和原始密文，不能解密正文", obj_props(json!({
+        tool("tie_get", "按页面 id 或精确标题读取全文；加密页面默认返回 locked: true 和密文，提供 password 后仅本次调用返回解密正文", obj_props(json!({
             "id_or_title": { "type": "string" }
         }))),
+        tool("tie_page_protection", "查看页面保护状态，或将普通页面与加密页面互相转换。convert 必须提供 password；同时转换正文、历史、讨论和图片，保留页面身份。密码仅用于本次调用，不保存，不继承客户端解锁状态。", json!({
+            "type": "object", "required": ["id_or_title"], "properties": {
+                "id_or_title": { "type": "string" },
+                "action": { "type": "string", "enum": ["status", "convert"], "default": "status" },
+                "encrypted": { "type": "boolean", "description": "convert 的目标模式：true 加密，false 转为普通页面" },
+                "password": { "type": "string", "writeOnly": true, "description": "页面密码，仅本次调用使用；HTTP MCP 会在服务器内存中使用，不保存到页面、历史或日志" },
+                "expectedUpdatedAt": { "type": "string" }
+            }
+        })),
         tool("tie_history", "列出页面已保存的历史版本，最新在前；每页最多保留 80 份。返回版本 ID、时间和标题，不返回正文。", json!({
             "type": "object", "required": ["id_or_title"], "properties": {
                 "id_or_title": { "type": "string" },
@@ -491,7 +502,8 @@ fn tool_defs() -> Vec<Value> {
             "kind": { "type": "string" },
             "matchTitle": { "type": "boolean" },
             "icon": { "type": "string" },
-            "actor": { "type": "string", "description": "Agent 名。不要写「我」" }
+            "actor": { "type": "string", "description": "Agent 名。不要写「我」" },
+            "encrypted": { "type": "boolean", "description": "新建加密页时设为 true；已有页面改变保护模式请使用 tie_page_protection" }
         }))),
         tool("tie_tree", "按层浏览知识分类，不返回正文。先 depth=1 看顶层，再用 root 节点 ID、depth=2 逐级展开；childCount 与 childrenTruncated 表示是否还有未展开子节点。", obj_props(json!({
             "root": { "type": "string", "description": "分类节点 ID 或唯一标题；该节点计为第一层" },
@@ -525,6 +537,10 @@ fn tool_defs() -> Vec<Value> {
         }))),
     ];
     for tool in &mut tools {
+        if matches!(tool["name"].as_str(), Some("tie_list_recent" | "tie_search" | "tie_get" | "tie_related" | "tie_revision_get" | "tie_diff" | "tie_restore" | "tie_changes" | "tie_signal_list" | "tie_signal_add" | "tie_signal_resolve" | "tie_write")) {
+            tool["inputSchema"]["properties"]["password"] = json!({ "type": "string", "writeOnly": true,
+                "description": "页面解锁密码，仅本次工具调用使用；不继承客户端授权，不保存。HTTP 模式在服务器内存中完成解密。" });
+        }
         let required = match tool["name"].as_str() { Some("tie_signal_add") => Some(json!(["id_or_title","body","baseUpdatedAt","opinionKind"])), Some("tie_signal_resolve") => Some(json!(["id_or_title","id","status"])), Some("tie_changes" | "tie_signal_list") => Some(json!(["id_or_title"])), _ => None };
         if let Some(required) = required { tool["inputSchema"]["required"] = required; }
     }
@@ -545,10 +561,12 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
             Err("凭据工具由服务器 HTTP MCP 提供，不支持本地降级或通过 CLI 读取明文。".into())
         }
         "tie_doctor" => doctor(ws),
+        "tie_page_protection" => protection::call(ws, args),
+        "tie_internal_protection_read" | "tie_internal_protection_replace" => protection::internal(ws, name, args),
         "tie_list_recent" => {
             let limit = int_arg(args, "limit", 20);
             let (root, exclude) = search_scope_args(args)?;
-            let hits = ws.search_scoped("", str_arg(args, "tag"), limit, false, root, &exclude)?;
+            let hits = ws.search_scoped_authorized("", str_arg(args, "tag"), limit, false, root, &exclude, protection::password(args)?)?;
             Ok(json!(flatten_hits(hits)))
         }
         "tie_search" => {
@@ -556,7 +574,7 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
             let limit = int_arg(args, "limit", 12);
             let (root, exclude) = search_scope_args(args)?;
             let hits =
-                ws.search_scoped(query, str_arg(args, "tag"), limit, false, root, &exclude)?;
+                ws.search_scoped_authorized(query, str_arg(args, "tag"), limit, false, root, &exclude, protection::password(args)?)?;
             Ok(json!({
                 "workspace": ws.root().display().to_string(),
                 "backend": "tie",
@@ -569,17 +587,15 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
             let page = ws
                 .resolve(key)?
                 .ok_or_else(|| format!("页面不存在：{key}"))?;
-            let mut value = serde_json::to_value(&page).map_err(|error| error.to_string())?;
-            if tie_local::is_encrypted_markdown(&page.markdown) {
-                value["locked"] = json!(true);
-            }
-            value["path"] = json!(format!("pages/{}.md", page.id));
+            let path = format!("pages/{}.md", page.id);
+            let mut value = protection::reveal(page, args)?;
+            value["path"] = json!(path);
             value["backend"] = json!("tie");
             Ok(value)
         }
         "tie_related" => {
             let key = required_str(args, "id_or_title")?;
-            Ok(serde_json::to_value(ws.related(key)?).map_err(|error| error.to_string())?)
+            Ok(serde_json::to_value(ws.related_authorized(key, protection::password(args)?)?).map_err(|error| error.to_string())?)
         }
         "tie_history" => {
             let key = required_str(args, "id_or_title")?;
@@ -598,17 +614,18 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
             let key = required_str(args, "id_or_title")?;
             let revision_id = required_str(args, "revisionId")?;
             let revision = ws.get_revision(key, revision_id)?;
-            let mut value = json!(revision);
-            if tie_local::is_encrypted_markdown(&revision.markdown) {
-                value["locked"] = json!(true);
+            if ws.get_by_id(&revision.id)?.is_some_and(|page| tie_local::is_encrypted_markdown(&page.markdown))
+                && !tie_local::is_encrypted_markdown(&revision.markdown) {
+                protection::check_page(ws, &revision.id, args)?;
             }
-            Ok(value)
+            protection::reveal(revision, args)
         }
         "tie_diff" => history::diff(
             ws,
             required_str(args, "id_or_title")?,
             required_str(args, "revisionId")?,
             optional_string_arg(args, "compareTo")?,
+            protection::password(args)?,
         ),
         "tie_restore" => restore_page(ws, args),
         "tie_changes" | "tie_signal_list" | "tie_signal_add" | "tie_signal_resolve" => {
@@ -619,17 +636,34 @@ fn call_tool(ws: &LocalWorkspace, name: &str, args: &Value) -> Result<Value, Str
                 else if matches!(name, "tie_changes" | "tie_signal_list") && !tie_local::changes::list_reviews(ws.root(), key)?.entries.is_empty() { key.to_owned() }
                 else { return Err("页面不存在".into()); }
             };
+            let protected = ws.get_by_id(&page_id)?.is_some_and(|page| tie_local::is_encrypted_markdown(&page.markdown));
             let mut file = if name == "tie_signal_add" {
                 let id = str_owned(args, "id").unwrap_or_else(|| format!("op_{}", tie_local::revision_id()));
                 let origin = tie_local::changes::current_origin();
                 if !matches!(required_str(args,"opinionKind")?, "objection" | "correction" | "support") { return Err("意见类型无效".into()); }
-                tie_local::changes::add_signal(ws.root(), &page_id, &id, &origin.actor.clone(), required_str(args,"opinionKind")?, optional_string_arg(args,"quote")?.unwrap_or(""), required_str(args,"body")?, required_str(args,"baseUpdatedAt")?, optional_string_arg(args,"replyTo")?, Some(origin), None)?
+                let quote = optional_string_arg(args,"quote")?.unwrap_or("");
+                let body = required_str(args,"body")?;
+                let (quote, body) = if protected && (!tie_local::is_encrypted_markdown(body) || protection::password(args)?.is_some()) {
+                    let password = protection::require_password(args).map_err(|_| "加密页面的讨论内容需要先解锁并加密后保存，请提供本次调用的 password".to_owned())?;
+                    protection::check_page(ws, &page_id, args)?;
+                    let file = tie_local::encryption::protect_reviews(tie_local::changes::ReviewFile { entries: vec![tie_local::changes::ReviewEntry {
+                        kind: "opinion".into(), quote: quote.into(), body: body.into(), ..Default::default()
+                    }] }, password)?;
+                    let entry = &file.entries[0];
+                    (entry.quote.clone(), entry.body.clone())
+                } else { (quote.to_owned(), body.to_owned()) };
+                tie_local::changes::add_signal(ws.root(), &page_id, &id, &origin.actor.clone(), required_str(args,"opinionKind")?, &quote, &body, required_str(args,"baseUpdatedAt")?, optional_string_arg(args,"replyTo")?, Some(origin), None)?
             } else if name == "tie_signal_resolve" {
-                tie_local::changes::resolve_signal(ws.root(), &page_id, required_str(args,"id")?, required_str(args,"status")?, optional_string_arg(args,"resolutionNote")?, optional_string_arg(args,"appliedUpdatedAt")?, Some(tie_local::changes::current_origin()))?
+                let note = optional_string_arg(args,"resolutionNote")?;
+                let note = if protected && (protection::password(args)?.is_some() || note.is_some_and(|note| !tie_local::is_encrypted_markdown(note))) {
+                    protection::check_page(ws, &page_id, args)?;
+                    note.map(|note| tie_local::encryption::encrypt_markdown(note, protection::require_password(args)?)).transpose()?
+                } else { note.map(str::to_owned) };
+                tie_local::changes::resolve_signal(ws.root(), &page_id, required_str(args,"id")?, required_str(args,"status")?, note.as_deref(), optional_string_arg(args,"appliedUpdatedAt")?, Some(tie_local::changes::current_origin()))?
             } else { tie_local::changes::list_reviews(ws.root(), &page_id)? };
             if name == "tie_changes" { file.entries.retain(|entry| entry.kind == "change"); }
             if name == "tie_signal_list" { file.entries.retain(|entry| entry.kind == "opinion"); }
-            Ok(json!(file))
+            protection::reveal_reviews(ws, &page_id, file, args)
         }
         "tie_write" => write_page(ws, args),
         "tie_tree" => {
@@ -766,7 +800,7 @@ fn write_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
     }
     let mut origin = tie_local::changes::current_origin();
     origin.actor = resolve_actor(str_arg(args, "actor"));
-    let saved = tie_local::changes::with_change_context(origin, None, false, || ws.write_page(WritePageInput {
+    let mut input = WritePageInput {
         title: str_owned(args, "title"),
         markdown,
         page_id: str_owned(args, "pageId"),
@@ -779,7 +813,9 @@ fn write_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         icon: str_owned(args, "icon"),
-    }))?;
+    };
+    protection::prepare_write(ws, args, &mut input)?;
+    let saved = tie_local::changes::with_change_context(origin, None, false, || ws.write_page(input))?;
 
     Ok(serde_json::to_value(saved).map_err(|error| error.to_string())?)
 }
@@ -788,6 +824,11 @@ fn restore_page(ws: &LocalWorkspace, args: &Value) -> Result<Value, String> {
     let key = required_str(args, "id_or_title")?;
     let revision_id = required_str(args, "revisionId")?;
     let expected = optional_string_arg(args, "expectedUpdatedAt")?;
+    if protection::password(args)?.is_some() {
+        protection::check_page(ws, key, args)?;
+        let revision = ws.get_revision(key, revision_id)?;
+        protection::reveal(revision, args)?;
+    }
     let mut origin = tie_local::changes::current_origin();
     origin.actor = resolve_actor(str_arg(args, "actor"));
     let saved = tie_local::changes::with_change_context(origin, Some("restore"), false, || ws.restore_revision_checked(key, revision_id, expected))?;
@@ -814,7 +855,7 @@ fn flatten_hits(hits: Vec<tie_local::SearchHit>) -> Vec<Value> {
 fn optional_string_arg<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
     match args.get(name) {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value.trim())),
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(if tie_local::is_encrypted_markdown(value) { value } else { value.trim() })),
         Some(Value::String(_)) => Err(format!("{name} 不能为空字符串")),
         Some(_) => Err(format!("{name} 必须是字符串")),
     }
@@ -958,7 +999,7 @@ fn resolve_actor(explicit: Option<&str>) -> String {
 fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
-        .map(str::trim)
+        .map(|value| if tie_local::is_encrypted_markdown(value) { value } else { value.trim() })
         .filter(|value| !value.is_empty())
 }
 
@@ -1090,6 +1131,30 @@ mod tests {
         assert_eq!(diff["locked"], true);
         assert_eq!(diff["diff"], "");
         assert_eq!(diff["changed"], true);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn protected_signals_reject_plaintext_and_keep_mcp_payloads_opaque() {
+        let dir = std::env::temp_dir().join(format!("tie-mcp-protected-signals-{}", tie_local::new_page_id()));
+        let ws = LocalWorkspace::init(&dir, "src_test").unwrap();
+        let envelope = |value: &str| format!("{}\n{{\"ciphertext\":\"{value}\"}}\n-----END TIE ENCRYPTED MARKDOWN-----\n", tie_local::ENCRYPTED_MARKDOWN_PREFIX);
+        let saved = call_tool(&ws, "tie_write", &json!({"title":"Protected signals","markdown":envelope("opaque-page")})).unwrap();
+        let id = saved["page"]["id"].as_str().unwrap();
+        let stamp = saved["page"]["updatedAt"].as_str().unwrap();
+        let canary = "fixture-private-signal-rejected-63192";
+        let rejected = call_tool(&ws, "tie_signal_add", &json!({"id_or_title":id,"opinionKind":"support","body":canary,"baseUpdatedAt":stamp})).unwrap_err();
+        assert!(rejected.contains("先解锁并加密"));
+        let body = envelope("opaque-opinion");
+        let file = call_tool(&ws, "tie_signal_add", &json!({"id_or_title":id,"id":"op_private","opinionKind":"support","body":body,"baseUpdatedAt":stamp})).unwrap();
+        assert_eq!(file["entries"].as_array().unwrap().iter().find(|entry| entry["id"] == "op_private").unwrap()["body"], body);
+        assert!(call_tool(&ws, "tie_signal_resolve", &json!({"id_or_title":id,"id":"op_private","status":"resolved","resolutionNote":canary})).is_err());
+        let note = envelope("opaque-resolution");
+        call_tool(&ws, "tie_signal_resolve", &json!({"id_or_title":id,"id":"op_private","status":"resolved","resolutionNote":note})).unwrap();
+        let listed = call_tool(&ws, "tie_signal_list", &json!({"id_or_title":id})).unwrap();
+        assert_eq!(listed["entries"][0]["body"], body);
+        assert_eq!(listed["entries"][0]["resolutionNote"], note);
+        assert!(!std::fs::read_to_string(dir.join(".tie/reviews").join(format!("{id}.json"))).unwrap().contains(canary));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
