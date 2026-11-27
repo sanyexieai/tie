@@ -744,23 +744,28 @@ test('uses ordinary discussions on unlocked protected pages while quotes, replie
 test('authorizes an existing server encryption before encrypting the local copy without replacing server data', async ({ page, backend }) => {
   const cli = process.env.TIE_TEST_CLI || fileURLToPath(new URL(`../src-tauri/target/debug/tie-cli${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url))
   const headers = { authorization: `Bearer ${backend.profile.accessToken}`, 'content-type': 'application/json' }
-  expect((await fetch(`${backend.url}/api/v1/admin/settings`, { method: 'PUT', headers, body: JSON.stringify({ mcp: { enabled: false, cliPath: cli } }) })).status).toBe(200)
+  const ordinary = (await backendPages(backend)).find((item) => item.id === 'pg_ordinary')!
+  expect((await fetch(`${backend.url}/api/v1/admin/settings`, { method: 'PUT', headers, body: JSON.stringify({ mcp: { enabled: true, cliPath: cli } }) })).status).toBe(200)
+  // Prepare the remote before opening the client: a client conversion schedules
+  // a reload that would race this test's manually injected local storage source.
+  const converted = await fetch(`${backend.url}/mcp`, {
+    method: 'POST', headers: { ...headers, 'x-tie-workspace': backend.workspaceId },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'tie_page_protection',
+      arguments: { id_or_title: ordinary.id, action: 'convert', encrypted: true, password } } }),
+  })
+  expect(converted.status).toBe(200)
+  expect((await converted.json()).result.isError).toBe(false)
+  const serverCiphertext = (await backendPages(backend)).find((item) => item.id === ordinary.id)!.markdown
+  expect(serverCiphertext.startsWith(marker)).toBe(true)
   await seedBrowser(page.context(), backend.profile)
   await page.routeWebSocket('**/*', () => {})
   await page.goto('/')
   const editor = documentEditor(page)
-  await expect(editor.getByRole('textbox', { name: '页面标题', exact: true })).toHaveValue('普通文档')
-  const ordinary = (await backendPages(backend)).find((item) => item.id === 'pg_ordinary')!
-  const row = page.getByRole('treeitem', { name: /普通文档/ })
-  await row.hover()
-  await row.getByRole('button', { name: '页面操作', exact: true }).click()
-  await page.getByRole('menuitem', { name: '转为加密页面', exact: true }).click()
-  const encryption = page.getByRole('dialog', { name: '转为加密页面', exact: true })
-  await encryption.getByLabel('加密密码', { exact: true }).fill(password)
-  await encryption.getByLabel('确认加密密码', { exact: true }).fill(password)
-  await encryption.getByRole('button', { name: '转为加密页面', exact: true }).click()
-  await expect(encryption).toBeHidden({ timeout: 15_000 })
-  const serverCiphertext = (await backendPages(backend)).find((item) => item.id === ordinary.id)!.markdown
+  await expect(editor.getByRole('button', { name: '解锁页面', exact: true })).toBeVisible()
+  await page.evaluate(async () => {
+    const store = (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace')
+    await store.initializeBackground()
+  })
   const serverWrites: unknown[] = []
   page.on('request', (request) => {
     if (request.url().endsWith('/pg_ordinary/protection') && request.method() === 'PUT') serverWrites.push(request.postDataJSON())
