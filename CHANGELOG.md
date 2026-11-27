@@ -2,6 +2,14 @@
 
 All notable changes to Tie are documented in this file.
 
+## [1.0.67] - 2026-11-27
+
+- 修复 Windows 页面树无法拖拽调整顺序和父子层级的问题，重排保存后触发服务器同步。
+- 正文新增通用右键菜单，支持格式、段落、插入、富文本剪贴板和表格操作，并保留选区讨论入口；支持键盘操作和视口避让。
+- 右键「编辑此块源码」或使用 Ctrl/Cmd + Alt + M，可编辑当前完整 Markdown 块并应用或取消；保存、切页和加锁衔接现有普通或加密保存流程，冲突时保留草稿并提供取消入口。
+- 底栏新增默认关闭的「即时源码」：开启后，段落和标题随光标显示 Markdown，支持中文输入、精确光标映射和统一撤销；列表、表格等复杂块保留显式应用，暂不支持的 HTML 或引用定义保留草稿并提示使用整篇源码。
+- 修复查找替换输入时焦点被抢回正文，以及菜单数据刷新意外关闭键盘子菜单的问题；补充源码、加密保存、冲突恢复和菜单焦点回归。
+
 ## [1.0.66] - 2026-11-27
 
 - 工作区同步改为增量传输：保存、服务器通知及恢复联网时，只同步变化的页面、讨论、附件和文件资源；30 秒定时检查只读取轻量版本清单，未变化返回 304，不再反复拉取全部正文。
@@ -307,7 +315,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.66...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.67...HEAD
+[1.0.67]: https://github.com/sanyexieai/tie/releases/tag/v1.0.67
 [1.0.66]: https://github.com/sanyexieai/tie/releases/tag/v1.0.66
 [1.0.65]: https://github.com/sanyexieai/tie/releases/tag/v1.0.65
 [1.0.64]: https://github.com/sanyexieai/tie/releases/tag/v1.0.64

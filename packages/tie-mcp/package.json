@@ -1,6 +1,6 @@
 {
   "name": "@tie/mcp",
-  "version": "1.0.66",
+  "version": "1.0.67",
   "private": true,
   "description": "Tie Agent Skill 模板。MCP 由 Rust tie mcp 提供，这个目录不再包含 Node 服务。"
 }
