@@ -1838,6 +1838,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       }).map((item) => workspaceService.savePage(item)))
       pages.value = pages.value.map((item) => saved.find((candidate) => candidate.id === item.id) ?? item)
       if (nextParentId) expandPage(nextParentId)
+      scheduleBackendSync()
     } finally { saving.value = false }
     return true
   }
