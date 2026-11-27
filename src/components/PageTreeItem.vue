@@ -133,7 +133,7 @@ function onSwipePointerDown(event: PointerEvent) {
   if (!props.compact || event.button !== 0) return
   if (dragCtx?.draggingPageId.value) return
   const target = event.target
-  if (target instanceof Element && target.closest('.tree-drag-handle, .disclosure, .tree-row-swipe-actions')) return
+  if (target instanceof Element && target.closest('.tree-drag-handle, .disclosure, .tree-row-swipe-actions, .tree-actions')) return
   swipePointerId = event.pointerId
   swipeStartX = event.clientX
   swipeStartY = event.clientY
@@ -281,6 +281,21 @@ function toggleActions() {
   }
 }
 
+function openContextActions(event: MouseEvent) {
+  event.preventDefault()
+  actionsOpen.value = true
+  void nextTick(() => positionActionMenu())
+}
+
+async function convertPageProtection() {
+  actionsOpen.value = false
+  if (!await store.openPage(props.node.id)) return
+  await nextTick()
+  const target = store.activePage
+  if (!target || target.id !== props.node.id) return
+  window.dispatchEvent(new CustomEvent('tie:convert-page-protection', { detail: { pageId: target.id, sourceId: target.storageSourceId } }))
+}
+
 function closeActionsOnOutside(event: MouseEvent) {
   const target = event.target
   if (!(actionsOpen.value && target instanceof Node)) return
@@ -357,6 +372,7 @@ onBeforeUnmount(() => {
         :aria-expanded="hasChildren ? expanded : undefined"
         tabindex="0"
         @click="onRowClick"
+        @contextmenu="openContextActions"
         @keydown="onTreeKeydown"
         @pointerdown="onSwipePointerDown"
         @pointermove="onSwipePointerMove"
@@ -392,7 +408,7 @@ onBeforeUnmount(() => {
         ></span>
         <span v-if="hasSyncConflict && !backendSync" class="page-sync-conflict-badge" title="同步冲突，打开页面后可查看差异">!</span>
         <span v-if="homeWorkspace" class="page-source-badge" :title="homeWorkspace.path">{{ sourceShortLabel(homeWorkspace.name) }}</span>
-        <span v-if="!compact" ref="actionsRoot" class="tree-actions" :class="{ open: actionsOpen }" @click.stop>
+        <span ref="actionsRoot" class="tree-actions" :class="{ open: actionsOpen, 'compact-actions': compact }" @click.stop>
           <button ref="moreButton" class="tree-more-button" :aria-expanded="actionsOpen" aria-haspopup="menu" aria-label="页面操作" @click="toggleActions">⋯</button>
           <Teleport to="body">
             <div
@@ -406,6 +422,7 @@ onBeforeUnmount(() => {
               <button v-if="!temporary" type="button" title="新建子页面" @click="actionsOpen = false; emit('create', node.id)">+ 新建子页面</button>
               <button type="button" title="重命名页面" @click="actionsOpen = false; emit('rename', node.id)">✎ 重命名</button>
               <button v-if="!temporary" type="button" title="复制页面" @click="actionsOpen = false; emit('duplicate', node.id)">⧉ 复制页面</button>
+              <button v-if="!temporary" type="button" role="menuitem" @click="convertPageProtection">{{ isEncryptedMarkdown(livePage.markdown) ? '转为普通页面' : '转为加密页面' }}</button>
               <button type="button" class="danger" :title="temporary ? '关闭工作区' : '删除页面'" @click="actionsOpen = false; emit('remove', node.id)">× {{ temporary ? '关闭工作区' : '删除页面' }}</button>
             </div>
           </Teleport>
@@ -433,3 +450,7 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.tree-actions.compact-actions { display: flex; align-items: center; margin-right: 8px; }
+</style>

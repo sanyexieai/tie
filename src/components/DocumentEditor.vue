@@ -36,6 +36,7 @@ const exportedNotice = ref(false)
 const refreshedNotice = ref(false)
 const refreshing = ref(false)
 const protectionBusy = ref(false)
+const protectionControl = ref<InstanceType<typeof PageProtectionControl> | null>(null)
 const protectionPage = computed(() => store.activePage && !rawActiveSource.value?.temporary ? store.activePage : null)
 const hasUnsavedChanges = ref(false)
 const saveError = ref<string | null>(null)
@@ -815,6 +816,12 @@ function onShortcut(event: KeyboardEvent) {
 }
 
 function onWorkspaceCommand(event: Event) {
+  if (event.type === 'tie:convert-page-protection') {
+    const detail = (event as CustomEvent<{ pageId: string; sourceId: string }>).detail
+    const target = protectionPage.value
+    if (target && detail?.pageId === target.id && detail.sourceId === target.storageSourceId) void protectionControl.value?.open()
+    return
+  }
   if (locked.value || protectionBusy.value) return
   if (event.type === 'tie:find-in-page') openFind()
   else if (event.type === 'tie:toggle-source-mode') toggleSourceMode()
@@ -854,6 +861,7 @@ onMounted(() => {
   window.addEventListener('tie:toggle-source-mode', onWorkspaceCommand)
   window.addEventListener('tie:open-page-history', onWorkspaceCommand)
   window.addEventListener('tie:refresh-page', onWorkspaceCommand)
+  window.addEventListener('tie:convert-page-protection', onWorkspaceCommand)
   window.addEventListener('tie:mobile-back', onMobileBack)
 })
 onBeforeUnmount(() => {
@@ -866,6 +874,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('tie:toggle-source-mode', onWorkspaceCommand)
   window.removeEventListener('tie:open-page-history', onWorkspaceCommand)
   window.removeEventListener('tie:refresh-page', onWorkspaceCommand)
+  window.removeEventListener('tie:convert-page-protection', onWorkspaceCommand)
   window.removeEventListener('tie:mobile-back', onMobileBack)
   if (copiedLinkTimer) window.clearTimeout(copiedLinkTimer)
   if (exportedTimer) window.clearTimeout(exportedTimer)
@@ -914,7 +923,8 @@ defineExpose({ saveNow })
       >←</button>
       <nav v-if="!props.mobileLayout" class="breadcrumbs" aria-label="页面层级"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><template v-for="(page, index) in breadcrumbs" :key="page.id"><span>›</span><button :class="{ current: index === breadcrumbs.length - 1 }" :title="page.title" @click="store.openPage(page.id)">{{ page.title }}</button></template></nav>
       <h1 v-else class="mobile-editor-title">{{ activePage.title }}</h1>
-      <div class="save-state" :inert="locked || protectionBusy"><PageProtectionControl v-if="protectionPage" :page="protectionPage" :prepare="saveNow" @busy="protectionBusy = $event" /><button v-if="session && !locked" type="button" class="history-button" aria-label="锁定页面" title="锁定页面" @click="lockDocument"><LockKeyhole :size="14" /></button><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span class="source-select-trigger is-label" :title="workspaceBadgeTitle">{{ sourceShortLabel(activeSource.name) }}</span></div><span class="save-dot" :class="{ saving: store.saving, pending: status === '未同步', synced: status === '已同步', conflict: status === '冲突', local: status === '本地' || status === '云端', error: Boolean(saveError) }" :title="statusTitle"></span><span v-if="status !== '已同步' && status !== '未同步' && status !== '冲突'" :title="statusTitle">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" :title="saveError || '重新尝试保存当前页面'" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从工作区刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button v-if="!isDesktop" class="copy-link-button" title="导入 .tiez" @click="store.importTiezBrowser()">导入</button><button v-if="!isDesktop" class="copy-link-button" title="导出当前工作区为 .tiez" @click="store.exportTiezBrowser()">.tiez</button><button class="copy-link-button" title="导出 .tie，以当前页面为根" @click="exportTie">⇩</button><button v-if="isDesktop" class="copy-link-button" title="导出此页及引用（闭包）" @click="exportPageClosure">⇪</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
+      <div class="save-state" :inert="locked || protectionBusy"><button v-if="session && !locked" type="button" class="history-button" aria-label="锁定页面" title="锁定页面" @click="lockDocument"><LockKeyhole :size="14" /></button><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span class="source-select-trigger is-label" :title="workspaceBadgeTitle">{{ sourceShortLabel(activeSource.name) }}</span></div><span class="save-dot" :class="{ saving: store.saving, pending: status === '未同步', synced: status === '已同步', conflict: status === '冲突', local: status === '本地' || status === '云端', error: Boolean(saveError) }" :title="statusTitle"></span><span v-if="status !== '已同步' && status !== '未同步' && status !== '冲突'" :title="statusTitle">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" :title="saveError || '重新尝试保存当前页面'" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从工作区刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button v-if="!isDesktop" class="copy-link-button" title="导入 .tiez" @click="store.importTiezBrowser()">导入</button><button v-if="!isDesktop" class="copy-link-button" title="导出当前工作区为 .tiez" @click="store.exportTiezBrowser()">.tiez</button><button class="copy-link-button" title="导出 .tie，以当前页面为根" @click="exportTie">⇩</button><button v-if="isDesktop" class="copy-link-button" title="导出此页及引用（闭包）" @click="exportPageClosure">⇪</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
+      <PageProtectionControl v-if="protectionPage" ref="protectionControl" :page="protectionPage" :prepare="saveNow" :locked="locked" @busy="protectionBusy = $event" />
     </header>
     <aside v-if="showingHistory" class="history-popover">
       <div class="history-popover-heading"><strong>页面历史</strong><button aria-label="关闭页面历史" @click="showingHistory = false">×</button></div>

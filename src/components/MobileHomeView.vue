@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, provide, ref } from 'vue'
 import AppIcon from '@/components/AppIcon.vue'
-import CredentialTree from '@/components/CredentialTree.vue'
 import PageTreeItem from '@/components/PageTreeItem.vue'
 import { pageTreeDragKey } from '@/composables/pageTreeDrag'
 import { mobilePageSwipeKey } from '@/composables/mobilePageSwipe'
@@ -205,7 +204,6 @@ async function remove(pageId: string) {
       />
       <p v-if="!store.tree.length" class="mobile-home-empty">还没有页面。点右下角 ＋ 新建，或先在设置里添加工作区。</p>
     </div>
-    <CredentialTree />
     </div>
 
     <button type="button" class="mobile-home-fab" aria-label="新建页面" :disabled="creating" @click="createPage">{{ creating ? '…' : '＋' }}</button>

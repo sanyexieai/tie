@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { ShieldCheck } from '@lucide/vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { Page } from '@/types'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
@@ -15,32 +14,49 @@ import { reviewPageKey, reviewState } from '@/services/review-service'
 import { syncQueue } from '@/services/storage/sync-queue'
 import type { PageProtectionBundle } from '@/services/page-protection-types'
 
-const props = defineProps<{ page: Page; prepare: () => Promise<boolean> }>()
+const props = defineProps<{ page: Page; prepare: () => Promise<boolean>; locked?: boolean }>()
 const emit = defineEmits<{ busy: [busy: boolean] }>()
 const store = useWorkspaceStore()
 const backend = useBackendStore()
 const opened = ref(false)
+const unlockRequired = ref(false)
 const password = ref('')
 const confirmation = ref('')
 const remember = ref(false)
 const busy = ref(false)
 const error = ref('')
 const encrypted = computed(() => isEncryptedMarkdown(props.page.markdown))
-const label = computed(() => encrypted.value ? '转为普通页面' : '加密此页面')
+const label = computed(() => encrypted.value ? '转为普通页面' : '转为加密页面')
 const scope = computed(() => JSON.stringify([backend.profile.endpoint, backend.profile.user?.id ?? '', props.page.storageSourceId, props.page.id]))
 const deviceAvailable = deviceUnlockAvailable()
 let disposed = false
 let generation = 0
+let releasePageHold: (() => void) | undefined
 
 function close() {
   opened.value = false
+  unlockRequired.value = false
   password.value = ''; confirmation.value = ''; error.value = ''
   generation += 1
+  releasePageHold?.()
+  releasePageHold = undefined
 }
 
 async function open() {
+  if (busy.value) return
+  if (props.locked) {
+    unlockRequired.value = true
+    await nextTick()
+    document.querySelector<HTMLInputElement>('.editor-pane input[aria-label="解锁密码"]')?.focus()
+    return
+  }
+  unlockRequired.value = false
   error.value = ''
-  if (await props.prepare()) opened.value = true
+  const expectedScope = scope.value
+  if (await props.prepare() && !disposed && scope.value === expectedScope) {
+    releasePageHold ??= store.holdPageForProtectionChange(props.page.id)
+    opened.value = true
+  }
 }
 
 async function targets(page: Page) {
@@ -132,15 +148,20 @@ async function convert() {
 }
 
 watch(scope, close)
+watch(() => props.locked, (locked) => { if (!locked) unlockRequired.value = false })
 onBeforeUnmount(() => { disposed = true; close() })
+defineExpose({ open })
 </script>
 <template>
-  <button type="button" class="history-button" :aria-label="label" :title="label" :disabled="busy" @click="open"><ShieldCheck :size="14" /></button>
   <Teleport to="body">
+    <div v-if="unlockRequired" class="protection-unlock-notice" role="status">
+      <span>请先解锁页面，再从页面菜单转为普通页面。</span><button type="button" aria-label="关闭解锁提示" @click="unlockRequired = false">×</button>
+    </div>
     <div v-if="opened" class="backend-dialog-backdrop" @mousedown.self="!busy && close()" @keydown.stop @keydown.esc="!busy && close()">
       <section class="protection-conversion" role="dialog" aria-modal="true" :aria-label="label">
         <header><strong>{{ label }}</strong><button type="button" aria-label="关闭" :disabled="busy" @click="close">×</button></header>
         <form @submit.prevent="convert"><fieldset :disabled="busy">
+          <p>当前页面：{{ page.title || '无标题' }}</p>
           <template v-if="!encrypted">
             <label>密码<input v-model="password" type="password" aria-label="加密密码" autocomplete="new-password" required /></label>
             <label>确认密码<input v-model="confirmation" type="password" aria-label="确认加密密码" autocomplete="new-password" required /></label>
@@ -157,6 +178,8 @@ onBeforeUnmount(() => { disposed = true; close() })
   </Teleport>
 </template>
 <style scoped>
+.protection-unlock-notice { position: fixed; z-index: 125; left: 50%; bottom: calc(44px + var(--safe-bottom, 0px)); transform: translateX(-50%); display: flex; gap: 12px; align-items: center; max-width: calc(100vw - 28px); padding: 10px 14px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--bg-elevated); box-shadow: 0 5px 18px #0003; font-size: 12px; }
+.protection-unlock-notice button { border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
 .protection-conversion { width: min(420px, calc(100vw - 28px)); border: 1px solid var(--border); border-radius: 10px; padding: 20px; background: var(--bg-elevated); color: var(--text); }
 header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
 header button { border: 0; padding: 2px 6px; color: var(--text-subtle); background: transparent; font-size: 20px; }

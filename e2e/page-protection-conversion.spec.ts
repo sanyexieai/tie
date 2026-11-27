@@ -27,6 +27,8 @@ test.beforeEach(async ({ page }) => {
 async function openApp(page: Page) {
   await page.goto('/')
   await dismissOnboarding(page)
+  await expect(page.getByRole('button', { name: '操作凭据', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '新建操作凭据', exact: true })).toHaveCount(0)
   await expect(page.getByRole('textbox', { name: '页面标题', exact: true })).toHaveValue(title)
   return page.locator('main.editor-pane')
 }
@@ -64,30 +66,38 @@ async function persisted(page: Page) {
   }, pageId)
 }
 
+async function pageActions(page: Page) {
+  const row = page.getByRole('treeitem', { name: new RegExp(title) })
+  await row.hover()
+  await row.getByRole('button', { name: '页面操作', exact: true }).click()
+}
+
 async function encrypt(page: Page, editor: Locator) {
-  await editor.getByRole('button', { name: '加密此页面', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: '加密此页面', exact: true })
+  await pageActions(page)
+  await page.getByRole('menuitem', { name: '转为加密页面', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '转为加密页面', exact: true })
   await dialog.getByLabel('加密密码', { exact: true }).fill(password)
   await dialog.getByLabel('确认加密密码', { exact: true }).fill(password)
-  await dialog.getByRole('button', { name: '加密此页面', exact: true }).click()
+  await dialog.getByRole('button', { name: '转为加密页面', exact: true }).click()
   await expect(dialog).toBeHidden()
-  await expect(editor.getByRole('button', { name: '转为普通页面', exact: true })).toBeVisible()
+  await expect(editor.getByRole('button', { name: '锁定页面', exact: true })).toBeVisible()
 }
 
 async function decrypt(page: Page, editor: Locator) {
-  await editor.getByRole('button', { name: '转为普通页面', exact: true }).click()
+  await pageActions(page)
+  await page.getByRole('menuitem', { name: '转为普通页面', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: '转为普通页面', exact: true })
   await expect(dialog).toContainText('查看和搜索不再需要解锁')
   await dialog.getByRole('button', { name: '转为普通页面', exact: true }).click()
   await expect(dialog).toBeHidden()
-  await expect(editor.getByRole('button', { name: '加密此页面', exact: true })).toBeVisible()
+  await expect(editor.getByRole('button', { name: '锁定页面', exact: true })).toHaveCount(0)
 }
 
 async function unlock(editor: Locator) {
   await expect(editor.getByRole('button', { name: '解锁页面', exact: true })).toBeVisible()
   await editor.getByLabel('解锁密码', { exact: true }).fill(password)
   await editor.getByRole('button', { name: '解锁页面', exact: true }).click()
-  await expect(editor.getByRole('button', { name: '转为普通页面', exact: true })).toBeVisible()
+  await expect(editor.getByRole('button', { name: '锁定页面', exact: true })).toBeVisible()
   await expect(editor.locator('.tiptap').or(editor.getByRole('textbox', { name: 'Markdown 源码', exact: true }))).toBeVisible()
 }
 
@@ -200,4 +210,63 @@ test('converts an ordinary uploaded PNG to encrypted Markdown and preserves it t
   await expect(image).toHaveAttribute('src', `data:image/png;base64,${png}`)
   await expect.poll(() => image.evaluate((node) => (node as HTMLImageElement).naturalWidth)).toBe(1)
   await expect(editor.locator('.tiptap')).toContainText('图片转换后继续编辑')
+})
+
+test('the page tree conversion menu flushes the previous draft and converts only its selected target', async ({ page }) => {
+  await page.addInitScript(() => {
+    if (sessionStorage.getItem('menu-target-fixture')) return
+    const snapshot = JSON.parse(localStorage.getItem('tie-demo-workspace-v1')!)
+    const original = snapshot.pages[0]
+    snapshot.pages.push({ ...original, id: 'pg_menu_target', title: '另一个菜单目标', markdown: '# 另一个菜单目标\n\n目标页面正文', sortKey: 1 })
+    localStorage.setItem('tie-demo-workspace-v1', JSON.stringify(snapshot))
+    sessionStorage.setItem('menu-target-fixture', 'yes')
+  })
+  const editor = await openApp(page)
+  await (await source(editor)).fill('页面切换前尚未自动保存的草稿')
+  const row = page.getByRole('treeitem', { name: /另一个菜单目标/ })
+  await row.click({ button: 'right' })
+  await page.screenshot({ path: '/tmp/tie-page-menu.png', fullPage: true })
+  await page.getByRole('menuitem', { name: '转为加密页面', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '转为加密页面', exact: true })
+  await expect(dialog).toContainText('当前页面：另一个菜单目标')
+  await expect(editor.getByRole('textbox', { name: '页面标题', exact: true })).toHaveValue('另一个菜单目标')
+  expect((await persisted(page)).page.markdown).toContain('页面切换前尚未自动保存的草稿')
+  await dialog.getByLabel('加密密码', { exact: true }).fill(password)
+  await dialog.getByLabel('确认加密密码', { exact: true }).fill(password)
+  await dialog.getByRole('button', { name: '转为加密页面', exact: true }).click()
+  await expect(dialog).toBeHidden()
+  const pages = await page.evaluate(() => JSON.parse(localStorage.getItem('tie-demo-workspace-v1')!).pages)
+  expect(pages.find((item: { id: string }) => item.id === 'pg_menu_target').markdown.startsWith(marker)).toBe(true)
+  expect(pages.find((item: { id: string }) => item.id === pageId).markdown).toContain('页面切换前尚未自动保存的草稿')
+})
+
+test('locked pages require an unlock when conversion is requested from the existing page menu', async ({ page }) => {
+  const editor = await openApp(page)
+  await encrypt(page, editor)
+  await editor.getByRole('button', { name: '锁定页面', exact: true }).click()
+  await expect(editor.getByRole('button', { name: '解锁页面', exact: true })).toBeVisible()
+  await pageActions(page)
+  await page.getByRole('menuitem', { name: '转为普通页面', exact: true }).click()
+  await expect(page.getByRole('status')).toContainText('请先解锁页面')
+  await expect(editor.getByLabel('解锁密码', { exact: true })).toBeFocused()
+  await expect(page.getByRole('dialog', { name: '转为普通页面', exact: true })).toHaveCount(0)
+  expect((await persisted(page)).page.markdown.startsWith(marker)).toBe(true)
+})
+
+test('the same page actions menu opens conversion from the mobile page list', async ({ page }) => {
+  await openApp(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('button', { name: '返回列表', exact: true }).click()
+  const row = page.getByRole('treeitem', { name: new RegExp(title) })
+  await row.getByRole('button', { name: '页面操作', exact: true }).click()
+  await page.screenshot({ path: '/tmp/tie-page-menu-mobile.png', fullPage: true })
+  await page.getByRole('menuitem', { name: '转为加密页面', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '转为加密页面', exact: true })
+  await expect(dialog).toContainText(`当前页面：${title}`)
+  await dialog.getByLabel('加密密码', { exact: true }).fill(password)
+  await dialog.getByLabel('确认加密密码', { exact: true }).fill(password)
+  await dialog.getByRole('button', { name: '转为加密页面', exact: true }).click()
+  await expect(dialog).toBeHidden()
+  expect((await persisted(page)).page.markdown.startsWith(marker)).toBe(true)
+  await expect(page.locator('.tiptap')).toContainText(first)
 })

@@ -6,7 +6,6 @@ import AppSidebar from '@/components/AppSidebar.vue'
 import ContextPanel from '@/components/ContextPanel.vue'
 import PageEditor from '@/components/PageEditor.vue'
 import CreateEncryptedPageDialog from '@/components/CreateEncryptedPageDialog.vue'
-import CredentialPage from '@/components/CredentialPage.vue'
 import { lockAllWorkspaceEncryption } from '@/services/encrypted-markdown'
 import { clearProtectedPages } from '@/services/protected-pages'
 import MobileHomeView from '@/components/MobileHomeView.vue'
@@ -27,7 +26,6 @@ import AppIcon from '@/components/AppIcon.vue'
 import WebReadView from '@/components/WebReadView.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useBackendStore } from '@/stores/backend'
-import { useCredentialsStore } from '@/stores/credentials'
 import { startAutoSync } from '@/services/auto-sync'
 import { startBackendLive } from '@/services/backend-live'
 import { initializeWorkspaceStartup } from '@/services/startup'
@@ -47,7 +45,6 @@ const CONTEXT_MAX = 420
 
 const store = useWorkspaceStore()
 const backend = useBackendStore()
-const credentials = useCredentialsStore()
 const sidebarCollapsed = ref(false)
 const contextCollapsed = ref(false)
 const isMobileLayout = ref(false)
@@ -84,7 +81,7 @@ const shellStyle = computed(() => {
 })
 
 const showSidebarResize = computed(() => !focusMode.value && !sidebarCollapsed.value && !usesMobileShell.value)
-const showContextResize = computed(() => !store.showingCredentials && !focusMode.value && !contextCollapsed.value && !usesContextDrawer.value)
+const showContextResize = computed(() => !focusMode.value && !contextCollapsed.value && !usesContextDrawer.value)
 
 const mobileOnHome = computed(() => (
   !store.activePageId
@@ -96,7 +93,6 @@ const mobileOnHome = computed(() => (
   && !store.showingFavorites
   && !store.showingSkills
   && !store.showingSkillManager
-  && !store.showingCredentials
   && !store.showingEncryptedDraft
 ))
 
@@ -183,7 +179,6 @@ function endResize(event: PointerEvent) {
 
 function toggleSidebar() { sidebarCollapsed.value = !sidebarCollapsed.value }
 function toggleContextPanel() {
-  if (store.showingCredentials) return
   if (usesContextDrawer.value) {
     mobileContextOpen.value = !mobileContextOpen.value
     return
@@ -470,7 +465,7 @@ onBeforeUnmount(() => {
     class="app-shell"
     :class="{
       'sidebar-collapsed': sidebarCollapsed,
-      'context-collapsed': contextCollapsed || store.showingCredentials,
+      'context-collapsed': contextCollapsed,
       'focus-mode': focusMode,
       'mobile-shell': usesMobileShell,
       'mobile-client': isMobileClient || usesMobileUi,
@@ -479,20 +474,6 @@ onBeforeUnmount(() => {
     :style="shellStyle"
   >
   <WebReadView v-if="webReadMode" />
-  <template v-else-if="store.showingCredentials">
-    <button v-if="sidebarCollapsed && !usesMobileShell && !focusMode" class="mobile-sidebar-toggle" aria-label="打开侧边栏" @click="toggleSidebar">☰</button>
-    <AppSidebar v-if="!usesMobileShell && !focusMode" @close="toggleSidebar" @open-storage-settings="storageSettingsOpen = true" />
-    <section v-if="!backend.connected || !credentials.workspaceId" class="credential-connect-pane">
-      <button type="button" class="ghost-button" @click="store.closeCredentialPage()">← 返回</button>
-      <h1>凭据页面</h1>
-      <p>{{ backend.connected ? '正在准备服务器工作区。' : '连接服务器后，就能像页面一样添加和维护凭据。' }}</p>
-      <button v-if="!backend.connected" type="button" class="primary" @click="backendDialogOpen = true">连接服务器</button>
-      <button v-else type="button" @click="backend.refreshWorkspaces()">重新读取工作区</button>
-    </section>
-    <CredentialPage v-else :key="credentials.selectionKey" :workspace-id="credentials.workspaceId"
-      :credential-id="credentials.activeCredentialId" :workspace-name="credentials.workspace?.name"
-      @saved="credentials.saved" @deleted="credentials.removed" @close="store.closeCredentialPage()" />
-  </template>
   <!-- 移动端：Notion 式列表 → 点开编辑器 -->
   <template v-else-if="usesMobileShell && !focusMode">
     <MobileHomeView v-if="mobileOnHome" @open-settings="storageSettingsOpen = true" />
@@ -590,7 +571,4 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.credential-connect-pane { grid-area: main; min-width: 0; overflow: auto; padding: 36px clamp(20px, 5vw, 72px); color: var(--text); }
-.credential-connect-pane p { color: var(--text-muted); margin: 18px 0; }
-.credential-connect-pane button { border: 1px solid var(--border); border-radius: 6px; padding: 7px 12px; color: var(--text); background: var(--bg-elevated); cursor: pointer; }
 </style>

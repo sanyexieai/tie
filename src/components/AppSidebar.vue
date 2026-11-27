@@ -2,7 +2,6 @@
 import { computed, ref, watch } from 'vue'
 import PageTreeItem from '@/components/PageTreeItem.vue'
 import AppIcon from '@/components/AppIcon.vue'
-import CredentialTree from '@/components/CredentialTree.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { supportsAgentSkills } from '@/services/platform'
 import { useBackendStore } from '@/stores/backend'
@@ -160,7 +159,7 @@ async function renameWorkspace() {
         v-for="node in permanentTree"
         :key="node.id"
         :node="node"
-        :active-page-id="store.showingCredentials ? null : store.activePageId"
+        :active-page-id="store.activePageId"
         :sources-by-id="sourcesById"
         @select="store.openPage($event)"
         @create="createChild"
@@ -182,7 +181,7 @@ async function renameWorkspace() {
           v-for="node in nodes"
           :key="node.id"
           :node="node"
-          :active-page-id="store.showingCredentials ? null : store.activePageId"
+          :active-page-id="store.activePageId"
           :sources-by-id="sourcesById"
           @select="store.openPage($event)"
           @rename="rename"
@@ -191,7 +190,6 @@ async function renameWorkspace() {
       </section>
     </div>
 
-    <CredentialTree />
 
     <div v-if="supportsAgentSkills" class="sidebar-section-title skills-section-title">
       <button

@@ -2,6 +2,14 @@
 
 All notable changes to Tie are documented in this file.
 
+## [1.0.64] - 2026-11-27
+
+- 页面双向转换移入已有页面的「⋯」及右键菜单，按当前状态显示「转为加密页面」或「转为普通页面」，手机页面列表使用相同入口。
+- 移除客户端独立的「操作凭据」区域和旧凭据表单，私密内容直接使用普通页面的加密模式；已有服务器凭据数据及 HTTP MCP 固定操作能力保留。
+- 从其他页面菜单转换前先保存当前草稿，转换对话框明确显示目标页面；锁定页面先提示并聚焦解锁，防止绕过授权。
+- 修复后台刷新在转换响应丢失、验密或重试期间切换页面模式，导致对话框中断和解锁状态丢失的问题。
+- 更新 Agent 接入指引，页面加密使用现有页面菜单，服务器操作凭据在账号网页维护与授权。
+
 ## [1.0.63] - 2026-11-27
 
 - 加密页面与普通页面共用编辑器、标签、查找替换、源码、收藏、关系、历史和讨论界面；锁定后撤回正文搜索、大纲、讨论明文与草稿。
@@ -283,7 +291,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.63...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.64...HEAD
+[1.0.64]: https://github.com/sanyexieai/tie/releases/tag/v1.0.64
 [1.0.63]: https://github.com/sanyexieai/tie/releases/tag/v1.0.63
 [1.0.62]: https://github.com/sanyexieai/tie/releases/tag/v1.0.62
 [1.0.61]: https://github.com/sanyexieai/tie/releases/tag/v1.0.61

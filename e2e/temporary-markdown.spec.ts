@@ -116,6 +116,10 @@ test('opens an OS startup file as a temporary workspace while background restora
   await expect(page.locator('.tiptap strong')).toHaveText('本地 Markdown')
   await expect(page.locator('.tiptap tr')).toHaveCount(2)
   await expect(page.getByRole('treeitem', { name: /正式页面/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: '页面菜单', exact: true })).toHaveCount(0)
+  await temporary.getByRole('treeitem', { name: /临时 Markdown/ }).click({ button: 'right' })
+  await expect(page.getByRole('menuitem', { name: '转为加密页面', exact: true })).toHaveCount(0)
+  await page.getByRole('textbox', { name: '页面标题' }).click()
 
   const preferences = await page.evaluate(() => localStorage.getItem('tie-workspace-preferences-v1:tie-workspace'))
   expect(preferences).not.toContain('src_temporary_')
