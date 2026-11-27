@@ -9,7 +9,6 @@ import { aiTaggingReady, loadAiTaggingConfig, suggestTagsWithAi } from '@/servic
 import { backendService, isBackendRemoteSourceId } from '@/services/backend'
 import { pageContentEqual, pageSourceIds, sourceShortLabel } from '@/services/page-sources'
 import { isCloudStorageSourceId } from '@/services/storage-identity'
-import { isLocalWinningConflict } from '@/services/storage/sync-merge'
 import { isS3SourceId } from '@/services/s3'
 import { suggestTags, type TagSuggestion } from '@/services/tagging'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
@@ -41,6 +40,7 @@ const protectionPage = computed(() => store.activePage && !rawActiveSource.value
 const hasUnsavedChanges = ref(false)
 const saveError = ref<string | null>(null)
 const conflictRemotePage = ref<Page | null>(null)
+const showingProtectionConflict = ref(false)
 const conflictLoading = ref(false)
 const showingFind = ref(false)
 const findQuery = ref('')
@@ -92,6 +92,7 @@ const status = computed(() => {
 })
 const statusTitle = computed(() => {
   if (saveError.value || props.session?.error) return saveError.value || props.session!.error
+  if (hasProtectionConflict.value) return '本地与服务器的页面保护状态不同，请先解锁并对齐保护状态'
   if (activePage.value && store.syncConflicts.has(activePage.value.id)) return '本地和后台都改过，较新的一份在正文里'
   switch (status.value) {
     case '已同步': return '已保存，并同步到后台'
@@ -159,7 +160,14 @@ const hasRemoteSaveConflict = computed(() => {
   return message.includes('其他设备更新') || message.includes('其他程序修改')
 })
 const hasSyncConflict = computed(() => Boolean(activePage.value && store.syncConflicts.has(activePage.value.id)))
+const protectionConflict = computed(() => {
+  const conflict = activePage.value ? store.syncConflicts.get(activePage.value.id) : undefined
+  return conflict?.kind === 'protection' ? conflict : undefined
+})
+const hasProtectionConflict = computed(() => Boolean(protectionConflict.value))
+const canEncryptLocalConflict = computed(() => protectionConflict.value?.localEncrypted === false && protectionConflict.value.remoteEncrypted === true)
 const hasRemoteConflict = computed(() => hasRemoteSaveConflict.value || hasSyncConflict.value)
+const hasContentConflict = computed(() => hasRemoteSaveConflict.value || (hasSyncConflict.value && !hasProtectionConflict.value))
 const isLocalDiskSource = computed(() => {
   const kind = activeSource.value?.kind
   return kind === 'local' || kind === 'smb'
@@ -262,6 +270,7 @@ watch(locked, (value) => {
   showingHistory.value = false
   selectedRevision.value = null
   conflictRemotePage.value = null
+  showingProtectionConflict.value = false
 })
 
 watch(
@@ -283,9 +292,6 @@ watch(
     if (!hasUnsavedChanges.value) {
       // 仅在外部内容真正变化时重载，避免保存后的元数据回写把光标打飞。
       if (!contentMatches) loadActivePage()
-      if (store.syncConflicts.has(page.id) && !isLocalWinningConflict(store.syncConflicts.get(page.id)!)) {
-        store.clearSyncConflict(page.id)
-      }
       return
     }
     if (!contentMatches && (store.syncConflicts.has(page.id) || saveError.value?.includes('其他设备') || saveError.value?.includes('其他程序'))) {
@@ -317,7 +323,7 @@ watch(() => store.outlineScrollRequest, async () => {
 })
 
 function queueAutoSave() {
-  if (hasRemoteConflict.value) return
+  if (hasContentConflict.value) return
   if (autoSaveTimer) window.clearTimeout(autoSaveTimer)
   autoSaveTimer = window.setTimeout(() => {
     void flushAutoSave()
@@ -336,7 +342,7 @@ async function flushAutoSave() {
   try {
     do {
       autoSavePending = false
-      if (hasRemoteConflict.value) break
+      if (hasContentConflict.value) break
       const revision = changeRevision
       // 紧挨写入前再取草稿，避免手动保存之后仍用旧快照回写。
       const page = draft()
@@ -383,11 +389,17 @@ function cancelAutoSave() {
 
 async function loadConflictPreview() {
   if (conflictLoading.value || !activePage.value) return
+  if (hasProtectionConflict.value) { showingProtectionConflict.value = true; return }
   if (!hasRemoteConflict.value && !saveError.value?.includes('其他设备') && !saveError.value?.includes('其他程序')) return
   conflictLoading.value = true
   try { conflictRemotePage.value = props.session ? await props.session.latest() : await store.readLatestPage(activePage.value.id) }
   catch (reason) { saveError.value = saveFailureMessage(reason) }
   finally { conflictLoading.value = false }
+}
+
+async function encryptLocalConflict() {
+  showingProtectionConflict.value = false
+  await protectionControl.value?.open()
 }
 
 
@@ -445,7 +457,7 @@ async function reloadRemotePage() {
   const revision = changeRevision
   const isCurrent = () => !disposed && loadedPage?.id === pageId && revision === changeRevision
   try {
-    props.session ? await props.session.refresh(isCurrent) : await store.resolveConflictLoadRemote(pageId)
+    props.session ? await props.session.refresh(isCurrent, true) : await store.resolveConflictLoadRemote(pageId)
     if (!isCurrent()) return
     loadActivePage()
     saveError.value = null
@@ -923,7 +935,7 @@ defineExpose({ saveNow })
       >←</button>
       <nav v-if="!props.mobileLayout" class="breadcrumbs" aria-label="页面层级"><span>{{ store.workspace?.name ?? '我的知识库' }}</span><template v-for="(page, index) in breadcrumbs" :key="page.id"><span>›</span><button :class="{ current: index === breadcrumbs.length - 1 }" :title="page.title" @click="store.openPage(page.id)">{{ page.title }}</button></template></nav>
       <h1 v-else class="mobile-editor-title">{{ activePage.title }}</h1>
-      <div class="save-state" :inert="locked || protectionBusy"><button v-if="session && !locked" type="button" class="history-button" aria-label="锁定页面" title="锁定页面" @click="lockDocument"><LockKeyhole :size="14" /></button><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span class="source-select-trigger is-label" :title="workspaceBadgeTitle">{{ sourceShortLabel(activeSource.name) }}</span></div><span class="save-dot" :class="{ saving: store.saving, pending: status === '未同步', synced: status === '已同步', conflict: status === '冲突', local: status === '本地' || status === '云端', error: Boolean(saveError) }" :title="statusTitle"></span><span v-if="status !== '已同步' && status !== '未同步' && status !== '冲突'" :title="statusTitle">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading" title="查看本地草稿与远程当前版本" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" :title="saveError || '重新尝试保存当前页面'" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从工作区刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button v-if="!isDesktop" class="copy-link-button" title="导入 .tiez" @click="store.importTiezBrowser()">导入</button><button v-if="!isDesktop" class="copy-link-button" title="导出当前工作区为 .tiez" @click="store.exportTiezBrowser()">.tiez</button><button class="copy-link-button" title="导出 .tie，以当前页面为根" @click="exportTie">⇩</button><button v-if="isDesktop" class="copy-link-button" title="导出此页及引用（闭包）" @click="exportPageClosure">⇪</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
+      <div class="save-state" :inert="locked || protectionBusy"><button v-if="session && !locked" type="button" class="history-button" aria-label="锁定页面" title="锁定页面" @click="lockDocument"><LockKeyhole :size="14" /></button><div v-if="activeSource" class="document-source-badge" :class="activeSource.kind"><span class="source-select-trigger is-label" :title="workspaceBadgeTitle">{{ sourceShortLabel(activeSource.name) }}</span></div><span class="save-dot" :class="{ saving: store.saving, pending: status === '未同步', synced: status === '已同步', conflict: status === '冲突', local: status === '本地' || status === '云端', error: Boolean(saveError) }" :title="statusTitle"></span><span v-if="status !== '已同步' && status !== '未同步' && status !== '冲突'" :title="statusTitle">{{ status }}</span><button v-if="hasRemoteConflict" class="save-retry-button" :disabled="conflictLoading"  :title="hasProtectionConflict ? '处理页面保护状态' : '查看本地草稿与远程当前版本'" @click="loadConflictPreview">{{ conflictLoading ? '读取中…' : hasProtectionConflict ? '处理保护状态' : '查看差异' }}</button><button v-else-if="saveError" class="save-retry-button" :disabled="store.saving" :title="saveError || '重新尝试保存当前页面'" @click="saveNow">重试</button> <button class="history-button" :disabled="refreshing" title="从工作区刷新当前页面（Ctrl/Cmd + R）" @click="refreshCurrentPage">↻</button><button v-if="isDesktop && !isBackendRemoteSourceId(activeSource?.id ?? '')" class="history-button" title="在文件管理器中定位当前 Markdown 文件" @click="revealPageFile">⌖</button><button class="history-button" title="页面版本历史" @click="openHistory">◷</button><button v-if="!isDesktop" class="copy-link-button" title="导入 .tiez" @click="store.importTiezBrowser()">导入</button><button v-if="!isDesktop" class="copy-link-button" title="导出当前工作区为 .tiez" @click="store.exportTiezBrowser()">.tiez</button><button class="copy-link-button" title="导出 .tie，以当前页面为根" @click="exportTie">⇩</button><button v-if="isDesktop" class="copy-link-button" title="导出此页及引用（闭包）" @click="exportPageClosure">⇪</button><button class="copy-link-button" title="复制 Markdown 页面链接" @click="copyPageLink">↗</button><button class="favorite-button" :class="{ active: isFavorite }" :title="isFavorite ? '取消收藏页面' : '收藏页面'" @click="store.toggleFavorite(activePage.id)">{{ isFavorite ? '★' : '☆' }}</button></div>
       <PageProtectionControl v-if="protectionPage" ref="protectionControl" :page="protectionPage" :prepare="saveNow" :locked="locked" @busy="protectionBusy = $event" />
     </header>
     <aside v-if="showingHistory" class="history-popover">
@@ -933,6 +945,15 @@ defineExpose({ saveNow })
       <div v-for="revision in revisions" v-else :key="revision.id" class="history-revision" :class="{ selected: selectedRevisionId === revision.id }"><button @click="previewRevision(revision)"><span><strong>{{ revision.title }}</strong><small>{{ revision.savedAt.slice(0, 19).replace('T', ' ') }}</small></span><em>预览</em></button><button class="history-restore" @click="restoreRevision(revision)">恢复</button></div>
       <section v-if="selectedRevision || revisionPreviewLoading || revisionPreviewError" class="revision-preview"><p v-if="revisionPreviewLoading" class="muted">正在读取版本内容…</p><p v-else-if="revisionPreviewError" class="revision-preview-error">{{ revisionPreviewError }}</p><template v-else-if="selectedRevision"><strong>{{ selectedRevision.title }}</strong><small>{{ selectedRevision.tags.length ? `# ${selectedRevision.tags.join('  # ')}` : '无标签' }}</small><pre>{{ selectedRevision.markdown }}</pre></template></section>
     </aside>
+    <div v-if="showingProtectionConflict && protectionConflict" class="conflict-dialog-backdrop" @mousedown.self="showingProtectionConflict = false">
+      <section class="conflict-dialog" role="dialog" aria-modal="true" aria-label="页面保护状态不同">
+        <header><div><strong>页面保护状态不同</strong><small>两边的正文、历史、讨论和附件均已保留，需要先对齐保护状态再同步。</small></div><button aria-label="关闭" @click="showingProtectionConflict = false">×</button></header>
+        <p>本机：{{ protectionConflict.localEncrypted ? '加密页面' : '普通页面' }} · 服务器：{{ protectionConflict.remoteEncrypted ? '加密页面' : '普通页面' }}</p>
+        <p v-if="canEncryptLocalConflict">输入服务器页面已有的密码，将本机页面一起加密；不会直接覆盖任一方的正文。</p>
+        <p v-else>请先解锁加密页面，再从页面的「⋯」菜单选择转换方式，对齐本机与服务器的保护状态。</p>
+        <footer><button @click="showingProtectionConflict = false">稍后处理</button><button v-if="canEncryptLocalConflict" class="conflict-load-button" @click="encryptLocalConflict">解锁并加密本机</button></footer>
+      </section>
+    </div>
     <div v-if="conflictRemotePage" class="conflict-dialog-backdrop" @mousedown.self="conflictRemotePage = null">
       <section class="conflict-dialog" role="dialog" aria-modal="true" aria-label="页面同步冲突">
         <header><div><strong>{{ hasSyncConflict ? '检测到内容冲突' : (activeSource?.kind === 'local' || activeSource?.kind === 'smb' ? '页面文件已在磁盘上被修改' : '页面已在其他设备更新') }}</strong><small>{{ hasSyncConflict ? '两边内容不一致，请选择保留哪一方。' : `先对照内容，再决定是否载入${remoteConflictLabel}版本。` }}</small></div><button aria-label="关闭" @click="conflictRemotePage = null">×</button></header>

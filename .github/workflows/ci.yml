@@ -44,11 +44,6 @@ jobs:
       - name: Build frontend for E2E
         run: npm run build
 
-      - name: Run E2E smoke tests
-        run: npm run test:e2e
-        env:
-          CI: true
-
       - name: Run backend API tests
         run: npm run test:backend
 
@@ -88,6 +83,12 @@ jobs:
           cargo test -p tie-local -p tie-cli --manifest-path src-tauri/Cargo.toml
           npm run tie:prepare
           test -x src-tauri/target/release/tie-cli
+
+      - name: Run E2E smoke tests
+        run: npm run test:e2e
+        env:
+          CI: true
+          TIE_TEST_CLI: ${{ github.workspace }}/src-tauri/target/release/tie-cli
 
       - name: Check Tauri backend
         run: cargo check --manifest-path src-tauri/Cargo.toml

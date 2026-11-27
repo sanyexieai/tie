@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Page } from '@/types'
 import type { PageProtectionBundle } from '@/services/page-protection-types'
 import { decryptMarkdown, encryptMarkdown, importEncryptionPassword, isEncryptedMarkdown } from '@/services/encrypted-markdown'
-import { decodeBase64, encodeBase64, readPageProtection, replacePageProtection, transformPageProtection } from '@/services/page-protection'
+import { decodeBase64, encodeBase64, planPageProtectionChanges, readPageProtection, replacePageProtection, transformPageProtection } from '@/services/page-protection'
 import { browserStorageAdapter } from '@/services/storage/browser-adapter'
 import { resetBrowserBlobStoreForTests } from '@/services/storage/blobs-browser'
 import * as browserBlobs from '@/services/storage/blobs-browser'
@@ -87,6 +87,41 @@ describe('whole-page protection using real Web Crypto', () => {
     const second = await transformPageProtection({ ...bundle, snapshot: 'second', page: { ...bundle.page, storageSourceId: 'backend:fixture' } }, key, true, sealed)
     expect(first.page.markdown).toBe(second.page.markdown)
     expect(second.snapshot).toBe('second')
+  })
+
+  it.each([false, true])('aligns an ordinary local page with an authenticated encrypted server copy (server first=%s)', async (serverFirst) => {
+    const key = await importEncryptionPassword('fixture-conversion-password')
+    const local: PageProtectionBundle = { sourceId, snapshot: 'local', page: page('fixture-private-same'),
+      revisions: [{ id: 'local-only-history', page: page('fixture-private-local-history') }],
+      reviews: { entries: [{ id: 'local-only-opinion', kind: 'opinion', status: 'open', actor: 'Owner', at: '', body: 'fixture-private-local-opinion' }] }, assets: [] }
+    const remote = await transformPageProtection({ ...local, sourceId: 'backend:fixture', snapshot: 'server', revisions: [], reviews: { entries: [] } }, key, true)
+    const originalLocal = JSON.stringify(local)
+    const originalRemote = JSON.stringify(remote)
+    const changes = await planPageProtectionChanges(serverFirst ? [remote, local] : [local, remote], key, true)
+    expect(changes).toHaveLength(1)
+    const after = changes[0]!.after
+    expect(changes[0]!.before).toBe(local)
+    expect(after.page.markdown).toBe(remote.page.markdown)
+    expect(after.revisions[0]!.id).toBe('local-only-history')
+    expect(await decryptMarkdown(after.revisions[0]!.page.markdown, key)).toBe('fixture-private-local-history')
+    expect(after.reviews.entries[0]!.id).toBe('local-only-opinion')
+    expect(JSON.stringify(after)).not.toContain('fixture-private-')
+    expect(JSON.stringify(local)).toBe(originalLocal)
+    expect(JSON.stringify(remote)).toBe(originalRemote)
+  })
+
+  it('preserves real content differences when aligning protection modes and authenticates before planning', async () => {
+    const key = await importEncryptionPassword('fixture-conversion-password')
+    const local: PageProtectionBundle = { sourceId, snapshot: 'local', page: page('fixture-private-local-edit'), revisions: [], reviews: { entries: [] }, assets: [] }
+    const remote = await transformPageProtection({ ...local, sourceId: 'backend:fixture', snapshot: 'server', page: page('fixture-private-server-edit') }, key, true)
+    const original = JSON.stringify([local, remote])
+    await expect(planPageProtectionChanges([local, remote], await importEncryptionPassword('wrong-password'), true)).rejects.toThrow('无法解密')
+    expect(JSON.stringify([local, remote])).toBe(original)
+    const changes = await planPageProtectionChanges([local, remote], key, true)
+    expect(changes).toHaveLength(1)
+    expect(changes[0]!.after.page.markdown).not.toBe(remote.page.markdown)
+    expect(await decryptMarkdown(changes[0]!.after.page.markdown, key)).toBe(local.page.markdown)
+    expect(JSON.stringify([local, remote])).toBe(original)
   })
 
   it('authenticates the current encrypted page before converting older plaintext records and binary assets', async () => {

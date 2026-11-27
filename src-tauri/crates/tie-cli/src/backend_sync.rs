@@ -28,7 +28,18 @@ pub struct BackendSyncReport {
     pub pushed: u32,
     pub pulled: u32,
     pub conflicts: Vec<String>,
+    pub protection_conflicts: Vec<PageProtectionConflict>,
     pub user_email: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageProtectionConflict {
+    pub page_id: String,
+    pub local_encrypted: bool,
+    pub remote_encrypted: bool,
+    pub local_updated_at: String,
+    pub remote_updated_at: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -202,6 +213,7 @@ fn sync_workspace_with_progress(
                 pushed: 0,
                 pulled: 0,
                 conflicts: Vec::new(),
+                protection_conflicts: Vec::new(),
                 user_email: session.email.clone(),
             },
         ),
@@ -267,6 +279,7 @@ fn sync_with_progress(
     let mut pushed = 0u32;
     let mut pulled = 0u32;
     let mut conflicts = Vec::new();
+    let mut protection_conflicts = Vec::new();
     let mut protection_required = HashSet::new();
     let pages_total = local_pages.iter().map(|page| page.id.as_str())
         .chain(remote_by_id.keys().map(String::as_str)).collect::<HashSet<_>>().len();
@@ -275,7 +288,14 @@ fn sync_with_progress(
 
     for local in &local_pages {
         let remote = remote_by_id.remove(&local.id);
-        if remote.as_ref().is_some_and(|remote| tie_local::is_encrypted_markdown(&remote.markdown) != tie_local::is_encrypted_markdown(&local.markdown)) {
+        if let Some(remote) = remote.as_ref().filter(|remote| tie_local::is_encrypted_markdown(&remote.markdown) != tie_local::is_encrypted_markdown(&local.markdown)) {
+            protection_conflicts.push(PageProtectionConflict {
+                page_id: local.id.clone(),
+                local_encrypted: tie_local::is_encrypted_markdown(&local.markdown),
+                remote_encrypted: tie_local::is_encrypted_markdown(&remote.markdown),
+                local_updated_at: local.updated_at.clone(),
+                remote_updated_at: remote.updated_at.clone(),
+            });
             protection_required.insert(local.id.clone());
             conflicts.push(local.id.clone());
             if pages_completed.insert(local.id.clone()) {
@@ -401,6 +421,7 @@ fn sync_with_progress(
         pushed,
         pulled,
         conflicts,
+        protection_conflicts,
         user_email: String::new(),
     })
 }
@@ -896,12 +917,45 @@ pub fn resolve_conflict(ws: &LocalWorkspace, page_id: &str, keep_local: bool) ->
         ));
     }
     let actor = if session.name.trim().is_empty() { me.email.clone() } else { session.name.clone() };
-    let remote_pages = list_remote(&client, &target, &session.access_token)?;
+    let mut report = resolve_with(&client, &target, &session.access_token, ws, &actor, page_id, keep_local)?;
+    report.user_email = me.email;
+    write_status(ws.root(), &report);
+    Ok(report)
+}
+
+fn resolve_with(
+    client: &reqwest::blocking::Client,
+    target: &BackendTarget,
+    token: &str,
+    ws: &LocalWorkspace,
+    actor: &str,
+    page_id: &str,
+    keep_local: bool,
+) -> Result<BackendSyncReport, String> {
+    let remote_pages = list_remote(client, target, token)?;
     let local_pages = ws.load_all(true)?;
     let local = local_pages.iter().find(|page| page.id == page_id).cloned();
     let remote = remote_pages.into_iter().find(|page| page.id == page_id);
     if let (Some(local_page), Some(remote_page)) = (local.as_ref(), remote.as_ref()) {
-        note_divergence(ws.root(), &actor, local_page, remote_page);
+        if tie_local::is_encrypted_markdown(&local_page.markdown) != tie_local::is_encrypted_markdown(&remote_page.markdown) {
+            return Err("[PROTECTION_REQUIRED] 本地与服务器的页面保护模式不同；请先解锁并显式对齐保护状态，再处理正文冲突".into());
+        }
+        note_divergence(ws.root(), actor, local_page, remote_page);
+    }
+    let mut cursor = read_cursor(ws.root())?;
+    let (pushed, pulled) = if keep_local {
+        let local = local.as_ref().ok_or("本地没有这一页")?;
+        let saved = put_remote(client, target, token, local, None)?;
+        cursor.insert(local.id.clone(), entry(local, &saved));
+        (1, 0)
+    } else {
+        let remote = remote.as_ref().ok_or("后台没有这一页")?;
+        pull_page(ws, remote, local.as_ref())?;
+        cursor.insert(remote.id.clone(), entry(remote, remote));
+        (0, 1)
+    };
+    write_cursor(ws.root(), &cursor)?;
+    if let (Some(local_page), Some(remote_page)) = (local.as_ref(), remote.as_ref()) {
         let chosen = if keep_local { &local_page.updated_at } else { &remote_page.updated_at };
         let other = if keep_local { &remote_page.updated_at } else { &local_page.updated_at };
         mark_resolution(ws.root(), page_id, chosen, other);
@@ -914,21 +968,8 @@ pub fn resolve_conflict(ws: &LocalWorkspace, page_id: &str, keep_local: bool) ->
             "note": if keep_local { "最终版本留下本机这一边" } else { "最终版本留下后台那一边" }
         }));
     }
-    let mut cursor = read_cursor(ws.root())?;
-    let (pushed, pulled) = if keep_local {
-        let local = local.ok_or("本地没有这一页")?;
-        let saved = put_remote(&client, &target, &session.access_token, &local, None)?;
-        cursor.insert(local.id.clone(), entry(&local, &saved));
-        (1, 0)
-    } else {
-        let remote = remote.ok_or("后台没有这一页")?;
-        pull_page(ws, &remote, local.as_ref())?;
-        cursor.insert(remote.id.clone(), entry(&remote, &remote));
-        (0, 1)
-    };
-    write_cursor(ws.root(), &cursor)?;
-    let _ = exchange_reviews(&client, &target, &session.access_token, ws.root(), page_id);
-    let report = BackendSyncReport {
+    let _ = exchange_reviews(client, target, token, ws.root(), page_id);
+    Ok(BackendSyncReport {
         mode: "synced".into(),
         message: String::new(),
         peer: "backend".into(),
@@ -937,10 +978,9 @@ pub fn resolve_conflict(ws: &LocalWorkspace, page_id: &str, keep_local: bool) ->
         pushed,
         pulled,
         conflicts: Vec::new(),
-        user_email: me.email,
-    };
-    write_status(ws.root(), &report);
-    Ok(report)
+        protection_conflicts: Vec::new(),
+        user_email: String::new(),
+    })
 }
 
 use tie_local::changes::{ReviewEntry, ReviewFile, merge_reviews};
@@ -1138,6 +1178,7 @@ fn write_status(root: &Path, report: &BackendSyncReport) {
         "pushed": report.pushed,
         "pulled": report.pulled,
         "conflicts": report.conflicts,
+        "protectionConflicts": report.protection_conflicts,
         "userEmail": report.user_email,
     });
     let _ = fs::write(tie.join(STATUS_FILE.trim_start_matches(".tie/")), format!("{body}\n"));
@@ -1249,11 +1290,140 @@ mod tests {
             assert_eq!(report.mode, "conflict");
             assert!(report.message.contains("PROTECTION_REQUIRED"));
             assert_eq!(report.conflicts, ["pg_protection"]);
+            assert_eq!(serde_json::to_value(&report.protection_conflicts).unwrap(), json!([{
+                "pageId": "pg_protection",
+                "localEncrypted": local_encrypted,
+                "remoteEncrypted": !local_encrypted,
+                "localUpdatedAt": "2026-01-01T00:00:00Z",
+                "remoteUpdatedAt": "2026-01-02T00:00:00Z",
+            }]));
             assert_eq!(serde_json::to_value(local.protection_bundle("pg_protection").unwrap()).unwrap(), before_local);
             assert_eq!(serde_json::to_value(remote.protection_bundle("pg_protection").unwrap()).unwrap(), before_remote);
+            let cursor = fs::read(local.root().join(CURSOR_FILE)).unwrap();
+            let audit = fs::read(local.root().join(".tie/audit/events.jsonl")).ok();
+            let client = http_client().unwrap();
+            for keep_local in [false, true] {
+                let error = resolve_with(&client, &target, "", &local, "test", "pg_protection", keep_local).unwrap_err();
+                assert!(error.contains("PROTECTION_REQUIRED"));
+                assert_eq!(serde_json::to_value(local.protection_bundle("pg_protection").unwrap()).unwrap(), before_local);
+                assert_eq!(serde_json::to_value(remote.protection_bundle("pg_protection").unwrap()).unwrap(), before_remote);
+                assert_eq!(fs::read(local.root().join(CURSOR_FILE)).unwrap(), cursor);
+                assert_eq!(fs::read(local.root().join(".tie/audit/events.jsonl")).ok(), audit);
+            }
             drop(server);
             fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[test]
+    fn explicit_protection_alignment_reuses_authenticated_remote_cipher_and_keeps_local_history() {
+        let dir = std::env::temp_dir().join(format!("tie-sync-align-protection-{}", tie_local::new_page_id()));
+        let local = LocalWorkspace::init(dir.join("local"), "src_test").unwrap();
+        let remote = LocalWorkspace::init(dir.join("remote"), "src_test").unwrap();
+        let id = "pg_align_protection";
+        let password = "fixture-page-protection";
+        save_page_to_root(local.root(), page(id, "local-only older draft", "2026-01-01T00:00:00Z"), None).unwrap();
+        save_page_to_root(local.root(), page(id, "shared current draft", "2026-01-02T00:00:00Z"), None).unwrap();
+        add_opinion(local.root(), id, "local-only-opinion", "test", "note", "", "local-only discussion").unwrap();
+        save_page_to_root(remote.root(), page(id, "shared current draft", "2026-01-02T00:00:00Z"), None).unwrap();
+        remote.convert_page_protection(id, password, true, None).unwrap();
+        let local_history_id = local.list_revisions(id).unwrap()[0].id.clone();
+        let root = remote.root().to_owned();
+        let server = crate::test_http::Server::start(move |request, body| {
+            let request = request.replace("/api/v1/workspaces/ws_test", "");
+            let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
+            if request.starts_with("GET /pages ") {
+                return (200, serde_json::to_vec(&ws.load_all(true).unwrap()).unwrap());
+            }
+            if request.contains("/reviews ") {
+                if request.starts_with("PUT ") {
+                    write_reviews(&root, "pg_align_protection", &serde_json::from_slice(body).unwrap()).unwrap();
+                }
+                return (200, serde_json::to_vec(&read_review_file(&root, "pg_align_protection")).unwrap());
+            }
+            assert!(!request.starts_with("PUT /pages/"), "same authenticated current contents should not overwrite a page");
+            crate::resources_sync::tests::respond(&root, &request, body)
+        });
+        let target = BackendTarget { url: server.url.clone(), workspace_id: "ws_test".into() };
+        assert_eq!(sync_with(&target, "", &local, "test").unwrap().protection_conflicts.len(), 1);
+
+        let before = local.protection_bundle(id).unwrap();
+        let remote_page = remote.get_by_id(id).unwrap().unwrap();
+        assert_eq!(tie_local::encryption::decrypt_markdown(&remote_page.markdown, password).unwrap(), before.page.markdown);
+        let mut converted = tie_local::transform_protection_bundle(before.clone(), password, true).unwrap();
+        converted.page.markdown = remote_page.markdown.clone();
+        let aligned = local.replace_page_protection(converted, Some(&before.page.updated_at)).unwrap();
+        assert_ne!(aligned.updated_at, remote_page.updated_at);
+
+        let report = sync_with(&target, "", &local, "test").unwrap();
+        assert_eq!(report.mode, "synced");
+        assert!(report.conflicts.is_empty());
+        assert!(report.protection_conflicts.is_empty());
+        assert_eq!((report.pushed, report.pulled), (0, 0));
+        let cursor = read_cursor(local.root()).unwrap();
+        assert_eq!(cursor[id].local, aligned.updated_at);
+        assert_eq!(cursor[id].remote, remote_page.updated_at);
+        assert_eq!(local.get_by_id(id).unwrap().unwrap().markdown, remote_page.markdown);
+        let older = local.get_revision(id, &local_history_id).unwrap();
+        assert!(tie_local::is_encrypted_markdown(&older.markdown));
+        assert_eq!(tie_local::encryption::decrypt_markdown(&older.markdown, password).unwrap(), "local-only older draft");
+        let reviews = tie_local::encryption::reveal_reviews(read_reviews(local.root(), id), password).unwrap();
+        assert_eq!(reviews.entries.iter().find(|entry| entry.id == "local-only-opinion").unwrap().body, "local-only discussion");
+        drop(server);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rejected_resolution_is_not_marked_applied_and_can_be_retried() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        let dir = std::env::temp_dir().join(format!("tie-resolve-retry-{}", tie_local::new_page_id()));
+        let local = LocalWorkspace::init(dir.join("local"), "src_test").unwrap();
+        let remote = LocalWorkspace::init(dir.join("remote"), "src_test").unwrap();
+        save_page_to_root(local.root(), page("pg_resolve", "local draft", "2026-01-01T00:00:00Z"), None).unwrap();
+        save_page_to_root(remote.root(), page("pg_resolve", "remote draft", "2026-01-02T00:00:00Z"), None).unwrap();
+        let rejected = Arc::new(AtomicBool::new(true));
+        let reject_put = rejected.clone();
+        let root = remote.root().to_owned();
+        let server = crate::test_http::Server::start(move |request, body| {
+            let request = request.replace("/api/v1/workspaces/ws_test", "");
+            let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
+            if request.starts_with("GET /pages ") {
+                return (200, serde_json::to_vec(&ws.load_all(true).unwrap()).unwrap());
+            }
+            if request.starts_with("PUT /pages/pg_resolve ") {
+                if reject_put.load(Ordering::SeqCst) { return (503, b"{}".to_vec()); }
+                let saved = save_page_to_root(&root, serde_json::from_slice(body).unwrap(), None).unwrap();
+                return (200, serde_json::to_vec(&saved).unwrap());
+            }
+            if request.contains("/reviews ") {
+                return (200, if request.starts_with("PUT ") { body.to_vec() } else { br#"{"entries":[]}"#.to_vec() });
+            }
+            panic!("unexpected resolution request: {request}");
+        });
+        let target = BackendTarget { url: server.url.clone(), workspace_id: "ws_test".into() };
+        let client = http_client().unwrap();
+        assert!(resolve_with(&client, &target, "", &local, "test", "pg_resolve", true).unwrap_err().contains("503"));
+        assert_eq!(remote.get_by_id("pg_resolve").unwrap().unwrap().markdown, "remote draft");
+        assert!(!local.root().join(CURSOR_FILE).exists());
+        assert!(read_reviews(local.root(), "pg_resolve").entries.iter().filter(|entry| entry.kind == "version").all(|entry| entry.status == "open"));
+        let audit_path = local.root().join(".tie/audit/events.jsonl");
+        let failed_audit = fs::read_to_string(&audit_path).unwrap();
+        assert!(failed_audit.lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).all(|event| event["type"] != "resolve"));
+
+        rejected.store(false, Ordering::SeqCst);
+        let report = resolve_with(&client, &target, "", &local, "test", "pg_resolve", true).unwrap();
+        assert_eq!(report.mode, "synced");
+        assert_eq!(report.pushed, 1);
+        assert!(report.protection_conflicts.is_empty());
+        assert_eq!(remote.get_by_id("pg_resolve").unwrap().unwrap().markdown, "local draft");
+        assert!(read_cursor(local.root()).unwrap().contains_key("pg_resolve"));
+        let reviews = read_reviews(local.root(), "pg_resolve");
+        assert_eq!(reviews.entries.iter().find(|entry| entry.at == "2026-01-01T00:00:00Z").unwrap().status, "final");
+        assert_eq!(reviews.entries.iter().find(|entry| entry.at == "2026-01-02T00:00:00Z").unwrap().status, "dropped");
+        let audit = fs::read_to_string(&audit_path).unwrap();
+        assert_eq!(audit.lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).filter(|event| event["type"] == "resolve" && event["status"] == "applied").count(), 1);
+        drop(server);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

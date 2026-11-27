@@ -100,7 +100,9 @@ async function save(page: Page, force = false) {
     const latest = store.pages.find((item) => item.id === raw.id && item.storageSourceId === raw.storageSourceId)
     if (!force && (!latest || latest.markdown !== raw.markdown || !pageContentEqual(latest, raw))) throw new Error('页面已在其他设备更新，请重新载入后再保存')
     savingCipher = ciphertext
-    await store.persist({ ...raw, title: page.title, tags: page.tags, markdown: ciphertext }, { force })
+    const draft = { ...raw, title: page.title, tags: page.tags, markdown: ciphertext }
+    if (force && store.syncConflicts.has(raw.id)) await store.resolveConflictOverwriteLocal(draft)
+    else await store.persist(draft, { force })
     const stored = store.pages.find((item) => item.id === page.id && item.storageSourceId === page.storageSourceId)
     if (stored && stored.markdown === ciphertext && authorized(permittedView, permission, accountScope)) {
       const plain = { ...stored, markdown: page.markdown }
@@ -110,14 +112,14 @@ async function save(page: Page, force = false) {
   } finally { busy.value = false; savingCipher = '' }
 }
 
-async function refresh(isCurrent = () => true) {
+async function refresh(isCurrent = () => true, resolveConflict = false) {
   const candidate = key
   const current = ++generation
   const currentScope = scope.value
   if (!candidate) throw new Error('请先解锁页面')
   refreshing = true
   try {
-    const latest = await store.refreshPage(props.page.id)
+    const latest = resolveConflict ? await store.resolveConflictLoadRemote(props.page.id) : await store.refreshPage(props.page.id)
     if (!currentContext(currentScope, current) || !isCurrent()) return
     const raw = latest ?? store.pages.find((item) => item.id === props.page.id)
     if (!raw) throw new Error('页面不存在')

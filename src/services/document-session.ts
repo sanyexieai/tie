@@ -7,7 +7,7 @@ export interface DocumentSession {
   readonly busy: boolean
   readonly error: string
   save(page: Page, force?: boolean): Promise<void>
-  refresh(isCurrent?: () => boolean): Promise<void>
+  refresh(isCurrent?: () => boolean, resolveConflict?: boolean): Promise<void>
   latest(): Promise<Page | null>
   readRevision(revisionId: string): Promise<Page | null>
   restoreRevision(revisionId: string): Promise<void>

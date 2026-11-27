@@ -9,7 +9,7 @@ import { pickAccountWorkspace } from '@/services/browser-backend'
 import { decryptMarkdown, importEncryptionPassword, isEncryptedMarkdown, lockWorkspaceEncryption, setWorkspaceEncryptionKey } from '@/services/encrypted-markdown'
 import { cacheProtectedPage, lockProtectedPage, protectedPageAuthorization } from '@/services/protected-pages'
 import { deviceUnlockAvailable, forgetDevicePagePassword, saveDevicePagePassword } from '@/services/page-device-unlock'
-import { readPageProtection, replacePageProtection, transformPageProtection } from '@/services/page-protection'
+import { planPageProtectionChanges, readPageProtection, replacePageProtection } from '@/services/page-protection'
 import { reviewPageKey, reviewState } from '@/services/review-service'
 import { syncQueue } from '@/services/storage/sync-queue'
 import type { PageProtectionBundle } from '@/services/page-protection-types'
@@ -26,7 +26,11 @@ const remember = ref(false)
 const busy = ref(false)
 const error = ref('')
 const encrypted = computed(() => isEncryptedMarkdown(props.page.markdown))
-const label = computed(() => encrypted.value ? '转为普通页面' : '转为加密页面')
+const aligningEncryption = computed(() => {
+  const conflict = store.syncConflicts.get(props.page.id)
+  return !encrypted.value && conflict?.kind === 'protection' && conflict.localEncrypted === false && conflict.remoteEncrypted === true
+})
+const label = computed(() => aligningEncryption.value ? '解锁并加密本机' : encrypted.value ? '转为普通页面' : '转为加密页面')
 const scope = computed(() => JSON.stringify([backend.profile.endpoint, backend.profile.user?.id ?? '', props.page.storageSourceId, props.page.id]))
 const deviceAvailable = deviceUnlockAvailable()
 let disposed = false
@@ -79,7 +83,7 @@ async function targets(page: Page) {
 async function convert() {
   error.value = ''
   const toEncrypted = !encrypted.value
-  if (toEncrypted && password.value !== confirmation.value) { error.value = '两次密码不一致'; return }
+  if (toEncrypted && !aligningEncryption.value && password.value !== confirmation.value) { error.value = '两次密码不一致'; return }
   const expectedScope = scope.value
   const currentGeneration = ++generation
   const current = () => !disposed && scope.value === expectedScope && generation === currentGeneration
@@ -93,8 +97,7 @@ async function convert() {
     const key = toEncrypted ? await importEncryptionPassword(entered) : permission?.key
     if (!key) throw new Error('请先解锁页面再转换')
     const bundles = await targets(props.page)
-    const sealed = new Map<string, Promise<string>>()
-    const changes: { before: PageProtectionBundle; after: PageProtectionBundle }[] = []
+    const changes = await planPageProtectionChanges(bundles, key, toEncrypted)
     let primary: Page | undefined
     let plaintext = ''
     for (const bundle of bundles) {
@@ -106,7 +109,6 @@ async function convert() {
         }
         continue
       }
-      changes.push({ before: bundle, after: await transformPageProtection(bundle, key, toEncrypted, sealed) })
     }
     for (const { before, after } of changes) {
       if (!current()) return
@@ -139,6 +141,12 @@ async function convert() {
       setWorkspaceEncryptionKey(page.storageSourceId, key)
     } else lockWorkspaceEncryption(page.storageSourceId)
     store.pages = store.pages.map((item) => item.id === primary!.id ? primary! : item)
+    const conflict = store.syncConflicts.get(page.id)
+    if (conflict?.kind === 'protection') {
+      const pending = new Map(store.syncConflicts)
+      pending.set(page.id, { pageId: page.id, sourceId: conflict.sourceId, localUpdatedAt: primary.updatedAt, remoteUpdatedAt: conflict.remoteUpdatedAt })
+      store.syncConflicts = pending
+    }
     store.scheduleBackendSync()
     window.dispatchEvent(new CustomEvent('tie:reviews-changed', { detail: { sourceId: page.storageSourceId, pageId: page.id } }))
     close()
@@ -163,10 +171,14 @@ defineExpose({ open })
         <form @submit.prevent="convert"><fieldset :disabled="busy">
           <p>当前页面：{{ page.title || '无标题' }}</p>
           <template v-if="!encrypted">
-            <label>密码<input v-model="password" type="password" aria-label="加密密码" autocomplete="new-password" required /></label>
-            <label>确认密码<input v-model="confirmation" type="password" aria-label="确认加密密码" autocomplete="new-password" required /></label>
+            <label v-if="aligningEncryption">服务器页面密码<input v-model="password" type="password" aria-label="服务器页面密码" autocomplete="current-password" required /></label>
+            <template v-else>
+              <label>密码<input v-model="password" type="password" aria-label="加密密码" autocomplete="new-password" required /></label>
+              <label>确认密码<input v-model="confirmation" type="password" aria-label="确认加密密码" autocomplete="new-password" required /></label>
+            </template>
             <label v-if="deviceAvailable" class="remember"><input v-model="remember" type="checkbox" /> 在此设备记住</label>
-            <p>当前正文、历史和讨论一起加密。解锁后的用法与普通页面相同；标题和标签保持可见。</p>
+            <p v-if="aligningEncryption">服务器上的页面已经加密。验证原密码后，将本机正文、历史和讨论一起加密，再重新同步；两边正文若确实不同，会继续保留为内容冲突。</p>
+            <p v-else>当前正文、历史和讨论一起加密。解锁后的用法与普通页面相同；标题和标签保持可见。</p>
           </template>
           <p v-else>转换后，正文、历史和讨论将以普通页面保存，查看和搜索不再需要解锁。</p>
           <p>已连接服务器中的同一页面会一起转换。转换期间请稍候。</p>

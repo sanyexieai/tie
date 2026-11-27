@@ -392,11 +392,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const next = new Map(syncConflicts.value)
     for (const result of results) {
       for (const [pageId, conflict] of next) {
-        if (conflict.sourceId === result.sourceId && !result.conflicts.some((item) => item.pageId === pageId)) {
+        if (conflict.sourceId === result.sourceId && conflict.kind !== 'protection' && !backendConflictIds.has(pageId) && !result.conflicts.some((item) => item.pageId === pageId)) {
           next.delete(pageId)
         }
       }
       for (const conflict of result.conflicts) {
+        if (backendConflictIds.has(conflict.pageId) || next.get(conflict.pageId)?.kind === 'protection') continue
         next.set(conflict.pageId, { ...conflict, sourceId: result.sourceId })
       }
     }
@@ -408,6 +409,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const next = new Map(syncConflicts.value)
     next.delete(pageId)
     syncConflicts.value = next
+  }
+
+  function clearLocalSaveConflict(pageId: PageId) {
+    // A local save cannot resolve a server conflict or authorize a protection change.
+    if (backendConflictIds.has(pageId) || syncConflicts.value.get(pageId)?.kind === 'protection') return
+    clearSyncConflict(pageId)
   }
 
   async function bootstrapRemoteSync() {
@@ -557,13 +564,15 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       let pushed = 0
       let pulled = 0
       const conflicts: string[] = []
+      const conflictDetails = new Map<string, SyncConflict & { sourceId: string }>()
+      const conflictMessages: string[] = []
       unlisten = await listen<BackendSyncProgress>('backend-sync-progress', ({ payload }) => {
         if (payload.sourceId === activeSourceId) backendSyncProgress.value = payload
       })
       for (const source of sources) {
         activeSourceId = source.id
         backendSyncProgress.value = null
-        const report = await invoke<{ pushed: number; pulled: number; conflicts: string[] }>('sync_backend_workspace', {
+        const report = await invoke<{ pushed: number; pulled: number; conflicts: string[]; message?: string; protectionConflicts?: (SyncConflict & { localEncrypted: boolean; remoteEncrypted: boolean })[] }>('sync_backend_workspace', {
           sourceId: source.id,
           url: backend.profile.endpoint,
           workspaceId: target.id,
@@ -571,6 +580,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         pushed += report.pushed
         pulled += report.pulled
         conflicts.push(...report.conflicts)
+        if (report.conflicts.length && report.message) conflictMessages.push(report.message)
+        for (const id of report.conflicts) {
+          const protection = report.protectionConflicts?.find((item) => item.pageId === id)
+          conflictDetails.set(id, protection
+            ? { ...protection, kind: 'protection', sourceId: source.id }
+            : { pageId: id, sourceId: source.id, localUpdatedAt: pages.value.find((item) => item.id === id)?.updatedAt ?? '', remoteUpdatedAt: '' })
+        }
       }
       if (pulled > 0) await reloadWorkspace()
       const next = new Map(syncConflicts.value)
@@ -579,18 +595,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       }
       backendConflictIds.clear()
       for (const id of conflicts) {
-        const page = pages.value.find((item) => item.id === id)
-        next.set(id, {
-          pageId: id,
-          sourceId: page?.storageSourceId ?? sources[0]?.id ?? '',
-          localUpdatedAt: page?.updatedAt ?? '',
-          remoteUpdatedAt: page?.updatedAt ?? '',
-        })
+        next.set(id, conflictDetails.get(id)!)
         backendConflictIds.add(id)
       }
       syncConflicts.value = next
       backendSyncMode.value = conflicts.length ? 'conflict' : 'synced'
-      backend.error = conflicts.length ? '有页面在本地和后台都改过，未覆盖' : ''
+      backend.error = conflicts.length ? conflictMessages.join('\n') || '有页面在本地和后台都改过，未覆盖' : ''
       await refreshBackendSyncCursor()
       backendSyncLastCompletedAt.value = new Date().toISOString()
       return { pushed, pulled, conflicts }
@@ -607,6 +617,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function resolveBackendConflict(sourceId: string, pageId: string, keepLocal: boolean) {
+    if (syncConflicts.value.get(pageId)?.kind === 'protection') throw new Error('页面保护状态不同，请先解锁并对齐保护状态')
     if (!desktopCanSync() || !backendSyncWorkspaceId) return false
     if (backendSyncTimer) {
       window.clearTimeout(backendSyncTimer)
@@ -1153,7 +1164,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         }, known)
         : item
     ))
-    clearSyncConflict(remote.id)
+    clearLocalSaveConflict(remote.id)
   }
 
   /** 同一页面的保存串行化，避免自动保存重叠时误用旧 expectedUpdatedAt。 */
@@ -1239,11 +1250,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     // 云端协作冲突：本地领先时禁止静默覆盖。纯本地页没有跨端协作面，直接以编辑器为准。
     if (!forceWrite && syncConflicts.value.has(page.id)) {
       const conflict = syncConflicts.value.get(page.id)
-      if (conflict && isLocalWinningConflict(conflict)) {
+      if (conflict && conflict.kind !== 'protection' && isLocalWinningConflict(conflict)) {
         if (localOnly) {
           forceWrite = true
           expectedUpdatedAt = undefined
-          clearSyncConflict(page.id)
+          clearLocalSaveConflict(page.id)
         } else {
           throw new Error(conflictMessage)
         }
@@ -1263,7 +1274,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
             // 纯本地：差异只是「编辑器里的稿」vs「磁盘上的 md」，以当前编辑为准覆盖。
             forceWrite = true
             expectedUpdatedAt = undefined
-            clearSyncConflict(page.id)
+            clearLocalSaveConflict(page.id)
           } else {
             registerSyncConflict(page.id, previous.storageSourceId, draft.updatedAt, result.remote.updatedAt)
             throw new Error(conflictMessage)
@@ -1287,7 +1298,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       const index = pages.value.findIndex((item) => item.id === saved.id)
       if (index === -1) pages.value.push(saved)
       else pages.value[index] = saved
-      clearSyncConflict(saved.id)
+      clearLocalSaveConflict(saved.id)
       if (options?.sync !== false && !isTemporaryStorageSourceId(saved.storageSourceId)) scheduleBackendSync()
       if (previous && previous.title !== saved.title) {
         const linkPattern = pageLinkPattern(saved.id)
@@ -1307,7 +1318,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         const latest = await workspaceService.readLatestPage(previous).catch(() => null)
         if (latest && pageContentEqual(latest, draft)) {
           adoptRemotePage(latest, previous)
-          clearSyncConflict(latest.id)
+          clearLocalSaveConflict(latest.id)
           return
         }
         if (localOnly) {
@@ -1316,7 +1327,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           const index = pages.value.findIndex((item) => item.id === saved.id)
           if (index === -1) pages.value.push(saved)
           else pages.value[index] = saved
-          clearSyncConflict(saved.id)
+          clearLocalSaveConflict(saved.id)
           return
         }
         if (latest) registerSyncConflict(page.id, previous.storageSourceId, draft.updatedAt, latest.updatedAt)
@@ -1326,6 +1337,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function resolveConflictOverwriteLocal(page: Page) {
+    if (syncConflicts.value.get(page.id)?.kind === 'protection') throw new Error('页面保护状态不同，请先解锁并对齐保护状态')
     await persist(page, { force: true, sync: false })
     if (await resolveBackendConflict(page.storageSourceId, page.id, true)) return
   }
@@ -1406,10 +1418,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const page = pages.value.find((item) => item.id === pageId)
     if (!page) return null
     if (backend.connected && backendSyncWorkspaceId && syncConflicts.value.has(pageId)) {
-      try {
-        const remote = await backendService.getPage(backend.profile, backendSyncWorkspaceId, pageId)
-        return { ...remote, storageSourceId: page.storageSourceId, storageSourceIds: page.storageSourceIds }
-      } catch { /* 读不到后台时退回本机副本 */ }
+      const remote = await backendService.getPage(backend.profile, backendSyncWorkspaceId, pageId)
+      return { ...remote, storageSourceId: page.storageSourceId, storageSourceIds: page.storageSourceIds }
     }
     return workspaceService.readLatestPage(page)
   }
@@ -1424,7 +1434,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       latest = result.pages.find((item) => item.id === pageId) ?? null
       if (latest) {
         await syncSource(current.storageSourceId)
-        clearSyncConflict(pageId)
+        clearLocalSaveConflict(pageId)
         return pages.value.find((item) => item.id === pageId) ?? latest
       }
     }
@@ -1436,7 +1446,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         storageSourceIds: mergePageSourceIds(current, latest!, { knownSourceIds: knownStorageSourceIds() }),
       }, knownStorageSourceIds())
       : page))
-    clearSyncConflict(pageId)
+    clearLocalSaveConflict(pageId)
     return latest
   }
 
@@ -1699,7 +1709,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       const latest = await workspaceService.readLatestPage(current).catch(() => null)
       if (!latest) return
       if (pageContentEqual(latest, current)) {
-        clearSyncConflict(pageId)
+        clearLocalSaveConflict(pageId)
         if (latest.updatedAt !== current.updatedAt) {
           pages.value = pages.value.map((page) => (
             page.id === pageId ? { ...page, updatedAt: latest.updatedAt } : page
@@ -1714,7 +1724,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           storageSourceIds: mergePageSourceIds(current, latest, { knownSourceIds: knownStorageSourceIds() }),
         }, knownStorageSourceIds())
         : page))
-      if (latest.updatedAt >= current.updatedAt) clearSyncConflict(pageId)
+      if (latest.updatedAt >= current.updatedAt) clearLocalSaveConflict(pageId)
     } catch (error) {
       console.warn('打开页面时刷新失败', error)
     }

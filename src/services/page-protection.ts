@@ -17,6 +17,25 @@ export async function replacePageProtection(bundle: PageProtectionBundle, expect
   return adapter.replacePageProtection(bundle, expectedUpdatedAt)
 }
 
+export async function planPageProtectionChanges(bundles: PageProtectionBundle[], key: CryptoKey, encrypted: boolean): Promise<{ before: PageProtectionBundle; after: PageProtectionBundle }[]> {
+  const sealed = new Map<string, Promise<string>>()
+  if (encrypted) {
+    // Reuse an authenticated server copy so equal plaintext does not become a
+    // different ciphertext and appear to be a concurrent content edit.
+    for (const bundle of bundles) {
+      if (!isEncryptedMarkdown(bundle.page.markdown)) continue
+      const plaintext = await decryptMarkdown(bundle.page.markdown, key)
+      if (!sealed.has(plaintext)) sealed.set(plaintext, Promise.resolve(bundle.page.markdown))
+    }
+  }
+  const changes: { before: PageProtectionBundle; after: PageProtectionBundle }[] = []
+  for (const before of bundles) {
+    if (isEncryptedMarkdown(before.page.markdown) === encrypted) continue
+    changes.push({ before, after: await transformPageProtection(before, key, encrypted, sealed) })
+  }
+  return changes
+}
+
 /** Transform every stored copy before committing, so old history cannot retain plaintext. */
 export async function transformPageProtection(bundle: PageProtectionBundle, key: CryptoKey, encrypted: boolean, sealed = new Map<string, Promise<string>>()): Promise<PageProtectionBundle> {
   if (isEncryptedMarkdown(bundle.page.markdown) === encrypted) throw new Error(encrypted ? '页面已经加密' : '页面已经是普通页面')

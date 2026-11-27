@@ -85,18 +85,31 @@ async function expectSource(editor: Locator, markdown: string) {
 }
 
 async function beginDocument(page: Page, mobile = false) {
-  if (mobile) await page.getByRole('button', { name: '新建加密页面', exact: true }).click()
-  else {
-    await page.getByRole('button', { name: '选择页面类型', exact: true }).click()
-    await page.getByRole('menuitem', { name: '加密页面', exact: true }).click()
-  }
-  const dialog = page.getByRole('dialog', { name: '新建加密页面', exact: true })
-  await dialog.getByRole('textbox', { name: '页面标题', exact: true }).fill(title)
-  await dialog.getByLabel('解锁密码', { exact: true }).fill(password)
-  await dialog.getByLabel('确认密码', { exact: true }).fill(password)
-  await dialog.getByRole('button', { name: '创建页面', exact: true }).click()
-  await expect(dialog).toBeHidden()
   const editor = documentEditor(page)
+  if (mobile) {
+    await page.getByRole('button', { name: '新建加密页面', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: '新建加密页面', exact: true })
+    await dialog.getByRole('textbox', { name: '页面标题', exact: true }).fill(title)
+    await dialog.getByLabel('解锁密码', { exact: true }).fill(password)
+    await dialog.getByLabel('确认密码', { exact: true }).fill(password)
+    await dialog.getByRole('button', { name: '创建页面', exact: true }).click()
+    await expect(dialog).toBeHidden()
+  } else {
+    await expect(page.getByRole('button', { name: '选择页面类型', exact: true })).toHaveCount(0)
+    await page.locator('.sidebar .new-page-button').click()
+    await expect(editor.getByRole('textbox', { name: '页面标题', exact: true })).toHaveValue('无标题')
+    await editor.getByRole('textbox', { name: '页面标题', exact: true }).fill(title)
+    await saveDocument(page, editor)
+    const row = page.getByRole('treeitem', { name: new RegExp(title) })
+    await row.hover()
+    await row.getByRole('button', { name: '页面操作', exact: true }).click()
+    await page.getByRole('menuitem', { name: '转为加密页面', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: '转为加密页面', exact: true })
+    await dialog.getByLabel('加密密码', { exact: true }).fill(password)
+    await dialog.getByLabel('确认加密密码', { exact: true }).fill(password)
+    await dialog.getByRole('button', { name: '转为加密页面', exact: true }).click()
+    await expect(dialog).toBeHidden()
+  }
   await expect(editor.locator('.tiptap').or(editor.getByRole('textbox', { name: 'Markdown 源码', exact: true }))).toBeVisible()
   await (await sourceEditor(editor)).fill(firstMarkdown)
   await saveDocument(page, editor)
@@ -241,7 +254,9 @@ test('syncs only ciphertext to the real backend and unlocks the same document on
   await textarea.fill(secondMarkdown)
   await expect.poll(() => writes.length, { timeout: 10_000 }).toBeGreaterThan(1)
   await saveDocument(page, editor)
-  expect(writes.every((write) => write.markdown.startsWith(marker))).toBe(true)
+  const firstProtected = writes.findIndex((write) => write.markdown.startsWith(marker))
+  expect(firstProtected).toBeGreaterThanOrEqual(0)
+  expect(writes.slice(firstProtected).every((write) => write.markdown.startsWith(marker))).toBe(true)
   for (const value of privateValues) expect(JSON.stringify(writes)).not.toContain(value)
   const root = path.join(backend.data, 'workspaces', backend.workspaceId)
   const files = fs.readdirSync(root, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile())
@@ -724,4 +739,70 @@ test('uses ordinary discussions on unlocked protected pages while quotes, replie
     await expect(remote.locator('.pheromone-card').filter({ hasText: body })).toContainText(note)
     await expect(remote.locator('.pheromone-card').filter({ hasText: reply })).toContainText('回复意见')
   } finally { await context.close() }
+})
+
+test('authorizes an existing server encryption before encrypting the local copy without replacing server data', async ({ page, backend }) => {
+  const cli = process.env.TIE_TEST_CLI || fileURLToPath(new URL(`../src-tauri/target/debug/tie-cli${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url))
+  const headers = { authorization: `Bearer ${backend.profile.accessToken}`, 'content-type': 'application/json' }
+  expect((await fetch(`${backend.url}/api/v1/admin/settings`, { method: 'PUT', headers, body: JSON.stringify({ mcp: { enabled: false, cliPath: cli } }) })).status).toBe(200)
+  await seedBrowser(page.context(), backend.profile)
+  await page.routeWebSocket('**/*', () => {})
+  await page.goto('/')
+  const editor = documentEditor(page)
+  await expect(editor.getByRole('textbox', { name: '页面标题', exact: true })).toHaveValue('普通文档')
+  const ordinary = (await backendPages(backend)).find((item) => item.id === 'pg_ordinary')!
+  const row = page.getByRole('treeitem', { name: /普通文档/ })
+  await row.hover()
+  await row.getByRole('button', { name: '页面操作', exact: true }).click()
+  await page.getByRole('menuitem', { name: '转为加密页面', exact: true }).click()
+  const encryption = page.getByRole('dialog', { name: '转为加密页面', exact: true })
+  await encryption.getByLabel('加密密码', { exact: true }).fill(password)
+  await encryption.getByLabel('确认加密密码', { exact: true }).fill(password)
+  await encryption.getByRole('button', { name: '转为加密页面', exact: true }).click()
+  await expect(encryption).toBeHidden({ timeout: 15_000 })
+  const serverCiphertext = (await backendPages(backend)).find((item) => item.id === ordinary.id)!.markdown
+  const serverWrites: unknown[] = []
+  page.on('request', (request) => {
+    if (request.url().endsWith('/pg_ordinary/protection') && request.method() === 'PUT') serverWrites.push(request.postDataJSON())
+  })
+  await page.evaluate(({ ordinary, workspaceId }) => {
+    const store = (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace')
+    const source = { id: 'source-demo-local', name: '本机资料库', kind: 'local', path: '', available: true }
+    const local = { ...ordinary, storageSourceId: source.id, storageSourceIds: [source.id, `backend:${workspaceId}`] }
+    const workspace = { id: 'demo', name: '本机资料库', sources: [source, ...store.workspace.sources] }
+    localStorage.setItem('tie-demo-workspace-v1', JSON.stringify({ workspace, pages: [local] }))
+    localStorage.setItem('tie-demo-page-history-v1', JSON.stringify({ [local.id]: [{ id: 'rev_local_only', page: { ...local, markdown: 'fixture-local-only-history-preserved', updatedAt: '2026-11-24T00:00:00Z' } }] }))
+    store.workspace = workspace
+    store.pages = [local]
+    store.activePageId = local.id
+    store.syncConflicts = new Map([[local.id, { pageId: local.id, sourceId: source.id, kind: 'protection', localEncrypted: false, remoteEncrypted: true,
+      localUpdatedAt: '2026-11-26T00:00:00Z', remoteUpdatedAt: '2026-11-27T00:00:00Z' }]])
+  }, { ordinary, workspaceId: backend.workspaceId })
+  await expect(editor.getByRole('button', { name: '处理保护状态', exact: true })).toBeVisible()
+  await editor.getByRole('button', { name: '处理保护状态', exact: true }).click()
+  const conflict = page.getByRole('dialog', { name: '页面保护状态不同', exact: true })
+  await expect(conflict.getByRole('button', { name: /覆盖|载入/ })).toHaveCount(0)
+  await page.screenshot({ path: '/tmp/tie-protection-conflict.png', fullPage: true })
+  await conflict.getByRole('button', { name: '解锁并加密本机', exact: true }).click()
+  const align = page.getByRole('dialog', { name: '解锁并加密本机', exact: true })
+  await align.getByLabel('服务器页面密码', { exact: true }).fill('wrong-fixture-password')
+  await align.getByRole('button', { name: '解锁并加密本机', exact: true }).click()
+  await expect(align.getByRole('alert')).toBeVisible()
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('tie-demo-workspace-v1')!).pages[0].markdown)).toBe(ordinary.markdown)
+  expect((await backendPages(backend)).find((item) => item.id === ordinary.id)!.markdown).toBe(serverCiphertext)
+  await align.getByLabel('服务器页面密码', { exact: true }).fill(password)
+  await align.getByRole('button', { name: '解锁并加密本机', exact: true }).click()
+  await expect(align).toBeHidden({ timeout: 15_000 })
+  const local = await page.evaluate(() => ({ snapshot: JSON.parse(localStorage.getItem('tie-demo-workspace-v1')!), history: JSON.parse(localStorage.getItem('tie-demo-page-history-v1')!) }))
+  expect(local.snapshot.pages[0].markdown).toBe(serverCiphertext)
+  expect(local.history[ordinary.id].some((entry: { id: string }) => entry.id === 'rev_local_only')).toBe(true)
+  expect(local.history[ordinary.id].every((entry: { page: { markdown: string } }) => entry.page.markdown.startsWith(marker))).toBe(true)
+  expect(JSON.stringify(local)).not.toContain('fixture-local-only-history-preserved')
+  expect((await backendPages(backend)).find((item) => item.id === ordinary.id)!.markdown).toBe(serverCiphertext)
+  expect(serverWrites).toHaveLength(0)
+  expect(await page.evaluate(() => {
+    const store = (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace')
+    const conflict = store.syncConflicts.get('pg_ordinary')
+    return { pending: Boolean(conflict), protection: conflict?.kind === 'protection' }
+  })).toEqual({ pending: true, protection: false })
 })

@@ -2,6 +2,14 @@
 
 All notable changes to Tie are documented in this file.
 
+## [1.0.65] - 2026-11-27
+
+- 本机普通页与服务器加密页的差异单独显示为「保护状态不同」，提供「解锁并加密本机」入口，使用服务器页面已有密码，保留本机正文、历史、讨论及附件。
+- 对齐保护状态时先验证服务器密文，相同正文复用已有密文，避免随机盐和 IV 导致虚假的正文冲突；真实内容差异继续保留供解锁后对照处理。
+- 保存本机草稿、普通刷新和转换完成后保留待核对冲突，只有真实同步或明确选边成功后才清除；服务器读取失败不再拿本机副本冒充远程版本。
+- 修复加密页面的冲突选择未进入实际同步解决流程的问题；跨保护模式禁止直接覆盖，远端写入失败不会错误记录为「已解决」。
+- 删除「新建页面」右侧的页面类型下拉箭头，恢复单一新建按钮；普通与加密页面互转仍从已有页面的「⋯」菜单进入。
+
 ## [1.0.64] - 2026-11-27
 
 - 页面双向转换移入已有页面的「⋯」及右键菜单，按当前状态显示「转为加密页面」或「转为普通页面」，手机页面列表使用相同入口。
@@ -291,7 +299,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.64...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.65...HEAD
+[1.0.65]: https://github.com/sanyexieai/tie/releases/tag/v1.0.65
 [1.0.64]: https://github.com/sanyexieai/tie/releases/tag/v1.0.64
 [1.0.63]: https://github.com/sanyexieai/tie/releases/tag/v1.0.63
 [1.0.62]: https://github.com/sanyexieai/tie/releases/tag/v1.0.62

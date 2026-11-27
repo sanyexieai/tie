@@ -6,9 +6,11 @@ declare global {
   interface Window {
     __tieSyncTest: {
       calls: number
+      resolveCalls: number
+      failResolution: boolean
       listenerCount: () => number
       progress: (stage: SyncStage, completed: number, total: number, sourceId?: string) => void
-      finish: () => void
+      finish: (report?: Record<string, unknown>) => void
       fail: () => void
     }
   }
@@ -43,14 +45,16 @@ async function openDesktopWorkspace(page: Page) {
     let pending: { resolve: (value: unknown) => void; reject: (error: Error) => void } | null = null
     const control: Window['__tieSyncTest'] = {
       calls: 0,
+      resolveCalls: 0,
+      failResolution: false,
       listenerCount: () => [...listeners.values()].filter((event) => event === 'backend-sync-progress').length,
       progress(stage, completed, total, id = sourceId) {
         for (const [callback, event] of listeners) {
           if (event === 'backend-sync-progress') callbacks.get(callback)?.({ event, id: callback, payload: { sourceId: id, stage, completed, total } })
         }
       },
-      finish() {
-        pending?.resolve({ pushed: 0, pulled: 0, conflicts: [] })
+      finish(report) {
+        pending?.resolve(report ?? { pushed: 0, pulled: 0, conflicts: [] })
         pending = null
       },
       fail() {
@@ -78,6 +82,12 @@ async function openDesktopWorkspace(page: Page) {
           if (command === 'plugin:updater|check') return null
           if (command === 'load_backend_session') return { endpoint, accessToken: 'fixture-access', refreshToken: '', accessExpiresAt: '', userId: user.id, email: user.email, name: user.name }
           if (command === 'load_workspace') return snapshot
+          if (command === 'save_page') { snapshot.pages[0] = args.page as typeof snapshot.pages[number]; return args.page }
+          if (command === 'resolve_backend_sync_conflict') {
+            control.resolveCalls += 1
+            if (control.failResolution) throw new Error('503 fixture service unavailable')
+            return { pushed: 1, pulled: 0, conflicts: [] }
+          }
           if (command === 'backend_sync_cursor') return { pg_progress: { local: updatedAt, remote: updatedAt } }
           if (command === 'sync_backend_workspace') {
             control.calls += 1
@@ -147,4 +157,76 @@ test('clears progress on failure while keeping the login state and settings entr
   expect((await settings.boundingBox())!.height).toBe(initialHeight)
   await settings.click()
   await expect(page.getByRole('dialog', { name: '设置', exact: true })).toBeVisible()
+})
+
+test('keeps protection mismatches separate from content conflicts and retains real timestamps', async ({ page }) => {
+  await openDesktopWorkspace(page)
+  const localUpdatedAt = '2026-11-25T00:00:00Z'
+  const remoteUpdatedAt = '2026-11-26T03:04:05Z'
+  await page.evaluate(({ localUpdatedAt, remoteUpdatedAt }) => window.__tieSyncTest.finish({
+    pushed: 0, pulled: 0, conflicts: ['pg_progress'], message: '服务器页面已加密，请先对齐保护状态',
+    protectionConflicts: [{ pageId: 'pg_progress', localEncrypted: false, remoteEncrypted: true, localUpdatedAt, remoteUpdatedAt }],
+  }), { localUpdatedAt, remoteUpdatedAt })
+  await expect(page.getByRole('button', { name: '处理保护状态', exact: true })).toBeVisible()
+  await page.getByRole('textbox', { name: '页面标题', exact: true }).fill('测试页面更新')
+  await page.keyboard.press('Control+s')
+  await page.evaluate(async () => {
+    const store = (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace')
+    await store.refreshPage('pg_progress')
+  })
+  await expect(page.getByRole('button', { name: '处理保护状态', exact: true })).toBeVisible()
+  await page.locator('.sidebar-storage-trigger').click()
+  const settings = page.getByRole('dialog', { name: '设置', exact: true })
+  await expect(settings.locator('.storage-conflict-item')).toContainText('保护状态不同 · 本机普通页面 · 服务器加密页面')
+  await expect(settings.locator('.storage-conflict-item')).toContainText('远程 2026-11-26 03:04')
+  await settings.locator('.storage-conflict-item').click()
+  await page.getByRole('button', { name: '处理保护状态', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '页面保护状态不同', exact: true })
+  await expect(dialog).toContainText('本机：普通页面 · 服务器：加密页面')
+  await expect(dialog.getByRole('button', { name: /覆盖|载入/ })).toHaveCount(0)
+  await dialog.getByRole('button', { name: '解锁并加密本机', exact: true }).click()
+  const conversion = page.getByRole('dialog', { name: '解锁并加密本机', exact: true })
+  await expect(conversion.getByLabel('服务器页面密码', { exact: true })).toBeVisible()
+  await expect(conversion.getByLabel('确认加密密码', { exact: true })).toHaveCount(0)
+  await expect.poll(() => page.evaluate(() => window.__tieSyncTest.resolveCalls)).toBe(0)
+  await conversion.getByRole('button', { name: '关闭', exact: true }).click()
+  await page.evaluate(() => {
+    const store = (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace')
+    void store.syncBackendNow()
+  })
+  await expect.poll(() => page.evaluate(() => window.__tieSyncTest.calls)).toBe(2)
+  await page.evaluate(() => window.__tieSyncTest.finish())
+  await expect(page.getByRole('button', { name: '处理保护状态', exact: true })).toHaveCount(0)
+})
+
+test('keeps a content conflict after a failed resolution so the same choice can be retried', async ({ page }) => {
+  await openDesktopWorkspace(page)
+  await page.evaluate(() => window.__tieSyncTest.finish({ pushed: 0, pulled: 0, conflicts: ['pg_progress'] }))
+  await expect(page.getByRole('button', { name: '查看差异', exact: true })).toBeVisible()
+  await page.route('https://sync.example.test/api/v1/workspaces/ws_progress/pages/pg_progress', (route) => route.fulfill({ status: 503, json: { message: 'fixture backend temporarily unavailable' }, headers: { 'access-control-allow-origin': '*' } }))
+  const preview = await page.evaluate(async () => {
+    const store = (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace')
+    try { await store.readLatestPage('pg_progress'); return 'unexpected success' }
+    catch (error) { return String(error) }
+  })
+  expect(preview).toContain('fixture backend temporarily unavailable')
+  const result = await page.evaluate(async () => {
+    const store = (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace')
+    window.__tieSyncTest.failResolution = true
+    let message = ''
+    try { await store.resolveConflictOverwriteLocal({ ...store.activePage, markdown: '# 测试页面\n\n本地保留的修改' }) }
+    catch (error) { message = String(error) }
+    return { message, conflict: store.syncConflicts.has('pg_progress'), markdown: store.activePage.markdown }
+  })
+  expect(result.message).toContain('503 fixture service unavailable')
+  expect(result.conflict).toBe(true)
+  expect(result.markdown).toContain('本地保留的修改')
+  await expect(page.getByRole('button', { name: '查看差异', exact: true })).toBeVisible()
+  await page.evaluate(async () => {
+    const store = (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace')
+    window.__tieSyncTest.failResolution = false
+    await store.resolveConflictOverwriteLocal(store.activePage)
+  })
+  expect(await page.evaluate(() => window.__tieSyncTest.resolveCalls)).toBe(2)
+  await expect(page.getByRole('button', { name: '查看差异', exact: true })).toHaveCount(0)
 })

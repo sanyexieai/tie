@@ -32,6 +32,9 @@ export interface SyncConflict {
   pageId: string
   localUpdatedAt: string
   remoteUpdatedAt: string
+  kind?: 'protection'
+  localEncrypted?: boolean
+  remoteEncrypted?: boolean
 }
 
 export interface SyncResult {

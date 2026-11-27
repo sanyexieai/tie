@@ -10,7 +10,6 @@ const store = useWorkspaceStore()
 const backend = useBackendStore()
 const topLevelDragOver = ref(false)
 const deleteError = ref('')
-const newPageMenuOpen = ref(false)
 const emit = defineEmits<{ close: []; 'open-storage-settings': [] }>()
 const sourcesById = computed(() => Object.fromEntries(store.allSources.map((source) => [source.id, source])))
 const temporaryWorkspaces = computed(() => store.allSources.filter((source) => source.temporary).map((source) => ({
@@ -61,8 +60,7 @@ watch(() => store.backgroundStarted, (ready) => {
   }
 }, { immediate: true })
 
-async function createTopLevel() { newPageMenuOpen.value = false; await store.createPage(null) }
-async function createCredential() { newPageMenuOpen.value = false; await store.openEncryptedPage() }
+async function createTopLevel() { await store.createPage(null) }
 async function reloadPages() {
   if (store.reloading) return
   await store.syncRemoteSources()
@@ -109,14 +107,7 @@ async function renameWorkspace() {
       <button class="mobile-sidebar-close" aria-label="关闭侧边栏" @click="emit('close')">×</button>
     </div>
 
-    <div class="new-page-actions">
-      <button class="new-page-button" @click="createTopLevel"><span>+</span> 新建页面</button>
-      <button type="button" class="new-page-type-toggle" aria-label="选择页面类型" :aria-expanded="newPageMenuOpen" @click="newPageMenuOpen = !newPageMenuOpen">▾</button>
-      <div v-if="newPageMenuOpen" class="new-page-type-menu" role="menu" @keydown.esc="newPageMenuOpen = false">
-        <button type="button" role="menuitem" @click="createTopLevel">普通页面</button>
-        <button type="button" role="menuitem" @click="createCredential">加密页面</button>
-      </div>
-    </div>
+    <button class="new-page-button" @click="createTopLevel"><span>+</span> 新建页面</button>
 
     <nav class="quick-nav" aria-label="快捷导航">
       <button :class="{ selected: store.showingRecent }" @click="store.openRecent()"><span>◷</span> 最近打开</button>
@@ -238,12 +229,3 @@ async function renameWorkspace() {
     </button>
   </aside>
 </template>
-
-<style scoped>
-.new-page-actions { position: relative; display: flex; margin: 0 12px; }
-.new-page-actions .new-page-button { flex: 1; width: auto; margin: 0; border-radius: 6px 0 0 6px; }
-.new-page-type-toggle { border: 1px solid var(--border); border-left: 0; border-radius: 0 6px 6px 0; padding: 0 9px; background: var(--bg-elevated); color: var(--text-muted); cursor: pointer; }
-.new-page-type-menu { position: absolute; top: calc(100% + 5px); left: 0; right: 0; z-index: 20; padding: 5px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elevated); box-shadow: 0 5px 18px #0003; }
-.new-page-type-menu button { display: block; width: 100%; border: 0; padding: 8px; border-radius: 4px; background: transparent; text-align: left; color: var(--text); cursor: pointer; }
-.new-page-type-menu button:hover { background: var(--bg-hover); }
-</style>

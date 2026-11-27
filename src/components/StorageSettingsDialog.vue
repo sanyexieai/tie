@@ -1139,7 +1139,7 @@ function restoreDefaultUpdateEndpoints() {
       </div>
       <div v-if="store.syncConflictPages.length" class="storage-conflict-list">
         <strong>同步冲突</strong>
-        <small>内容不一致时请打开页面对照处理。日常保存成功即已写入本机；对端对齐失败不会撤销保存。</small>
+        <small>打开页面处理内容或保护状态的差异。日常保存成功即已写入本机；对端对齐失败不会撤销保存。</small>
         <button
           v-for="item in store.syncConflictPages"
           :key="item.pageId"
@@ -1148,7 +1148,8 @@ function restoreDefaultUpdateEndpoints() {
           @click="openConflictPage(item.pageId)"
         >
           <span>{{ DEFAULT_PAGE_ICON }} {{ item.page.title || '无标题' }}</span>
-          <small>{{ item.source?.name ?? item.conflict.sourceId }} · 本地 {{ item.conflict.localUpdatedAt.slice(0, 16).replace('T', ' ') }} · 远程 {{ item.conflict.remoteUpdatedAt.slice(0, 16).replace('T', ' ') }}</small>
+          <small v-if="item.conflict.kind === 'protection'">保护状态不同 · 本机{{ item.conflict.localEncrypted ? '加密' : '普通' }}页面 · 服务器{{ item.conflict.remoteEncrypted ? '加密' : '普通' }}页面</small>
+          <small>{{ item.source?.name ?? item.conflict.sourceId }} · 本地 {{ item.conflict.localUpdatedAt.slice(0, 16).replace('T', ' ') || '未知' }} · 远程 {{ item.conflict.remoteUpdatedAt.slice(0, 16).replace('T', ' ') || '未知' }}</small>
         </button>
       </div>
 
