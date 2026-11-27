@@ -72,6 +72,7 @@ export interface WorkspacePreferences {
   collapsedPageIds: PageId[]
   spellcheckEnabled: boolean
   sourceMode: boolean
+  liveMarkdownEnabled?: boolean
   storageSourceOrder: string[]
   skillsSectionCollapsed: boolean
 }

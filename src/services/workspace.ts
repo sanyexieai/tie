@@ -57,7 +57,7 @@ function localSnapshot(): WorkspaceSnapshot {
 function preferencesKey(workspaceId: string) { return `${preferencesPrefix}${workspaceId}` }
 
 function defaultPreferences(): WorkspacePreferences {
-  return { favoritePageIds: [], recentPageIds: [], collapsedPageIds: [], spellcheckEnabled: true, sourceMode: false, storageSourceOrder: [], skillsSectionCollapsed: true }
+  return { favoritePageIds: [], recentPageIds: [], collapsedPageIds: [], spellcheckEnabled: true, sourceMode: false, liveMarkdownEnabled: false, storageSourceOrder: [], skillsSectionCollapsed: true }
 }
 
 async function isTauri() {
@@ -371,6 +371,7 @@ export const workspaceService = {
         collapsedPageIds: Array.isArray(parsed.collapsedPageIds) ? parsed.collapsedPageIds : [],
         spellcheckEnabled: typeof parsed.spellcheckEnabled === 'boolean' ? parsed.spellcheckEnabled : true,
         sourceMode: typeof parsed.sourceMode === 'boolean' ? parsed.sourceMode : false,
+        liveMarkdownEnabled: parsed.liveMarkdownEnabled === true,
       storageSourceOrder: Array.isArray(parsed.storageSourceOrder)
           ? [...new Set(parsed.storageSourceOrder.filter((id): id is string => typeof id === 'string'))]
           : [],

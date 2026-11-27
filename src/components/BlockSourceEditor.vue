@@ -10,6 +10,7 @@ const props = defineProps<{
   error?: string
   conflicted?: boolean
   instant?: boolean
+  hint?: string
 }>()
 const emit = defineEmits<{
   'update:modelValue': [markdown: string]
@@ -18,6 +19,8 @@ const emit = defineEmits<{
   cancel: []
   'composition-change': [composing: boolean]
   blur: [event: FocusEvent]
+  navigate: [direction: 'previous' | 'next']
+  history: [action: 'undo' | 'redo']
 }>()
 const input = ref<HTMLTextAreaElement | null>(null)
 const composing = ref(false)
@@ -51,6 +54,25 @@ function compositionEnd(event: CompositionEvent) {
 
 function keydown(event: KeyboardEvent) {
   if (event.isComposing || composing.value) return
+  const key = event.key.toLocaleLowerCase()
+  if (props.instant && (event.ctrlKey || event.metaKey) && !event.altKey && (key === 'z' || key === 'y')) {
+    event.preventDefault()
+    event.stopPropagation()
+    emit('history', key === 'y' || event.shiftKey ? 'redo' : 'undo')
+    return
+  }
+  const element = input.value
+  if (props.instant && element && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+    && element.selectionStart === element.selectionEnd) {
+    const previous = ['ArrowUp', 'ArrowLeft'].includes(event.key) && element.selectionStart === 0
+    const next = ['ArrowDown', 'ArrowRight'].includes(event.key) && element.selectionEnd === props.modelValue.length
+    if (previous || next) {
+      event.preventDefault()
+      event.stopPropagation()
+      emit('navigate', previous ? 'previous' : 'next')
+      return
+    }
+  }
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
     event.preventDefault()
     event.stopPropagation()
@@ -89,6 +111,7 @@ defineExpose({
         <button v-if="!instant" type="button" :disabled="composing" title="Esc" @mousedown.prevent @click="emit('cancel')">取消</button>
       </div>
     </header>
+    <p v-if="hint" class="block-source-hint">{{ hint }}</p>
     <textarea
       ref="input"
       :value="modelValue"
@@ -114,6 +137,7 @@ defineExpose({
 .block-source-actions button { padding: 3px 9px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--text); cursor: pointer; font: inherit; }
 .block-source-actions button:hover:not(:disabled) { background: var(--accent-soft); }
 .block-source-actions button:disabled { opacity: .45; cursor: default; }
+.block-source-hint { margin: 0; padding: 6px 10px 0; color: var(--text-muted); font-size: 12px; }
 .block-source-input { display: block; box-sizing: border-box; width: 100%; min-height: 96px; margin: 0; padding: 10px; border: 0; outline: none; resize: vertical; background: transparent; color: var(--text); font: 14px/1.65 var(--font-mono, monospace); tab-size: 2; white-space: pre-wrap; overflow-wrap: anywhere; }
 .block-source-input:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .block-source-error { margin: 0; padding: 8px 10px; color: var(--danger, var(--text)); font-size: 12px; }

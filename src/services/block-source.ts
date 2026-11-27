@@ -83,6 +83,11 @@ export function applyBlockSource(
   if (session.conflicted || session.to > state.doc.content.size || !state.doc.slice(session.from, session.to).content.eq(session.original)) {
     throw new Error('此块已被其他编辑更新，源码草稿仍保留。请先复制草稿，再取消并重新打开此块。')
   }
+  if (markdown === session.markdown) {
+    const transaction = state.tr
+    if (options.isolateHistory !== false) closeHistory(transaction)
+    return { transaction, session }
+  }
   const parsed = codec.parse(markdown)
   if (parsed.type !== state.schema.topNodeType.name) throw new Error('无法将此 Markdown 解析为文档内容。')
   const replacement = state.schema.nodeFromJSON({

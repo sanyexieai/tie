@@ -60,7 +60,7 @@ const tagSuggestions = ref<TagSuggestion[]>([])
 const tagSuggestLoading = ref(false)
 const documentRoot = ref<HTMLElement | null>(null)
 const sourceEditor = ref<HTMLTextAreaElement | null>(null)
-const richEditor = ref<{ undo: () => void; redo: () => void; findText: (query: string, direction?: number) => { count: number; index: number }; focusBlank?: (event: MouseEvent) => boolean; flushSource?: (options?: { close?: boolean }) => boolean; discardSource?: () => void } | null>(null)
+const richEditor = ref<{ undo: () => void; redo: () => void; findText: (query: string, direction?: number, focusResult?: boolean) => { count: number; index: number }; focusBlank?: (event: MouseEvent) => boolean; flushSource?: (options?: { close?: boolean }) => boolean; discardSource?: () => void } | null>(null)
 let copiedLinkTimer: number | undefined
 let exportedTimer: number | undefined
 let refreshedTimer: number | undefined
@@ -750,6 +750,10 @@ function toggleSourceMode() {
   if (!(richEditor.value?.flushSource?.({ close: true }) ?? true)) return
   store.toggleSourceMode()
 }
+function toggleLiveMarkdown() {
+  if (!(richEditor.value?.flushSource?.({ close: true }) ?? true)) return
+  store.toggleLiveMarkdown()
+}
 function undo() { richEditor.value?.undo() }
 function redo() { richEditor.value?.redo() }
 
@@ -767,7 +771,7 @@ function onEditorSurfaceClick(event: MouseEvent) {
 function openFind() {
   if (!(richEditor.value?.flushSource?.({ close: true }) ?? true)) return
   showingFind.value = true
-  requestAnimationFrame(() => documentRoot.value?.querySelector<HTMLInputElement>('.document-find input')?.focus())
+  void nextTick(() => documentRoot.value?.querySelector<HTMLInputElement>('.document-find input')?.focus())
 }
 function closeFind() {
   showingFind.value = false
@@ -776,7 +780,7 @@ function closeFind() {
   findResult.value = { count: 0, index: 0 }
   replaceNotice.value = ''
 }
-function findInSource(direction: number) {
+function findInSource(direction: number, focusResult = true) {
   const input = sourceEditor.value
   const query = findQuery.value.trim()
   if (!input || !query) return { count: 0, index: 0 }
@@ -792,13 +796,13 @@ function findInSource(direction: number) {
   const cursor = direction > 0 ? input.selectionEnd : input.selectionStart
   let index = direction > 0 ? matches.findIndex((position) => position >= cursor) : matches.map((position, matchIndex) => ({ position, matchIndex })).reverse().find((item) => item.position < cursor)?.matchIndex ?? -1
   if (index < 0) index = direction > 0 ? 0 : matches.length - 1
-  input.focus()
+  if (focusResult) input.focus()
   input.setSelectionRange(matches[index], matches[index] + query.length)
   return { count: matches.length, index: index + 1 }
 }
-function findNext(direction = 1) {
+function findNext(direction = 1, focusResult = true) {
   replaceNotice.value = ''
-  findResult.value = store.sourceMode ? findInSource(direction) : richEditor.value?.findText(findQuery.value, direction) ?? { count: 0, index: 0 }
+  findResult.value = store.sourceMode ? findInSource(direction, focusResult) : richEditor.value?.findText(findQuery.value, direction, focusResult) ?? { count: 0, index: 0 }
 }
 function replaceAll() {
   if (!(richEditor.value?.flushSource?.({ close: true }) ?? true)) return
@@ -986,7 +990,7 @@ defineExpose({ saveNow })
         <slot v-if="locked" name="unlock"></slot>
         <template v-else>
         <div v-if="showingFind" class="document-find" role="search">
-          <input v-model="findQuery" autofocus placeholder="在当前页面查找" aria-label="在当前页面查找" @input="findNext(1)" @keydown.enter.prevent="findNext($event.shiftKey ? -1 : 1)" @keydown.escape.prevent="closeFind" />
+          <input v-model="findQuery" autofocus placeholder="在当前页面查找" aria-label="在当前页面查找" @input="findNext(1, false)" @keydown.enter.prevent="findNext($event.shiftKey ? -1 : 1)" @keydown.escape.prevent="closeFind" />
           <span>{{ findQuery ? (findResult.count ? `${findResult.index}/${findResult.count}` : '无结果') : '' }}</span>
           <button title="上一个结果（Shift + Enter）" @click="findNext(-1)">↑</button>
           <button title="下一个结果（Enter）" @click="findNext(1)">↓</button>
@@ -999,7 +1003,7 @@ defineExpose({ saveNow })
           <DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" />
           <textarea ref="sourceEditor" v-model="bodyMarkdown" class="source-editor" aria-label="Markdown 源码" :spellcheck="store.spellcheckEnabled" @input="onInput"></textarea>
         </div>
-        <TiptapEditor v-else ref="richEditor" :model-value="bodyMarkdown" :pages="store.pages" :sources="store.allSources" :page-id="activePage.id" :spellcheck="store.spellcheckEnabled" :background-started="store.backgroundStarted" :create-linked-page="createLinkedPage" :expand-to-child="expandToChild" enable-pheromone enable-block-source :private-document="Boolean(session)" :protected-page-actions="Boolean(session)" @update:model-value="onBodyChange" @source-dirty="onBlockSourceDirty" @navigate="navigateToPage" @create-child="createChild">
+        <TiptapEditor v-else ref="richEditor" :model-value="bodyMarkdown" :pages="store.pages" :sources="store.allSources" :page-id="activePage.id" :spellcheck="store.spellcheckEnabled" :background-started="store.backgroundStarted" :create-linked-page="createLinkedPage" :expand-to-child="expandToChild" enable-pheromone enable-block-source :live-markdown="store.liveMarkdownEnabled" :private-document="Boolean(session)" :protected-page-actions="Boolean(session)" @update:model-value="onBodyChange" @source-dirty="onBlockSourceDirty" @navigate="navigateToPage" @create-child="createChild">
           <template #meta><DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" /></template>
         </TiptapEditor>
         <section v-if="childPages.length" class="document-child-pages" aria-label="子页面">
@@ -1022,6 +1026,7 @@ defineExpose({ saveNow })
       <button class="statusbar-mobile-hide" title="切换专注模式（Ctrl/Cmd + Shift + Enter）" @click="emit('toggle-focus')">⛶ 专注</button>
       <template v-if="!store.sourceMode"><button :disabled="locked" class="statusbar-mobile-hide" title="撤销（Ctrl/Cmd + Z）" @click="undo">↶ 撤销</button><button :disabled="locked" class="statusbar-mobile-hide" title="重做（Ctrl/Cmd + Shift + Z）" @click="redo">↷ 重做</button></template>
       <button :disabled="locked" :class="{ active: store.sourceMode }" title="切换 Markdown 源码模式（Ctrl/Cmd + /）" @click="toggleSourceMode">&lt;/&gt; 源码</button>
+      <button v-if="!store.sourceMode" :disabled="locked" :class="{ active: store.liveMarkdownEnabled }" :aria-pressed="store.liveMarkdownEnabled" title="光标进入普通段落或标题时显示 Markdown；复杂块可右键编辑源码" @click="toggleLiveMarkdown">即时源码</button>
       <span class="status-divider"></span>
       <button :class="{ active: store.spellcheckEnabled }" :title="store.spellcheckEnabled ? '关闭拼写检查' : '开启拼写检查'" @click="store.toggleSpellcheck">✓ 拼写检查</button>
       <span class="word-count">字数 {{ wordCount }}</span>

@@ -4,7 +4,7 @@ import { EditorContent, useEditor } from '@tiptap/vue-3'
 import type { Editor } from '@tiptap/core'
 import { Extension, mergeAttributes } from '@tiptap/core'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
-import { Selection, TextSelection, type SelectionBookmark } from '@tiptap/pm/state'
+import { AllSelection, Selection, TextSelection, type SelectionBookmark } from '@tiptap/pm/state'
 import { closeHistory } from '@tiptap/pm/history'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
@@ -16,6 +16,7 @@ import EditorContextMenu from '@/components/EditorContextMenu.vue'
 import BlockSourceEditor from '@/components/BlockSourceEditor.vue'
 import { applyBlockSource, mapBlockSource, startBlockSource, type BlockSourceSession } from '@/services/block-source'
 import { blockSourceViewKey, createBlockSourceView } from '@/extensions/block-source-view'
+import { buildInlineSourceMap } from '@/services/inline-source-map'
 import type { EditorMenuItem } from '@/services/editor-menu'
 import { copyEditorSelection, copyEditorText, pasteEditorClipboard } from '@/services/editor-clipboard'
 import Placeholder from '@tiptap/extension-placeholder'
@@ -55,7 +56,7 @@ import {
   sourceById,
 } from '@/services/link-runtime'
 
-const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage?: (title: string) => Promise<Page>; expandToChild?: (title: string) => Promise<Page>; enablePheromone?: boolean; enableBlockSource?: boolean; backgroundStarted?: boolean; privateDocument?: boolean; protectedPageActions?: boolean }>()
+const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage?: (title: string) => Promise<Page>; expandToChild?: (title: string) => Promise<Page>; enablePheromone?: boolean; enableBlockSource?: boolean; liveMarkdown?: boolean; backgroundStarted?: boolean; privateDocument?: boolean; protectedPageActions?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': []; 'source-dirty': [dirty: boolean] }>()
 const lowlight = createLowlight(common)
 const assetRefreshers = new Map<HTMLImageElement, () => void>()
@@ -84,11 +85,18 @@ const contextMenu = shallowRef<EditorContextSelection | null>(null)
 const sourceSession = shallowRef<BlockSourceSession | null>(null)
 const sourceValue = ref('')
 const sourceError = ref('')
+const sourceHint = ref('')
+const sourceInstant = ref(false)
 const sourceHost = shallowRef<HTMLElement | null>(null)
 const blockSourceEditor = ref<InstanceType<typeof BlockSourceEditor> | null>(null)
 let sourceGeneration = 0
 let applyingSource = false
 let heldSourceValue: string | null = null
+let sourceComposing = false
+let autoSourceFrame: number | undefined
+let suppressAutoSource = false
+let suppressedSourcePosition = 0
+let richPointerDown = false
 const slashStart = ref<number | null>(null)
 const selectedCommandIndex = ref(0)
 const linkSourcePicker = ref<{ kind: 'file' | 'directory' | 'relative' } | null>(null)
@@ -1223,16 +1231,25 @@ const editor = useEditor({
       return false
     },
     handleDOMEvents: {
-      mousedown: (_view, event) => handleEditorMouseDown(event),
+      mousedown: (_view, event) => {
+        if (event.button === 0) { richPointerDown = true; suppressAutoSource = false }
+        return handleEditorMouseDown(event)
+      },
       auxclick: (_view, event) => handleEditorMouseDown(event),
       click: (_view, event) => handleEditorClick(event),
       compositionend: (_view) => {
         const current = editor.value
         if (current) updateMenus(current)
+        requestAutoSource()
         return false
       },
+      focus: () => { requestAutoSource(); return false },
     },
     handleKeyDown: (_view, event) => {
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing) {
+        suppressAutoSource = false
+        requestAutoSource()
+      }
       if (props.enableBlockSource && (event.ctrlKey || event.metaKey) && event.altKey && event.key.toLowerCase() === 'm') {
         event.preventDefault()
         openBlockSource()
@@ -1358,6 +1375,7 @@ const editor = useEditor({
   },
   onSelectionUpdate: ({ editor: currentEditor }) => {
     if (!sourceSession.value) updateMenus(currentEditor)
+    requestAutoSource()
   },
   onTransaction: ({ transaction }) => {
     if (!sourceSession.value || applyingSource || !transaction.docChanged) return
@@ -1368,6 +1386,10 @@ const editor = useEditor({
 })
 
 watch(() => props.pageId, () => { closeContextMenu(); closeBlockSource(); heldSourceValue = null })
+watch(() => props.liveMarkdown, (enabled) => {
+  if (!enabled && sourceInstant.value) flushSource({ close: true })
+  if (enabled) { suppressAutoSource = false; requestAutoSource() }
+})
 
 watch(() => props.modelValue, (markdown) => {
   if (!editor.value || editor.value.getMarkdown() === markdown) return
@@ -1409,19 +1431,30 @@ function closeBlockSource() {
   sourceSession.value = null
   sourceValue.value = ''
   sourceError.value = ''
+  sourceHint.value = ''
+  sourceInstant.value = false
+  sourceComposing = false
   emit('source-dirty', false)
   refreshSourceView()
 }
 
-function openBlockSource() {
+function openBlockSource(options: { instant?: boolean } = {}) {
   const current = editor.value
   if (!props.enableBlockSource || !current?.markdown || !flushSource({ close: true, preserveSelection: true })) return false
   const session = startBlockSource(current.state, current.markdown)
   if (!session) return false
+  if (options.instant) {
+    const node = session.original.firstChild
+    const map = node && buildInlineSourceMap(node, session.markdown, current.markdown.instance)
+    if (!map || !current.state.selection.empty) return false
+    session.initialSelection = { from: map.toSource(current.state.selection.from - session.from - 1), to: map.toSource(current.state.selection.to - session.from - 1) }
+  }
   sourceGeneration += 1
   sourceSession.value = session
   sourceValue.value = session.markdown
   sourceError.value = ''
+  sourceHint.value = ''
+  sourceInstant.value = options.instant === true
   closeContextMenu()
   closeSlashMenu()
   closePagePicker()
@@ -1432,16 +1465,36 @@ function openBlockSource() {
 function updateSourceValue(value: string) {
   sourceValue.value = value
   emit('source-dirty', Boolean(sourceSession.value && value !== sourceSession.value.markdown))
+  if (sourceInstant.value && !sourceComposing && !blockSourceEditor.value?.isComposing()) flushSource({ instantInput: true })
 }
 
-function flushSource(options: { close?: boolean; preserveSelection?: boolean } = {}) {
+function flushSource(options: { close?: boolean; preserveSelection?: boolean; instantInput?: boolean } = {}) {
   const current = editor.value
   const session = sourceSession.value
   if (!session || !current) return true
   if (!current.markdown) return false
-  if (blockSourceEditor.value?.isComposing()) return false
+  if (sourceComposing || blockSourceEditor.value?.isComposing()) return false
   try {
-    const result = applyBlockSource(current.state, session, sourceValue.value, current.markdown)
+    const tokens = current.markdown.instance.lexer(sourceValue.value)
+    if (sourceValue.value !== session.markdown && (Object.keys(tokens.links).length || hasUnsupportedSourceSyntax(tokens))) {
+      sourceInstant.value = false
+      throw new Error('局部源码暂不支持 HTML 或引用定义，草稿已保留。请复制草稿后取消，再使用整篇源码模式保存。')
+    }
+    const result = applyBlockSource(current.state, session, sourceValue.value, current.markdown, { isolateHistory: !options.instantInput })
+    if (options.instantInput) {
+      const blocks = tokens.filter((token) => token.type !== 'space')
+      const nodes: ProseMirrorNode[] = []
+      // Blank paragraphs come from whitespace tokens; keep them in the replacement, outside the text mapping.
+      result.session.original.forEach((node) => { if (node.type.name !== 'paragraph' || node.content.size) nodes.push(node) })
+      const supported = tokens.map((token) => token.raw).join('') === sourceValue.value
+        && blocks.length === nodes.length && blocks.every((token, index) =>
+          Boolean(buildInlineSourceMap(nodes[index]!, token.raw, current.markdown!.instance)))
+      if (!supported) {
+        sourceInstant.value = false
+        sourceHint.value = '此内容包含复杂结构，请先应用，再继续编辑。'
+        return false
+      }
+    }
     let normalizingImage = false
     if (!props.privateDocument) result.session.original.descendants((node) => {
       if (node.type.name === 'image' && /^(?:data:image\/|blob:)/i.test(String(node.attrs.src))) normalizingImage = true
@@ -1450,7 +1503,14 @@ function flushSource(options: { close?: boolean; preserveSelection?: boolean } =
     const close = options.close || normalizingImage
     const sourceFocused = Boolean(document.activeElement?.closest('[data-block-source-editor]'))
     const outside = current.state.selection.from < session.from || current.state.selection.to > session.to
-    if (close && !options.preserveSelection) result.transaction.setSelection(Selection.near(result.transaction.doc.resolve(Math.max(0, result.session.to - 1))))
+    const node = result.session.original.childCount === 1 ? result.session.original.firstChild : null
+    const map = node && buildInlineSourceMap(node, sourceValue.value, current.markdown.instance)
+    const caret = blockSourceEditor.value?.getSelection()
+    if (map && caret && ((close && !options.preserveSelection) || options.instantInput)) {
+      const from = result.session.from + 1 + map.toDocument(caret.from)
+      const to = result.session.from + 1 + map.toDocument(caret.to)
+      result.transaction.setSelection(TextSelection.create(result.transaction.doc, from, to))
+    } else if (close && !options.preserveSelection) result.transaction.setSelection(Selection.near(result.transaction.doc.resolve(Math.max(0, result.session.to - 1))))
     else if (outside) result.transaction.setSelection(current.state.selection.getBookmark().map(result.transaction.mapping).resolve(result.transaction.doc))
     applyingSource = true
     sourceSession.value = result.session
@@ -1469,15 +1529,99 @@ function flushSource(options: { close?: boolean; preserveSelection?: boolean } =
   }
 }
 
+function hasUnsupportedSourceSyntax(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Record<string, unknown>
+  if (item.type === 'html' || item.type === 'def') return true
+  return Object.values(item).some(hasUnsupportedSourceSyntax)
+}
+
 function applySourceAndClose() {
-  if (flushSource({ close: true })) editor.value?.view.focus()
+  suppressAutoSource = true
+  if (flushSource({ close: true })) {
+    suppressedSourcePosition = editor.value?.state.selection.from ?? 0
+    editor.value?.view.focus()
+  }
 }
 
 function discardSource() {
+  suppressAutoSource = true
   const held = heldSourceValue
   heldSourceValue = null
   closeBlockSource()
   if (held !== null) setEditorMarkdown(held)
+  suppressedSourcePosition = editor.value?.state.selection.from ?? 0
+}
+
+function requestAutoSource() {
+  if (!props.enableBlockSource || !props.liveMarkdown || autoSourceFrame !== undefined) return
+  autoSourceFrame = requestAnimationFrame(() => {
+    autoSourceFrame = undefined
+    const current = editor.value
+    if (!current || current.isDestroyed || !props.liveMarkdown || richPointerDown || contextMenu.value || contextActionRunning
+      || !current.view.hasFocus() || current.view.composing) return
+    if (suppressAutoSource && current.state.selection.from === suppressedSourcePosition) return
+    suppressAutoSource = false
+    if (sourceSession.value && (!sourceInstant.value || !flushSource({ close: true, preserveSelection: true }))) return
+    if (!current.state.selection.empty) return
+    openBlockSource({ instant: true })
+  })
+}
+
+function onRichMouseUp(event: MouseEvent) {
+  richPointerDown = false
+  const target = event.target
+  const current = editor.value
+  if (event.button !== 0 || !current || !(target instanceof Node) || !current.view.dom.contains(target)) return
+  if (target instanceof Element && target.closest('[data-block-source-editor]')) return
+  if (props.liveMarkdown && (current.state.selection instanceof TextSelection || current.state.selection instanceof AllSelection)) {
+    const selection = current.view.dom.ownerDocument.getSelection()
+    if (selection?.anchorNode && selection.focusNode && current.view.dom.contains(selection.anchorNode) && current.view.dom.contains(selection.focusNode)) {
+      // A first mouse click can update DOM selection before PM's selectionchange handler runs.
+      try {
+        const anchor = current.view.posAtDOM(selection.anchorNode, selection.anchorOffset)
+        const head = current.view.posAtDOM(selection.focusNode, selection.focusOffset)
+        current.view.dispatch(current.state.tr.setSelection(TextSelection.between(current.state.doc.resolve(anchor), current.state.doc.resolve(head))))
+      } catch { return }
+    }
+  }
+  suppressAutoSource = false
+  requestAutoSource()
+}
+
+function onSourceCompositionChange(composing: boolean) {
+  sourceComposing = composing
+  if (!composing && sourceInstant.value) flushSource({ instantInput: true })
+}
+
+function onSourceBlur(event: FocusEvent) {
+  const target = event.relatedTarget
+  if (!sourceInstant.value || (target instanceof Node && (sourceHost.value?.contains(target) || editor.value?.view.dom.contains(target)))) return
+  requestAnimationFrame(() => {
+    if (sourceInstant.value && !sourceHost.value?.contains(document.activeElement)) flushSource({ close: true, preserveSelection: true })
+  })
+}
+
+function navigateSource(direction: 'previous' | 'next') {
+  const current = editor.value
+  const session = sourceSession.value
+  if (!current || !session || !sourceInstant.value || sourceComposing) return
+  const position = direction === 'previous' ? session.from : session.to
+  const selection = Selection.findFrom(current.state.doc.resolve(position), direction === 'previous' ? -1 : 1, true)
+  if (!selection || !flushSource({ close: true, preserveSelection: true })) return
+  current.view.dispatch(current.state.tr.setSelection(selection))
+  suppressAutoSource = false
+  current.view.focus()
+  requestAutoSource()
+}
+
+function sourceHistory(action: 'undo' | 'redo') {
+  const current = editor.value
+  if (!current || !flushSource({ close: true })) return
+  suppressAutoSource = false
+  if (action === 'undo') current.chain().focus().undo().run()
+  else current.chain().focus().redo().run()
+  requestAutoSource()
 }
 
 watch(() => props.pages.map((page) => `${page.id}:${page.parentId ?? ''}:${page.deletedAt ?? ''}:${page.title}`).join('|'), () => {
@@ -1645,6 +1789,7 @@ function onEditorContextMenu(event: MouseEvent | KeyboardEvent) {
       current.view.dispatch(current.state.tr.setSelection(Selection.near(current.state.doc.resolve(hit.pos))))
     }
   }
+  if (sourceInstant.value && !flushSource({ close: true, preserveSelection: true })) return
   closeSlashMenu()
   closePagePicker()
   closeLinkSourcePicker()
@@ -1756,6 +1901,7 @@ async function runContextAction(action: string) {
     window.alert(error instanceof Error ? error.message : '无法完成编辑操作')
   } finally {
     contextActionRunning = false
+    requestAutoSource()
   }
 }
 
@@ -1902,7 +2048,7 @@ function onPasteCapture(event: ClipboardEvent) {
   runImagePaste(event, editor.value)
 }
 
-function findText(query: string, direction = 1) {
+function findText(query: string, direction = 1, focusResult = true) {
   if (!flushSource({ close: true })) return { count: 0, index: 0 }
   const current = editor.value
   const cleanQuery = query.trim()
@@ -1926,14 +2072,17 @@ function findText(query: string, direction = 1) {
   if (index < 0) index = direction > 0 ? 0 : matches.length - 1
   const match = matches[index]
   current.view.dispatch(current.state.tr.setSelection(TextSelection.create(current.state.doc, match.from, match.to)).scrollIntoView())
-  current.commands.focus()
+  if (focusResult) current.commands.focus()
   return { count: matches.length, index: index + 1 }
 }
 
 onMounted(() => {
+  window.addEventListener('mouseup', onRichMouseUp)
   window.addEventListener('tie:resources-synced', onResourcesSynced)
 })
 onBeforeUnmount(() => {
+  window.removeEventListener('mouseup', onRichMouseUp)
+  if (autoSourceFrame !== undefined) cancelAnimationFrame(autoSourceFrame)
   window.removeEventListener('tie:resources-synced', onResourcesSynced)
   if (decorateFilesTimer) clearTimeout(decorateFilesTimer)
   sourceSession.value = null
@@ -1990,7 +2139,8 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine, flushSour
     <Teleport v-if="sourceHost && sourceSession" :to="sourceHost">
       <BlockSourceEditor :key="sourceGeneration" ref="blockSourceEditor" :model-value="sourceValue" :original-markdown="sourceSession.markdown"
         :block-label="sourceSession.label" :initial-selection="sourceSession.initialSelection" :error="sourceError" :conflicted="sourceSession.conflicted"
-        @update:model-value="updateSourceValue" @apply="applySourceAndClose" @cancel="discardSource" />
+        :instant="sourceInstant" :hint="sourceHint" @update:model-value="updateSourceValue" @apply="applySourceAndClose" @cancel="discardSource"
+        @composition-change="onSourceCompositionChange" @blur="onSourceBlur" @navigate="navigateSource" @history="sourceHistory" />
     </Teleport>
   </div>
 </template>

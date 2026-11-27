@@ -146,9 +146,11 @@ test('shows real sync counts quietly in the existing settings row and restores i
 test('keeps an editor draft typed during a native pull and requires explicit conflict resolution before saving it', async ({ page }) => {
   await openDesktopWorkspace(page)
   const editor = page.locator('main.editor-pane')
-  await editor.getByRole('button', { name: /源码/ }).click()
+  await editor.getByRole('button', { name: '</> 源码', exact: true }).click()
   const input = editor.getByRole('textbox', { name: 'Markdown 源码', exact: true })
-  await page.clock.pauseAt(new Date())
+  const frozenAt = new Date()
+  await page.clock.install({ time: new Date(frozenAt.valueOf() - 60_000) })
+  await page.clock.pauseAt(frozenAt)
   const draft = 'fixture-editor-draft-kept-during-native-pull'
   await input.fill(draft)
   await page.evaluate(() => {

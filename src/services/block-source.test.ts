@@ -28,6 +28,16 @@ function stateAt(markdown: string, text: string, offset = 0) {
 function source(state: EditorState) { return codec.serialize(state.doc.toJSON()) }
 
 describe('current block Markdown editing', () => {
+  it('does not reinterpret unchanged literal HTML text when a source block is saved', () => {
+    const text = '<span>literal text</span>'
+    const doc = schema.nodes.doc!.create(null, schema.nodes.paragraph!.create(null, schema.text(text)))
+    const state = EditorState.create({ doc, schema, plugins: [history()] })
+    const session = startBlockSource(state, codec)!
+    const applied = applyBlockSource(state, session, session.markdown, codec)
+    expect(applied.transaction.docChanged).toBe(false)
+    expect(applied.transaction.doc.textContent).toBe(text)
+  })
+
   it('serializes the heading and maps a cursor inside a formatted span to its Markdown', () => {
     const state = stateAt('before\n\n## Hello **world** [Tie](tie://page/pg_a)\n\nafter', 'world', 2)
     const session = startBlockSource(state, codec)!

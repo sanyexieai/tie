@@ -133,6 +133,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const collapsedPageIds = ref<PageId[]>([])
   const spellcheckEnabled = ref(true)
   const sourceMode = ref(false)
+  const liveMarkdownEnabled = ref(false)
   const skillsSectionCollapsed = ref(true)
   const s3ProvidersVersion = ref(0)
   const syncQueueVersion = ref(0)
@@ -377,6 +378,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       collapsedPageIds.value = preferences.collapsedPageIds
       spellcheckEnabled.value = preferences.spellcheckEnabled
       sourceMode.value = preferences.sourceMode
+      liveMarkdownEnabled.value = preferences.liveMarkdownEnabled === true
       skillsSectionCollapsed.value = preferences.skillsSectionCollapsed
       storageSourceOrder.value = preferences.storageSourceOrder.map((id) => s3Remap.get(id) ?? id)
       activePageId.value = preferences.recentPageIds
@@ -895,6 +897,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     collapsedPageIds.value = preferences.collapsedPageIds
     spellcheckEnabled.value = preferences.spellcheckEnabled
     sourceMode.value = preferences.sourceMode
+    liveMarkdownEnabled.value = preferences.liveMarkdownEnabled === true
     skillsSectionCollapsed.value = preferences.skillsSectionCollapsed
     persistPreferences()
     showingTrash.value = false
@@ -1061,6 +1064,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       collapsedPageIds: collapsedPageIds.value.filter((id) => !temporaryPageIds.has(id)),
       spellcheckEnabled: spellcheckEnabled.value,
       sourceMode: sourceMode.value,
+      liveMarkdownEnabled: liveMarkdownEnabled.value,
       storageSourceOrder: storageSourceOrder.value.filter((id) => !temporarySourceIds.has(id)),
       skillsSectionCollapsed: skillsSectionCollapsed.value,
     })
@@ -1085,6 +1089,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   function toggleSourceMode() {
     sourceMode.value = !sourceMode.value
+    persistPreferences()
+  }
+
+  function toggleLiveMarkdown() {
+    liveMarkdownEnabled.value = !liveMarkdownEnabled.value
     persistPreferences()
   }
 
@@ -2060,7 +2069,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       .slice(0, 8)
   }
 
-  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, registerEditorSaveHandler, holdPageForProtectionChange, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, pageBackendSync, saving, reloading, initialized, initializationStage, backgroundStarted, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingEncryptedDraft, encryptedDraftSourceId, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, skillsSectionCollapsed, initialize, initializeBackground, reloadWorkspace, syncBackendSources, syncBackendNow, scheduleBackendSync, backendSyncMode, backendSyncRunning, backendSyncProgress, backendSyncLastCompletedAt, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, openEncryptedPage, createEncryptedPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
+  return { workspace, allSources, pages, activePageId, activePage, defaultStorageSourceId, activeStorageSourceId, skillsWorkspaceSource, storageSourceOrder, pendingSyncCount, syncConflictsCount, syncConflictPages, registerEditorSaveHandler, holdPageForProtectionChange, sourceRuntimeStatus, syncConflicts, pageHasPendingRemoteSave, pageBackendSync, saving, reloading, initialized, initializationStage, backgroundStarted, tree, trashedPages, trashNotice, dismissTrashNotice, showingTrash, showingSearch, showingTags, showingGraph, showingRecent, showingFavorites, showingSkills, showingEncryptedDraft, encryptedDraftSourceId, showingSkillManager, activeSkillId, activeSkill, skillConnections, skillsLoading, showingCommandPalette, selectedTag, tagStorageSourceId, tagIndex, taggedPages, searchQuery, searchStorageSourceId, commandQuery, outlineScrollTarget, outlineScrollRequest, searchResults, links, favoritePageIds, favoritePages, recentPageIds, recentPages, collapsedPageIds, spellcheckEnabled, sourceMode, liveMarkdownEnabled, skillsSectionCollapsed, initialize, initializeBackground, reloadWorkspace, syncBackendSources, syncBackendNow, scheduleBackendSync, backendSyncMode, backendSyncRunning, backendSyncProgress, backendSyncLastCompletedAt, syncSource, syncRemoteSources, flushOfflineQueue, addStorageSource, openTieEntry, importTiez, packCurrentSourceTiez, importTiezBrowser, exportTiezBrowser, importMarkdownFiles, openFromFiles, removeStorageSource, renameStorageSource, renameWorkspace, canMoveStorageSource, moveStorageSource, reorderStorageSource, scrollToOutlineHeading, createPage, openEncryptedPage, createEncryptedPage, createChildPage, createChildFromText, createLinkedPage, duplicatePage, renamePage, linkUnlinkedMention, unlinkPageReference, persist, transferPage, canTransferPageTo, transferHistoryNotice, listPageRevisions, readPageRevision, restorePageRevision, exportPageMarkdown, readLatestPage, refreshPage, clearSyncConflict, adoptRemotePage, resolveConflictOverwriteLocal, resolveConflictLoadRemote, trashPage, restorePage, permanentlyDeletePage, emptyTrash, renameTag, deleteTag, movePage, reorderPage, toggleFavorite, toggleSpellcheck, toggleSourceMode, toggleLiveMarkdown, toggleSkillsSectionCollapsed, togglePageCollapsed, expandPage, expandPageAncestors, openPage, openMobileHome, openTrash, openSearch, openTags, openGraph, openRecent, openFavorites, openSkills, openSkillManager, selectSkill, refreshSkills, connectScannedSkill, disconnectManagedSkill, openCommandPalette, closeCommandPalette, outgoingLinks, backlinks, unlinkedMentions }
 })
 
 if (import.meta.hot) {

@@ -91,6 +91,8 @@ test('keyboard menus close correctly and stay inside the viewport', async ({ pag
   await page.keyboard.press('Shift+F10')
   await expect(menu(page)).toBeVisible()
   await page.keyboard.press('End')
+  await expect(menu(page).getByRole('menuitem', { name: '编辑此块源码', exact: true })).toBeFocused()
+  await page.keyboard.press('ArrowUp')
   await expect(menu(page).getByRole('menuitem', { name: '添加链接', exact: true })).toBeFocused()
   await page.keyboard.press('ArrowUp')
   await expect(menu(page).getByRole('menuitem', { name: '插入', exact: true })).toBeFocused()

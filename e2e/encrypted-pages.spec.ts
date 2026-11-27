@@ -884,8 +884,10 @@ test('keeps an unsaved editor draft when an incremental server purge would remov
     await (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace').initializeBackground()
   })
   const source = await sourceEditor(editor)
-  await page.clock.install()
-  await page.clock.pauseAt(new Date())
+  const frozenAt = new Date()
+  // Leave room for RPC latency before pausing, even on a busy CI runner.
+  await page.clock.install({ time: new Date(frozenAt.valueOf() - 60_000) })
+  await page.clock.pauseAt(frozenAt)
   const draft = 'fixture-unsaved-draft-survives-remote-purge'
   await source.fill(draft)
   const headers = { authorization: `Bearer ${backend.profile.accessToken}`, 'content-type': 'application/json' }

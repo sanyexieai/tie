@@ -42,13 +42,13 @@ async function dismissOnboarding(page: Page) {
 async function source(editor: Locator) {
   const textarea = editor.getByRole('textbox', { name: 'Markdown 源码', exact: true })
   await expect(editor.locator('.tiptap').or(textarea)).toBeVisible()
-  if (!await textarea.isVisible()) await editor.getByRole('button', { name: /源码/ }).click()
+  if (!await textarea.isVisible()) await editor.getByRole('button', { name: '</> 源码', exact: true }).click()
   await expect(textarea).toBeVisible()
   return textarea
 }
 
 async function rich(editor: Locator) {
-  if (await editor.getByRole('textbox', { name: 'Markdown 源码', exact: true }).isVisible()) await editor.getByRole('button', { name: /源码/ }).click()
+  if (await editor.getByRole('textbox', { name: 'Markdown 源码', exact: true }).isVisible()) await editor.getByRole('button', { name: '</> 源码', exact: true }).click()
   await expect(editor.locator('.tiptap')).toBeVisible()
   return editor.locator('.tiptap')
 }
