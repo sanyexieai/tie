@@ -61,6 +61,10 @@ async function openBrowserAgentSettings(page: Page, mcp: McpStatus) {
       })
     } else if (url.pathname === '/api/v1/me') body = user
     else if (url.pathname === '/api/v1/workspaces') body = [workspace]
+    else if (url.pathname === `/api/v1/workspaces/${workspace.id}/sync/manifest`) {
+      if (url.searchParams.get('revision') === 'fixture-version') return route.fulfill({ status: 304, headers })
+      body = { version: 1, revision: 'fixture-version', pages: [{ id: remotePage.id, version: remotePage.updatedAt }], reviews: [], assets: [], files: [] }
+    }
     else if (url.pathname === '/api/v1/providers' || url.pathname === '/api/v1/me/mcp-tokens' || url.pathname === `/api/v1/workspaces/${workspace.id}/sources`) body = []
     else if (url.pathname === `/api/v1/workspaces/${workspace.id}/pages`) body = [remotePage]
     else if (url.pathname === `/api/v1/workspaces/${workspace.id}/pages/${remotePage.id}`) body = remotePage

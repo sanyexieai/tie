@@ -38,6 +38,7 @@ fn should_skip(rel: &Path) -> bool {
         first.as_ref(),
         ".git" | "node_modules" | "target" | ".DS_Store"
     ) || first.ends_with(".tiez") || rel.starts_with(".tie/page-locks")
+        || [".tie/sync-index.json", ".tie/sync-index.json.tmp", ".tie/sync-cursor.json.tmp", ".tie/backend-sync.lock"].iter().any(|name| rel == Path::new(name))
 }
 
 fn collect_pack_files(root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -275,11 +276,19 @@ mod tests {
 
         fs::create_dir_all(dir.join(".tie/page-locks")).unwrap();
         fs::write(dir.join(".tie/page-locks/active.lock"), "").unwrap();
+        fs::write(dir.join(".tie/sync-index.json"), "{\"deviceLocalCache\":true}").unwrap();
+        fs::write(dir.join(".tie/sync-index.json.tmp"), "pending local cache").unwrap();
+        fs::write(dir.join(".tie/backend-sync.lock"), "").unwrap();
+        fs::write(dir.join(".tie/sync-cursor.json.tmp"), "pending cursor").unwrap();
         let report = pack_tiez(&dir, &archive).unwrap();
         assert!(report.files >= 2);
         let unpacked = unpack_tiez(&archive, &out).unwrap();
         assert!(out.join("pages").is_dir());
         assert!(!out.join(".tie/page-locks").exists());
+        assert!(!out.join(".tie/sync-index.json").exists());
+        assert!(!out.join(".tie/sync-index.json.tmp").exists());
+        assert!(!out.join(".tie/backend-sync.lock").exists());
+        assert!(!out.join(".tie/sync-cursor.json.tmp").exists());
         assert!(unpacked.solution.is_some());
 
         let ws2 = LocalWorkspace::open(&out, Some("src_local_packtest012345")).unwrap();

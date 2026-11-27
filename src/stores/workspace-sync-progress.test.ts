@@ -4,6 +4,7 @@ import { backendService } from '@/services/backend'
 import { workspaceService } from '@/services/workspace'
 import { useBackendStore } from './backend'
 import { useWorkspaceStore } from './workspace'
+import type { Page } from '@/types'
 
 const native = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }))
@@ -48,6 +49,126 @@ afterEach(() => {
 })
 
 describe('desktop backend sync progress', () => {
+  it('keeps an idle interval check quiet and applies only reported changed pages', async () => {
+    const surface = Object.assign(new EventTarget(), { __TAURI_INTERNALS__: {} })
+    vi.stubGlobal('window', surface)
+    const store = setup()
+    const original: Page = { id: 'pg_changed', title: 'Changed', markdown: 'old', icon: '', tags: [], parentId: null, sortKey: 0,
+      createdAt: '2026-11-25T00:00:00Z', updatedAt: '2026-11-25T00:00:00Z', deletedAt: null, storageSourceId: 'local:a', storageSourceIds: ['local:a'] }
+    const untouched = { ...original, id: 'pg_untouched', title: 'Untouched' }
+    store.pages = [original, untouched]
+    const reload = vi.spyOn(workspaceService, 'loadWithSync')
+    const idle = deferred<Report>()
+    native.invoke.mockImplementation((command) => command === 'sync_backend_workspace' ? idle.promise : Promise.resolve({}))
+    const check = store.syncBackendNow({ quiet: true })
+    await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith('sync_backend_workspace', expect.any(Object)))
+    onProgress({ payload: { sourceId: 'local:a', stage: 'connecting', completed: 0, total: 3 } })
+    expect(store.backendSyncRunning).toBe(false)
+    expect(store.backendSyncProgress).toBeNull()
+    idle.resolve({ pushed: 0, pulled: 0, conflicts: [] })
+    await check
+    expect(store.backendSyncLastCompletedAt).toBeNull()
+
+    const changed = { ...original, markdown: 'remote changed', updatedAt: '2026-11-26T00:00:00Z' }
+    const reviews = vi.fn()
+    surface.addEventListener('tie:reviews-changed', reviews)
+    native.invoke.mockImplementation((command) => Promise.resolve(command === 'sync_backend_workspace'
+      ? { pushed: 0, pulled: 1, conflicts: [], changed: true, changedPages: [changed], removedPageIds: [], reviewPageIds: [original.id] } : {}))
+    await store.syncBackendNow({ quiet: true })
+    expect(store.pages.find((page) => page.id === original.id)?.markdown).toBe('remote changed')
+    expect(store.pages.find((page) => page.id === untouched.id)?.markdown).toBe('old')
+    expect(reload).not.toHaveBeenCalled()
+    expect(reviews).toHaveBeenCalledOnce()
+    expect(store.backendSyncLastCompletedAt).not.toBeNull()
+  })
+
+  it('keeps a save made during an incremental pull and removes only the reported source binding', async () => {
+    const store = setup(['local:a', 'local:b'])
+    const original: Page = { id: 'pg_changed', title: 'Changed', markdown: 'old', icon: '', tags: [], parentId: null, sortKey: 0,
+      createdAt: '2026-11-25T00:00:00Z', updatedAt: '2026-11-25T00:00:00Z', deletedAt: null, storageSourceId: 'local:a', storageSourceIds: ['local:a'] }
+    const shared = { ...original, id: 'pg_shared', storageSourceIds: ['local:a', 'local:b'] }
+    store.pages = [original, shared]
+    const work = deferred<Report>()
+    native.invoke.mockImplementation((command, args: { sourceId: string }) => command === 'sync_backend_workspace' && args.sourceId === 'local:a'
+      ? work.promise : Promise.resolve(command === 'sync_backend_workspace'
+        ? { pushed: 0, pulled: 1, conflicts: [], changedPages: [{ ...shared, markdown: 'updated in the surviving source', updatedAt: '2026-11-26T00:00:00Z', storageSourceId: 'local:b', storageSourceIds: ['local:b'] }] } : {}))
+    const sync = store.syncBackendNow()
+    await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith('sync_backend_workspace', expect.any(Object)))
+    store.pages[0] = { ...original, markdown: 'saved during pull', updatedAt: '2026-11-27T00:00:00Z' }
+    work.resolve({ pushed: 0, pulled: 1, conflicts: [], changedPages: [{ ...original, markdown: 'earlier remote response', updatedAt: '2026-11-26T00:00:00Z' }], removedPageIds: [shared.id] } as Report)
+    await sync
+    expect(store.pages.find((page) => page.id === original.id)?.markdown).toBe('saved during pull')
+    expect(store.pages.find((page) => page.id === shared.id)?.storageSourceIds).toEqual(['local:b'])
+    expect(store.pages.find((page) => page.id === shared.id)?.markdown).toBe('updated in the surviving source')
+  })
+
+  it('keeps a new in-flight editor draft when the native pull has trashed its disk page', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn(), removeItem: vi.fn() })
+    vi.stubGlobal('window', Object.assign(new EventTarget(), { __TAURI_INTERNALS__: {} }))
+    const store = setup()
+    const original: Page = { id: 'pg_draft', title: 'Draft', markdown: 'saved before request', icon: '', tags: [], parentId: null, sortKey: 0,
+      createdAt: '2026-11-25T00:00:00Z', updatedAt: '2026-11-25T00:00:00Z', deletedAt: null, storageSourceId: 'local:a', storageSourceIds: ['local:a'] }
+    store.pages = [original]
+    store.activePageId = original.id
+    let dirty = false
+    const flush = vi.fn(async () => !dirty)
+    store.registerEditorSaveHandler(flush, () => dirty)
+    const persist = vi.spyOn(workspaceService, 'savePage')
+    const work = deferred<Report>()
+    native.invoke.mockImplementation((command) => command === 'sync_backend_workspace' ? work.promise : Promise.resolve({}))
+    const result = expect(store.syncBackendNow()).rejects.toThrow('已保留草稿')
+    await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith('sync_backend_workspace', expect.any(Object)))
+    dirty = true
+    work.resolve({ pushed: 0, pulled: 1, conflicts: [], changedPages: [{ ...original, deletedAt: '2026-11-27T00:00:00Z', updatedAt: '2026-11-27T00:00:00Z' }],
+      localVersions: { pages: { [original.id]: 'native-trash-version' }, reviews: {}, assets: {}, files: {} } } as Report)
+    await result
+    expect(store.activePageId).toBe(original.id)
+    expect(store.pages[0]!.deletedAt).toBeNull()
+    expect(store.syncConflicts.has(original.id)).toBe(true)
+    expect(flush).toHaveBeenCalledOnce()
+    expect(persist).not.toHaveBeenCalled()
+    vi.spyOn(workspaceService, 'readLatestPage').mockResolvedValue({ ...original, deletedAt: '2026-11-27T00:00:00Z', updatedAt: '2026-11-27T00:00:00Z' })
+    await expect(store.persist({ ...original, markdown: 'draft after remote trash' })).rejects.toThrow('其他设备更新')
+    expect(persist).not.toHaveBeenCalled()
+    await expect(store.syncBackendNow({ quiet: true })).rejects.toThrow('已保留草稿')
+    expect(native.invoke.mock.calls.filter(([command]) => command === 'sync_backend_workspace')).toHaveLength(1)
+  })
+
+  it('does not apply an earlier account report after the login identity changes', async () => {
+    const store = setup()
+    const work = deferred<Report>()
+    native.invoke.mockImplementation((command) => command === 'sync_backend_workspace' ? work.promise : Promise.resolve({}))
+    const flight = store.syncBackendNow()
+    await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith('sync_backend_workspace', expect.any(Object)))
+    useBackendStore().profile = { ...useBackendStore().profile, user: { id: 'other_user', name: 'Other', email: 'other@example.test', createdAt: '' } }
+    work.resolve({ pushed: 0, pulled: 1, conflicts: [], changedPages: [{ id: 'old_account_page', title: 'Old', markdown: 'old account content' }] } as Report)
+    await flight
+    expect(store.pages).toEqual([])
+  })
+
+  it('applies a newer in-flight page after releasing an older deferred protection view', async () => {
+    vi.stubGlobal('window', Object.assign(new EventTarget(), { __TAURI_INTERNALS__: {}, setTimeout: vi.fn(() => 1), clearTimeout: vi.fn() }))
+    const store = setup()
+    const original: Page = { id: 'pg_held', title: 'Held', markdown: 'original', icon: '', tags: [], parentId: null, sortKey: 0,
+      createdAt: '2026-11-25T00:00:00Z', updatedAt: '2026-11-25T00:00:00Z', deletedAt: null, storageSourceId: 'local:a', storageSourceIds: ['local:a'] }
+    store.pages = [original]
+    const release = store.holdPageForProtectionChange(original.id)
+    native.invoke.mockImplementation((command) => Promise.resolve(command === 'sync_backend_workspace'
+      ? { pushed: 0, pulled: 1, conflicts: [], changedPages: [{ ...original, markdown: 'older deferred body', updatedAt: '2026-11-26T00:00:00Z' }] } : {}))
+    await store.syncBackendNow()
+    expect(store.pages[0]!.markdown).toBe('original')
+    const newer = deferred<Report>()
+    native.invoke.mockImplementation((command) => command === 'sync_backend_workspace' ? newer.promise : Promise.resolve({}))
+    const flight = store.syncBackendNow()
+    await vi.waitFor(() => expect(native.invoke.mock.calls.filter(([command]) => command === 'sync_backend_workspace')).toHaveLength(2))
+    release()
+    expect(store.pages[0]!.markdown).toBe('original')
+    newer.resolve({ pushed: 0, pulled: 1, conflicts: [], changedPages: [{ ...original, markdown: 'newer incoming body', updatedAt: '2026-11-27T00:00:00Z' }] } as Report)
+    await flight
+    await Promise.resolve()
+    expect(store.pages[0]!.markdown).toBe('newer incoming body')
+  })
+
   it('registers before invoking, filters sequential sources, and cleans up a shared successful flight', async () => {
     const first = deferred<Report>()
     const second = deferred<Report>()

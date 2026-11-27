@@ -16,6 +16,7 @@ import { getPlatformAccess } from '@/services/platform-access'
 import { fileBindingUnavailableMessage, resolveFileDeviceBinding } from '@/services/file-bindings'
 import {
   blobStoreFor,
+  fileIdFromFilesRelative,
   type WorkspaceFileKind,
   type WorkspaceFileMode,
   type WorkspaceFileResource,
@@ -90,6 +91,13 @@ export function fileLinkTitle(
 
 const cacheBySource = new Map<string, Map<string, WorkspaceFileResource>>()
 const relativeExistsBySource = new Map<string, Map<string, boolean>>()
+
+export function invalidateRegisteredFiles(sourceId: string, fileIds: string[]) {
+  const ids = new Set(fileIds)
+  for (const id of ids) cacheBySource.get(sourceId)?.delete(id)
+  const relative = relativeExistsBySource.get(sourceId)
+  for (const path of relative?.keys() ?? []) if (ids.has(fileIdFromFilesRelative(path) ?? '')) relative!.delete(path)
+}
 
 function remember(sourceId: string, items: WorkspaceFileResource[]) {
   cacheBySource.set(sourceId, new Map(items.map((item) => [item.id, item])))

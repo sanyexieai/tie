@@ -1,6 +1,8 @@
 import { computed, ref, watch } from 'vue'
 import { acceptHMRUpdate, defineStore } from 'pinia'
 import { backendService, isBackendRemoteSourceId, isBackendSourceId } from '@/services/backend'
+import { backendSyncScope, changedManifestIds, holdBrowserManifest, rememberBrowserManifest, rememberedBrowserManifest, removedManifestIds, type LocalSyncVersions } from '@/services/backend-sync'
+import { invalidateRegisteredFiles } from '@/services/files'
 import { mergePageSourceIds, mergePagesById, normalizePageSources, pageBoundToSource, pageContentEqual, pageSourceIds, pageWriteEqual, prunePageSources, remapPageSourceIds, withPageSources } from '@/services/page-sources'
 import { reconcileSaveAgainstRemote } from '@/services/save-reconcile'
 import { isLocalWinningConflict } from '@/services/storage/sync-merge'
@@ -35,6 +37,21 @@ interface BackendSyncProgress {
   total: number
 }
 
+interface BackendSyncReport {
+  pushed: number
+  pulled: number
+  conflicts: string[]
+  message?: string
+  protectionConflicts?: (SyncConflict & { localEncrypted: boolean; remoteEncrypted: boolean })[]
+  changed?: boolean
+  changedPages?: Page[]
+  removedPageIds?: string[]
+  reviewPageIds?: string[]
+  assetPageIds?: string[]
+  fileIds?: string[]
+  localVersions?: LocalSyncVersions
+}
+
 function sortSourcesByOrder(sources: StorageSource[], order: string[]) {
   const index = new Map(order.map((id, position) => [id, position]))
   return [...sources].sort((a, b) => {
@@ -59,8 +76,21 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   function holdPageForProtectionChange(pageId: PageId) {
     pagesChangingProtection.add(pageId)
+    const releaseManifest = desktopCanSync() ? undefined : holdBrowserManifest()
     return () => {
-      if (pagesChangingProtection.delete(pageId)) void reloadWorkspace()
+      if (!pagesChangingProtection.delete(pageId)) return
+      releaseManifest?.()
+      const deferred = deferredBackendPages.get(pageId)
+      if (deferred) {
+        const apply = async () => {
+          if (deferredBackendPages.get(pageId) === deferred) await applyBackendPageChanges([deferred.before], [deferred.after], [])
+        }
+        // The in-flight report may contain a newer copy of this deferred page.
+        void (backendSyncFlight ? backendSyncFlight.then(apply, apply) : apply()).catch((reason) => {
+          backend.error = reason instanceof Error ? reason.message : '页面更新尚未载入'
+        })
+      }
+      scheduleBackendSync()
     }
   }
   const activePageId = ref<PageId | null>(null)
@@ -92,9 +122,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const initializationStage = ref('正在准备应用…')
   const backgroundStarted = ref(false)
   let editorSaveHandler: (() => Promise<boolean>) | undefined
-  function registerEditorSaveHandler(handler: () => Promise<boolean>) {
+  let editorHasUnsavedChanges: (() => boolean) | undefined
+  function registerEditorSaveHandler(handler: () => Promise<boolean>, isDirty?: () => boolean) {
     editorSaveHandler = handler
-    return () => { if (editorSaveHandler === handler) editorSaveHandler = undefined }
+    editorHasUnsavedChanges = isDirty
+    return () => { if (editorSaveHandler === handler) { editorSaveHandler = undefined; editorHasUnsavedChanges = undefined } }
   }
   const favoritePageIds = ref<PageId[]>([])
   const recentPageIds = ref<PageId[]>([])
@@ -503,6 +535,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   let backendSyncFlight: Promise<{ pushed: number; pulled: number; conflicts: string[] }> | null = null
   let backendSyncTimer: number | undefined
   const backendConflictIds = new Set<string>()
+  const deferredBackendPages = new Map<PageId, { before: Page; after: Page }>()
+  const backendViewVersions = new Map<string, LocalSyncVersions>()
 
   function desktopCanSync() {
     return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
@@ -515,22 +549,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       ?? null
   }
 
-  function syncBackendNow(): Promise<{ pushed: number; pulled: number; conflicts: string[] }> {
+  function syncBackendNow(options?: { quiet?: boolean }): Promise<{ pushed: number; pulled: number; conflicts: string[] }> {
     if (backendSyncFlight) return backendSyncFlight
-    backendSyncFlight = runBackendSync().finally(() => { backendSyncFlight = null })
+    backendSyncFlight = runBackendSync(Boolean(options?.quiet)).finally(() => { backendSyncFlight = null })
     return backendSyncFlight
   }
 
   function scheduleBackendSync() {
     if (!backend.connected || typeof window === 'undefined') return
-    if (!desktopCanSync()) {
-      if (backendSyncTimer) window.clearTimeout(backendSyncTimer)
-      backendSyncTimer = window.setTimeout(() => {
-        backendSyncTimer = undefined
-        void reloadWorkspace()
-      }, 400)
-      return
-    }
     if (backendSyncTimer) window.clearTimeout(backendSyncTimer)
     backendSyncTimer = window.setTimeout(() => {
       backendSyncTimer = undefined
@@ -544,41 +570,182 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }, 400)
   }
 
-  async function runBackendSync() {
+  async function applyBackendPageChanges(before: Page[], incoming: Page[], removals: { id: string; sourceId: string }[]) {
+    const deferred = [...deferredBackendPages.entries()].filter(([id]) => !pagesChangingProtection.has(id))
+    before = [...before, ...deferred.map(([, value]) => value.before)]
+    incoming = [...deferred.map(([, value]) => value.after), ...incoming]
+    const baseline = new Map(before.map((page) => [page.id, page]))
+    const active = activePage.value
+    const candidate = incoming.filter((page) => page.id === active?.id).at(-1)
+    const oldActive = active && baseline.get(active.id)
+    const replacesEditor = active && oldActive && !pageChangedSinceStartup(active, oldActive) && !pagesChangingProtection.has(active.id)
+      && (removals.some((item) => item.id === active.id && item.sourceId === active.storageSourceId)
+        || candidate && ((!active.deletedAt && candidate.deletedAt) || isEncryptedMarkdown(active.markdown) !== isEncryptedMarkdown(candidate.markdown)))
+    const account = protectionAccountKey()
+    if (active && candidate && desktopCanSync() && editorHasUnsavedChanges?.() && !pageWriteEqual(active, candidate)) {
+      registerSyncConflict(active.id, active.storageSourceId, active.updatedAt, candidate.updatedAt)
+      backendConflictIds.add(active.id)
+    }
+    if (replacesEditor && desktopCanSync() && editorHasUnsavedChanges?.()) {
+      registerSyncConflict(active.id, active.storageSourceId, active.updatedAt, candidate?.updatedAt ?? '')
+      backendConflictIds.add(active.id)
+      throw new Error('当前页面有未保存修改，已保留草稿；请先对照服务器的删除或保护状态变化')
+    }
+    if (replacesEditor && editorSaveHandler && !await editorSaveHandler()) throw new Error('当前页面有未保存修改，已保留草稿并暂缓载入服务器更新')
+    if (account !== protectionAccountKey() || incoming.some((page) => !knownStorageSourceIds().has(page.storageSourceId))) return false
+    const liveBeforeApply = new Map(pages.value.map((page) => [page.id, page]))
+    const next = new Map(liveBeforeApply)
+    const known = knownStorageSourceIds()
+    for (const page of incoming) {
+      const old = baseline.get(page.id)
+      if (old && pagesChangingProtection.has(page.id)) {
+        deferredBackendPages.set(page.id, { before: old, after: page })
+        continue
+      }
+      const current = liveBeforeApply.get(page.id)
+      if ((old && !current) || (current && (!old || pageChangedSinceStartup(current, old)))) continue
+      // The manifest version is authoritative even when an external edit kept
+      // the page's old updatedAt; only a save made during this request wins.
+      const combined = next.get(page.id) ?? current
+      next.set(page.id, { ...page,
+        storageSourceId: combined?.storageSourceId ?? page.storageSourceId,
+        storageSourceIds: mergePageSourceIds(combined ?? page, page, { knownSourceIds: known }),
+      })
+    }
+    setPages([...next.values()].flatMap((page) => {
+      const old = baseline.get(page.id)
+      const removedSources = new Set(removals.filter((item) => item.id === page.id).map((item) => item.sourceId))
+      const live = liveBeforeApply.get(page.id)
+      if (!removedSources.size || !old || (live && pageChangedSinceStartup(live, old))) return [page]
+      const remaining = pageSourceIds(page).filter((id) => !removedSources.has(id))
+      return remaining.length ? [withPageSources(page, remaining.includes(page.storageSourceId) ? page.storageSourceId : remaining[0]!, remaining)] : []
+    }))
+    if (activePageId.value && !pages.value.some((page) => page.id === activePageId.value && !page.deletedAt)) {
+      activePageId.value = pages.value.find((page) => !page.deletedAt)?.id ?? null
+    }
+    for (const [id] of deferred) deferredBackendPages.delete(id)
+    return true
+  }
+
+  function notifyChangedReviews(sourceId: string, pageIds: string[]) {
+    for (const pageId of pageIds) window.dispatchEvent(new CustomEvent('tie:reviews-changed', { detail: { sourceId, pageId } }))
+  }
+
+  function notifyChangedResources(sourceId: string, assetPageIds: string[], fileIds: string[]) {
+    if (!assetPageIds.length && !fileIds.length) return
+    invalidateRegisteredFiles(sourceId, fileIds)
+    window.dispatchEvent(new CustomEvent('tie:resources-synced', { detail: { sourceId, assetPageIds, fileIds } }))
+  }
+
+  function changedLocalVersions(previous: Record<string, string> | undefined, current: Record<string, string>) {
+    return [...new Set([...Object.keys(current).filter((id) => previous?.[id] !== current[id]), ...Object.keys(previous ?? {}).filter((id) => current[id] === undefined)])]
+  }
+
+  async function syncBrowserBackend(workspaceId: string) {
     const empty = { pushed: 0, pulled: 0, conflicts: [] as string[] }
-    if (!backend.connected || !backend.profile.accessToken || !desktopCanSync() || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+    // Keep the old version cursor until a protection dialog releases its view.
+    if (pagesChangingProtection.size) return empty
+    const profile = { ...backend.profile }
+    const scope = backendSyncScope(profile, workspaceId)
+    const previous = rememberedBrowserManifest(profile, workspaceId)
+    const manifest = await backendService.syncManifest(profile, workspaceId, previous?.revision)
+    if (!manifest) return empty
+    const before = captureStartupPages(pages.value)
+    const ids = changedManifestIds(previous?.pages, manifest.pages)
+    const incoming = await Promise.all(ids.map(async (pageId) => {
+      const page = await backendService.getPage(profile, workspaceId, pageId)
+      const sourceId = `backend:${workspaceId}`
+      return { ...page, storageSourceId: sourceId, storageSourceIds: [sourceId] }
+    }))
+    if (backendSyncScope(backend.profile, workspaceId) !== scope || pagesChangingProtection.size) return empty
+    const sourceId = `backend:${workspaceId}`
+    const removed = removedManifestIds(previous?.pages, manifest.pages)
+      .filter((id) => before.some((page) => page.id === id && pageBoundToSource(page, sourceId)))
+    if (!await applyBackendPageChanges(before, incoming, removed.map((id) => ({ id, sourceId })))) return empty
+    if (backendSyncScope(backend.profile, workspaceId) !== scope) return empty
+    notifyChangedReviews(sourceId, changedManifestIds(previous?.reviews, manifest.reviews))
+    notifyChangedResources(sourceId, [...changedManifestIds(previous?.assets, manifest.assets), ...removedManifestIds(previous?.assets, manifest.assets)],
+      [...changedManifestIds(previous?.files, manifest.files), ...removedManifestIds(previous?.files, manifest.files)])
+    rememberBrowserManifest(profile, workspaceId, manifest)
+    if (ids.length || removed.length || changedManifestIds(previous?.reviews, manifest.reviews).length
+      || changedManifestIds(previous?.assets, manifest.assets).length || changedManifestIds(previous?.files, manifest.files).length) {
+      backendSyncLastCompletedAt.value = new Date().toISOString()
+    }
+    return { pushed: 0, pulled: incoming.length, conflicts: [] as string[] }
+  }
+
+  async function runBackendSync(quiet = false) {
+    const empty = { pushed: 0, pulled: 0, conflicts: [] as string[] }
+    if (!backend.connected || !backend.profile.accessToken || (typeof navigator !== 'undefined' && navigator.onLine === false)
+      || (!desktopCanSync() && !(workspace.value?.sources.some((source) => isBackendSourceId(source.id))))) {
       backendSyncMode.value = 'idle'
       return empty
     }
     let activeSourceId = ''
     let unlisten: UnlistenFn | undefined
-    backendSyncRunning.value = true
+    const profile = { ...backend.profile }
+    const accountScope = backendSyncScope(profile, '')
+    const currentAccount = () => backendSyncScope(backend.profile, '') === accountScope
+    backendSyncRunning.value = !quiet
     backendSyncProgress.value = null
     try {
-      const workspaces = await backendService.listWorkspaces(backend.profile)
+      if (desktopCanSync() && editorSaveHandler && !await editorSaveHandler()) throw new Error('当前页面尚未保存，已保留草稿并暂缓同步')
+      if (!currentAccount()) return empty
+      const workspaces = await backendService.listWorkspaces(profile)
+      if (!currentAccount()) return empty
       backend.workspaces = workspaces
       const target = pickAccountWorkspace(workspaces)
       if (!target) return empty
       backendSyncWorkspaceId = target.id
+      if (!desktopCanSync()) {
+        const report = await syncBrowserBackend(target.id)
+        backendSyncMode.value = syncConflicts.value.size ? 'conflict' : 'synced'
+        if (!syncConflicts.value.size) backend.error = ''
+        return report
+      }
       const sources = (workspace.value?.sources ?? []).filter((source) => !source.temporary && (source.kind === 'local' || source.kind === 'smb'))
+      const before = captureStartupPages(pages.value)
+      const changedPages: Page[] = []
+      const removedPageIds: { id: string; sourceId: string }[] = []
+      const viewUpdates = new Map<string, LocalSyncVersions>()
+      const reviewUpdates: { sourceId: string; pageIds: string[] }[] = []
+      const resourceUpdates: { sourceId: string; assetPageIds: string[]; fileIds: string[] }[] = []
+      let changed = false
       let pushed = 0
       let pulled = 0
       const conflicts: string[] = []
       const conflictDetails = new Map<string, SyncConflict & { sourceId: string }>()
       const conflictMessages: string[] = []
       unlisten = await listen<BackendSyncProgress>('backend-sync-progress', ({ payload }) => {
-        if (payload.sourceId === activeSourceId) backendSyncProgress.value = payload
+        if (!currentAccount() || payload.sourceId !== activeSourceId) return
+        if (quiet && (payload.stage === 'connecting' || payload.total === 0)) return
+        backendSyncRunning.value = true
+        backendSyncProgress.value = payload
       })
       for (const source of sources) {
         activeSourceId = source.id
         backendSyncProgress.value = null
-        const report = await invoke<{ pushed: number; pulled: number; conflicts: string[]; message?: string; protectionConflicts?: (SyncConflict & { localEncrypted: boolean; remoteEncrypted: boolean })[] }>('sync_backend_workspace', {
+        const viewKey = backendSyncScope(profile, `${target.id}:${source.id}`)
+        const previousVersions = backendViewVersions.get(viewKey)
+        const report = await invoke<BackendSyncReport>('sync_backend_workspace', {
           sourceId: source.id,
-          url: backend.profile.endpoint,
+          url: profile.endpoint,
           workspaceId: target.id,
+          viewPageVersions: previousVersions?.pages ?? {},
         })
+        if (!currentAccount() || !workspace.value?.sources.some((item) => item.id === source.id)) return empty
         pushed += report.pushed
         pulled += report.pulled
+        changed ||= report.changed ?? Boolean(report.pushed || report.pulled)
+        changedPages.push(...report.changedPages ?? [])
+        removedPageIds.push(...(report.removedPageIds ?? []).map((id) => ({ id, sourceId: source.id })))
+        reviewUpdates.push({ sourceId: source.id, pageIds: [...new Set([...(report.reviewPageIds ?? []),
+          ...(report.localVersions ? changedLocalVersions(previousVersions?.reviews, report.localVersions.reviews) : [])])] })
+        resourceUpdates.push({ sourceId: source.id,
+          assetPageIds: [...new Set([...(report.assetPageIds ?? []), ...(report.localVersions ? changedLocalVersions(previousVersions?.assets, report.localVersions.assets) : [])])],
+          fileIds: [...new Set([...(report.fileIds ?? []), ...(report.localVersions ? changedLocalVersions(previousVersions?.files, report.localVersions.files) : [])])],
+        })
+        if (report.localVersions) viewUpdates.set(viewKey, report.localVersions)
         conflicts.push(...report.conflicts)
         if (report.conflicts.length && report.message) conflictMessages.push(report.message)
         for (const id of report.conflicts) {
@@ -588,7 +755,17 @@ export const useWorkspaceStore = defineStore('workspace', () => {
             : { pageId: id, sourceId: source.id, localUpdatedAt: pages.value.find((item) => item.id === id)?.updatedAt ?? '', remoteUpdatedAt: '' })
         }
       }
-      if (pulled > 0) await reloadWorkspace()
+      if ((changedPages.length || removedPageIds.length || deferredBackendPages.size)
+        && !await applyBackendPageChanges(before, changedPages, removedPageIds)) return empty
+      if (!currentAccount()) return empty
+      for (const update of reviewUpdates) notifyChangedReviews(update.sourceId, update.pageIds)
+      for (const update of resourceUpdates) notifyChangedResources(update.sourceId, update.assetPageIds, update.fileIds)
+      for (const [key, value] of viewUpdates) backendViewVersions.set(key, value)
+      const activeDraft = activePageId.value && editorHasUnsavedChanges?.() ? syncConflicts.value.get(activePageId.value) : undefined
+      if (activeDraft && backendConflictIds.has(activeDraft.pageId) && !conflicts.includes(activeDraft.pageId)) {
+        conflicts.push(activeDraft.pageId)
+        conflictDetails.set(activeDraft.pageId, activeDraft)
+      }
       const next = new Map(syncConflicts.value)
       for (const id of backendConflictIds) {
         if (!conflicts.includes(id)) next.delete(id)
@@ -602,7 +779,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       backendSyncMode.value = conflicts.length ? 'conflict' : 'synced'
       backend.error = conflicts.length ? conflictMessages.join('\n') || '有页面在本地和后台都改过，未覆盖' : ''
       await refreshBackendSyncCursor()
-      backendSyncLastCompletedAt.value = new Date().toISOString()
+      if (!quiet || changed) backendSyncLastCompletedAt.value = new Date().toISOString()
       return { pushed, pulled, conflicts }
     } catch (reason) {
       backendSyncMode.value = 'error'
@@ -1242,16 +1419,18 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const draft = { ...contentDraft, updatedAt: new Date().toISOString() }
     let expectedUpdatedAt = options?.force ? undefined : previous?.updatedAt
     let forceWrite = Boolean(options?.force)
-    const localOnly = !temporary && pageIsLocalOnly(previous ?? draft)
+    const localOnly = !temporary && pageIsLocalOnly(previous ?? draft) && !backendConflictIds.has(page.id)
     const conflictMessage = temporary
       ? '页面文件已在磁盘上被修改，请重新载入后再保存'
       : '页面已在其他设备更新，请重新载入后再保存'
+
+    if (!forceWrite && backendConflictIds.has(page.id) && syncConflicts.value.get(page.id)?.kind !== 'protection') throw new Error(conflictMessage)
 
     // 云端协作冲突：本地领先时禁止静默覆盖。纯本地页没有跨端协作面，直接以编辑器为准。
     if (!forceWrite && syncConflicts.value.has(page.id)) {
       const conflict = syncConflicts.value.get(page.id)
       if (conflict && conflict.kind !== 'protection' && isLocalWinningConflict(conflict)) {
-        if (localOnly) {
+        if (localOnly && !backendConflictIds.has(page.id)) {
           forceWrite = true
           expectedUpdatedAt = undefined
           clearLocalSaveConflict(page.id)
@@ -1270,7 +1449,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           return
         }
         if (result.action === 'conflict') {
-          if (localOnly) {
+          if (localOnly && !backendConflictIds.has(page.id)) {
             // 纯本地：差异只是「编辑器里的稿」vs「磁盘上的 md」，以当前编辑为准覆盖。
             forceWrite = true
             expectedUpdatedAt = undefined
@@ -1290,6 +1469,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       }
     }
 
+    if (!forceWrite && backendConflictIds.has(page.id) && syncConflicts.value.get(page.id)?.kind !== 'protection') throw new Error(conflictMessage)
     try {
       const saved = await workspaceService.savePage(
         draft,
@@ -1321,7 +1501,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           clearLocalSaveConflict(latest.id)
           return
         }
-        if (localOnly) {
+        if (localOnly && !backendConflictIds.has(page.id)) {
           // 乐观锁失败：纯本地直接强制覆盖，不再登记「远端冲突」。
           const saved = await workspaceService.savePage(draft, { force: true })
           const index = pages.value.findIndex((item) => item.id === saved.id)

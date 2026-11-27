@@ -3,6 +3,7 @@ import { currentChangeOrigin } from '@/services/change-origin'
 import type { ReviewEntry, ReviewFile } from '@/services/review-service'
 import type { DeviceFileBinding, FileBindingState } from '@/services/storage/file-meta'
 import type { PageProtectionBundle } from '@/services/page-protection-types'
+import type { BackendSyncManifest } from '@/services/backend-sync'
 
 export interface BackendUser {
   id: string
@@ -232,6 +233,7 @@ async function request<T>(profile: BackendProfile, path: string, options: Reques
     await refreshProfile(profile, true)
     return request<T>(profile, path, options, false)
   }
+  if (response.status === 304) return null as T
   if (!response.ok) {
     const error = body as { message?: string; error?: string } | null
     if (response.status === 409) throw new BackendRequestError('页面已在其他设备更新，请重新载入后再保存', 409)
@@ -596,6 +598,20 @@ export const backendService = {
   },
   async listPages(profile: BackendProfile, workspaceId: string) {
     return request<BackendPagePayload[]>(profile, `/api/v1/workspaces/${workspaceId}/pages`)
+  },
+  async syncManifest(profile: BackendProfile, workspaceId: string, revision?: string) {
+    const query = revision ? `?revision=${encodeURIComponent(revision)}` : ''
+    const manifest = await request<BackendSyncManifest | null>(profile, `/api/v1/workspaces/${workspaceId}/sync/manifest${query}`, { cache: 'no-store' }).catch((reason) => {
+      if (reason instanceof BackendRequestError && reason.status === 404) reason.message = '后台不支持增量同步，请先更新后台'
+      throw reason
+    })
+    if (manifest === null) return null
+    if (manifest.version !== 1 || typeof manifest.revision !== 'string'
+      || ![manifest.pages, manifest.reviews, manifest.assets, manifest.files].every((entries) => Array.isArray(entries)
+        && entries.every((entry) => typeof entry?.id === 'string' && typeof entry?.version === 'string'))) {
+      throw new BackendRequestError('服务器返回的增量同步清单无效，请更新后台', 502)
+    }
+    return manifest
   },
   async getPage(profile: BackendProfile, workspaceId: string, pageId: string) {
     return request<BackendPagePayload>(profile, `/api/v1/workspaces/${workspaceId}/pages/${pageId}`)

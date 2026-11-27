@@ -11,6 +11,7 @@ test('browser shares replies and withdrawal, highlights synced quotes, and refre
     kind: 'opinion', status: 'open', opinionKind: 'objection', quote: '需要共同确认的原文。', body: '请补充结论依据。', baseUpdatedAt: document.updatedAt }]
   const actions: { path: string; body: Record<string, unknown> }[] = []
   let saveStarted = false
+  let revision = 1
   let releaseSave!: () => void
   const saveGate = new Promise<void>((resolve) => { releaseSave = resolve })
   const docPath = '/api/v1/workspaces/ws_review/pages/pg_review'
@@ -27,23 +28,30 @@ test('browser shares replies and withdrawal, highlights synced quotes, and refre
     if (path === '/health') body = { ok: true }
     else if (path === '/api/v1/me') body = user
     else if (path === '/api/v1/workspaces') body = [{ id: 'ws_review', name: '我的工作区', default: true, ownerId: user.id }]
+    else if (path === '/api/v1/workspaces/ws_review/sync/manifest') body = {
+      version: 1, revision: String(revision), pages: [{ id: document.id, version: document.updatedAt }],
+      reviews: [{ id: document.id, version: String(revision) }], assets: [], files: [],
+    }
     else if (path === '/api/v1/workspaces/ws_review/pages') body = [document]
     else if (path === docPath + '/reviews') body = { entries }
     else if (path === docPath + '/signals' && method === 'POST') {
       const input = request.postDataJSON()
       actions.push({ path, body: input })
+      revision += 1
       entries.push({ ...input, id: input.id || 'ph_reply', at: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'opinion', status: 'open',
         actor: input.actor || user.name, origin: { ...origin, clientName: 'Tie 网页', deviceName: '浏览器', actor: input.actor || user.name } })
       body = { entries }
     } else if (path.endsWith('/signals/ph_synced/resolve') && method === 'POST') {
       const input = request.postDataJSON()
       actions.push({ path, body: input })
+      revision += 1
       Object.assign(entries[0]!, input, { updatedAt: new Date().toISOString(), resolutionOrigin: origin })
       body = { entries }
     } else if (path === docPath && method === 'PUT') {
       saveStarted = true
       await saveGate
       document = request.postDataJSON()
+      revision += 1
       entries.push({ id: 'ch_saved', at: document.updatedAt, actor: 'Review Owner', origin: { ...origin, clientName: 'Tie 网页', deviceName: '当前浏览器' },
         kind: 'change', status: 'recorded', type: 'update', pageId: document.id, changedFields: ['markdown'] })
       body = document

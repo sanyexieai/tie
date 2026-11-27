@@ -34,6 +34,8 @@ const test = base.extend<{ backend: Backend }>({
       expect(registered.status).toBe(200)
       const session = await registered.json()
       const headers = { authorization: `Bearer ${session.accessToken}`, 'content-type': 'application/json' }
+      const cli = process.env.TIE_TEST_CLI || fileURLToPath(new URL(`../src-tauri/target/debug/tie-cli${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url))
+      expect((await fetch(`${url}/api/v1/admin/settings`, { method: 'PUT', headers, body: JSON.stringify({ mcp: { enabled: false, cliPath: cli } }) })).status).toBe(200)
       const workspaces = await (await fetch(`${url}/api/v1/workspaces`, { headers })).json()
       const workspaceId = workspaces[0].id
       const stamp = '2026-11-26T00:00:00.000Z'
@@ -810,4 +812,70 @@ test('authorizes an existing server encryption before encrypting the local copy 
     const conflict = store.syncConflicts.get('pg_ordinary')
     return { pending: Boolean(conflict), protection: conflict?.kind === 'protection' }
   })).toEqual({ pending: true, protection: false })
+})
+
+test('keeps an unsaved editor draft when an incremental server purge would remove the active page', async ({ page, backend }) => {
+  await seedBrowser(page.context(), backend.profile)
+  await page.routeWebSocket('**/*', () => {})
+  await page.goto('/')
+  const editor = documentEditor(page)
+  await expect(editor.getByRole('textbox', { name: '页面标题', exact: true })).toHaveValue('普通文档')
+  await page.evaluate(async () => {
+    await (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace').initializeBackground()
+  })
+  const source = await sourceEditor(editor)
+  await page.clock.install()
+  await page.clock.pauseAt(new Date())
+  const draft = 'fixture-unsaved-draft-survives-remote-purge'
+  await source.fill(draft)
+  const headers = { authorization: `Bearer ${backend.profile.accessToken}`, 'content-type': 'application/json' }
+  expect((await fetch(`${backend.url}/api/v1/workspaces/${backend.workspaceId}/pages`, {
+    method: 'POST', headers, body: JSON.stringify({ pageIds: ['pg_ordinary'] }),
+  })).status).toBe(204)
+  const result = await page.evaluate(async () => {
+    const store = (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace')
+    try { await store.syncBackendNow({ quiet: true }); return { message: '', id: store.activePageId } }
+    catch (error) { return { message: String(error), id: store.activePageId } }
+  })
+  expect(result.id).toBe('pg_ordinary')
+  expect(result.message).toContain('已保留草稿')
+  await expect(source).toHaveValue(draft)
+  expect((await backendPages(backend)).some((item) => item.id === 'pg_ordinary')).toBe(false)
+  await expect(editor.locator('.save-state')).toContainText(/未保存|失败/)
+})
+
+test('refreshes a changed same-name image through an incremental asset event without fetching page bodies', async ({ page, backend }) => {
+  const headers = { authorization: `Bearer ${backend.profile.accessToken}`, 'content-type': 'application/json' }
+  const ordinary = (await backendPages(backend)).find((item) => item.id === 'pg_ordinary')!
+  expect((await fetch(`${backend.url}/api/v1/workspaces/${backend.workspaceId}/pages/pg_ordinary`, {
+    method: 'PUT', headers, body: JSON.stringify({ ...ordinary, markdown: '# 普通文档\n\n![fixture](tie://asset/pg_ordinary/same.png)' }),
+  })).status).toBe(200)
+  const assetUrl = `${backend.url}/api/v1/workspaces/${backend.workspaceId}/pages/pg_ordinary/assets/same.png`
+  expect((await fetch(assetUrl, { method: 'PUT', headers: { authorization: headers.authorization, 'content-type': 'application/octet-stream' }, body: Buffer.from(png, 'base64') })).status).toBe(201)
+  await seedBrowser(page.context(), backend.profile)
+  await page.routeWebSocket('**/*', () => {})
+  await page.goto('/')
+  const editor = documentEditor(page)
+  const image = editor.locator('.tiptap img').first()
+  await expect(image).toBeVisible()
+  await expect.poll(() => image.evaluate((node) => (node as HTMLImageElement).naturalWidth)).toBe(1)
+  await page.evaluate(async () => {
+    await (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace').initializeBackground()
+  })
+  const replacement = await page.evaluate(() => {
+    const canvas = document.createElement('canvas')
+    canvas.width = 2; canvas.height = 1
+    canvas.getContext('2d')!.fillRect(0, 0, 2, 1)
+    return canvas.toDataURL('image/png').split(',')[1]!
+  })
+  const bodyRequests: string[] = []
+  page.on('request', (request) => {
+    if (request.method() === 'GET' && /\/pages(?:\/pg_ordinary)?$/.test(new URL(request.url()).pathname)) bodyRequests.push(request.url())
+  })
+  expect((await fetch(assetUrl, { method: 'PUT', headers: { authorization: headers.authorization, 'content-type': 'application/octet-stream' }, body: Buffer.from(replacement, 'base64') })).status).toBe(201)
+  await page.evaluate(async () => {
+    await (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace').syncBackendNow({ quiet: true })
+  })
+  await expect.poll(() => image.evaluate((node) => (node as HTMLImageElement).naturalWidth)).toBe(2)
+  expect(bodyRequests).toEqual([])
 })

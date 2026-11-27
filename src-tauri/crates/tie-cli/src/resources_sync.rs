@@ -1,28 +1,58 @@
 use reqwest::blocking::{Client, Response};
 use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
 use tie_local::{merge_file_metadata, page_asset_dir, LocalWorkspace};
 use crate::backend_sync::{report_progress, BackendSyncProgress, BackendSyncStage};
+#[cfg(test)]
+use std::collections::HashSet;
 
-pub(crate) fn sync_resources(
-    client: &Client,
-    base: &str,
-    token: &str,
-    ws: &LocalWorkspace,
-    blocked_pages: &HashSet<String>,
-    observe: &mut dyn FnMut(BackendSyncProgress),
+pub(crate) type AssetVersions = BTreeMap<String, BTreeMap<String, String>>;
+
+pub(crate) struct ResourcePlan<'a> {
+    pub assets: BTreeSet<String>,
+    pub files: BTreeSet<String>,
+    pub previous_assets: &'a BTreeMap<String, String>,
+    pub remote_assets: &'a mut AssetVersions,
+    pub local_file_changes: BTreeSet<String>,
+    pub remote_file_changes: BTreeSet<String>,
+    pub local_assets: &'a mut BTreeMap<String, String>,
+    pub local_files: &'a mut BTreeMap<String, String>,
+}
+
+pub(crate) fn sync_selected(
+    client: &Client, base: &str, token: &str, ws: &LocalWorkspace,
+    plan: ResourcePlan<'_>, observe: &mut dyn FnMut(BackendSyncProgress),
 ) -> Result<(), String> {
-    let pages = ws.load_all(true)?.into_iter().filter(|page| !blocked_pages.contains(&page.id)).collect::<Vec<_>>();
-    report_progress(observe, BackendSyncStage::Assets, 0, pages.len());
-    for (index, page) in pages.iter().enumerate() {
-        sync_assets(client, base, token, ws.root(), &page.id)?;
-        report_progress(observe, BackendSyncStage::Assets, index + 1, pages.len());
+    report_progress(observe, BackendSyncStage::Assets, 0, plan.assets.len());
+    for (index, id) in plan.assets.iter().enumerate() {
+        let previous: BTreeMap<String, String> = plan.previous_assets.get(id)
+            .map(|raw| serde_json::from_str(raw).map_err(|error| error.to_string()))
+            .transpose()?.unwrap_or_default();
+        let (versions, acknowledgements) = sync_assets(client, base, token, ws.root(), id, &previous, plan.remote_assets.get(id))?;
+        if !acknowledgements.is_empty() {
+            let mut current: BTreeMap<String, String> = plan.local_assets.get(id).map(|raw| serde_json::from_str(raw).map_err(|error| error.to_string())).transpose()?.unwrap_or_default();
+            current.extend(acknowledgements);
+            plan.local_assets.insert(id.clone(), serde_json::to_string(&current).map_err(|error| error.to_string())?);
+        }
+        plan.remote_assets.insert(id.clone(), versions);
+        report_progress(observe, BackendSyncStage::Assets, index + 1, plan.assets.len());
     }
-    sync_files(client, base, token, ws, observe)
+    sync_files(client, base, token, ws, &plan.files, &plan.local_file_changes, &plan.remote_file_changes, plan.local_files, observe)
+}
+
+#[cfg(test)]
+fn sync_resources(client: &Client, base: &str, token: &str, ws: &LocalWorkspace, blocked: &HashSet<String>, observe: &mut dyn FnMut(BackendSyncProgress)) -> Result<(), String> {
+    let manifest: Value = checked(client.get(format!("{base}/sync/manifest")).bearer_auth(token).send())?.json().unwrap();
+    let mut assets: BTreeSet<String> = ws.load_all(true)?.into_iter().map(|page| page.id).collect();
+    assets.extend(manifest["assets"].as_array().unwrap().iter().map(|item| item["id"].as_str().unwrap().to_owned()));
+    assets.retain(|id| !blocked.contains(id));
+    let mut files: BTreeSet<String> = ws.files().all_metadata().iter().map(|meta| field(meta, "id").to_owned()).collect();
+    files.extend(manifest["files"].as_array().unwrap().iter().map(|item| item["id"].as_str().unwrap().to_owned()));
+    sync_selected(client, base, token, ws, ResourcePlan { assets, local_file_changes: files.clone(), remote_file_changes: files.clone(), files, previous_assets: &BTreeMap::new(), remote_assets: &mut BTreeMap::new(), local_assets: &mut BTreeMap::new(), local_files: &mut BTreeMap::new() }, observe)
 }
 
 fn checked(response: Result<Response, reqwest::Error>) -> Result<Response, String> {
@@ -46,63 +76,93 @@ fn safe_component(value: &str) -> Result<&str, String> {
     Ok(value)
 }
 
+fn file_stamp(path: &Path) -> Result<Option<String>, String> {
+    match fs::metadata(path) {
+        Ok(meta) => Ok(Some(format!("{}:{}", meta.len(), meta.modified().map_err(|error| error.to_string())?.duration_since(std::time::UNIX_EPOCH).map_err(|error| error.to_string())?.as_nanos()))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn sync_assets(
-    client: &Client,
-    base: &str,
-    token: &str,
-    root: &Path,
-    page_id: &str,
-) -> Result<(), String> {
+    client: &Client, base: &str, token: &str, root: &Path, page_id: &str,
+    previous_local: &BTreeMap<String, String>, previous_remote: Option<&BTreeMap<String, String>>,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>), String> {
     let page_id = safe_component(page_id)?;
     let url = format!("{base}/pages/{page_id}/assets");
-    let listing: Value = checked(client.get(&url).bearer_auth(token).send())?
-        .json()
-        .map_err(|error| error.to_string())?;
-    let remote = listing
-        .get("assets")
-        .and_then(Value::as_array)
-        .ok_or("后台附件列表无效")?;
-    let mut missing = std::collections::HashSet::new();
-    for name in remote {
-        missing.insert(safe_component(name.as_str().ok_or("后台附件名称无效")?)?.to_owned());
+    let listing: Value = checked(client.get(&url).query(&[("versions", "1")]).bearer_auth(token).send())?.json().map_err(|error| error.to_string())?;
+    let rows = listing.get("versions").and_then(Value::as_array).ok_or("后台附件增量清单无效，请更新后台")?;
+    let mut remote = BTreeMap::new();
+    for item in rows {
+        let name = safe_component(item.get("name").and_then(Value::as_str).ok_or("后台附件名称无效")?)?;
+        let version = item.get("version").and_then(Value::as_str).filter(|value| !value.is_empty()).ok_or("后台附件版本无效")?;
+        remote.insert(name.to_owned(), version.to_owned());
     }
     let dir = page_asset_dir(root, page_id);
+    let mut local = BTreeMap::new();
     if dir.is_dir() {
-        for item in fs::read_dir(&dir).map_err(|error| error.to_string())? {
-            let item = item.map_err(|error| error.to_string())?;
-            if !item
-                .file_type()
-                .map_err(|error| error.to_string())?
-                .is_file()
-            {
-                continue;
-            }
-            let name = item.file_name().to_string_lossy().into_owned();
+        for entry in fs::read_dir(&dir).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if !entry.file_type().map_err(|error| error.to_string())?.is_file() { continue; }
+            let name = entry.file_name().to_string_lossy().into_owned();
             safe_component(&name)?;
-            if !missing.remove(&name) {
-                checked(
-                    client
-                        .put(format!("{url}/{name}"))
-                        .bearer_auth(token)
-                        .header("content-type", "application/octet-stream")
-                        .body(fs::read(item.path()).map_err(|error| error.to_string())?)
-                        .send(),
-                )?;
-            }
+            if let Some(version) = file_stamp(&entry.path())? { local.insert(name, version); }
         }
     }
-    for name in missing {
-        let bytes = checked(
-            client
-                .get(format!("{url}/{name}"))
-                .bearer_auth(token)
-                .send(),
-        )?
-        .bytes()
-        .map_err(|error| error.to_string())?;
-        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-        fs::write(dir.join(name), bytes).map_err(|error| error.to_string())?;
+    let mut acknowledgements = BTreeMap::new();
+    let names: BTreeSet<_> = local.keys().chain(remote.keys()).cloned().collect();
+    for name in names {
+        let path = dir.join(&name);
+        let local_changed = previous_local.get(&name) != local.get(&name);
+        let remote_changed = previous_remote.and_then(|values| values.get(&name)) != remote.get(&name);
+        match (local.get(&name), remote.get(&name)) {
+            (Some(_), Some(_)) if !local_changed && !remote_changed => {},
+            (Some(_), Some(_)) if local_changed && !remote_changed => {
+                checked(client.put(format!("{url}/{name}")).bearer_auth(token).header("content-type", "application/octet-stream").body(fs::read(&path).map_err(|error| error.to_string())?).send())?;
+            }
+            (Some(_), Some(_)) => {
+                let bytes = checked(client.get(format!("{url}/{name}")).bearer_auth(token).send())?.bytes().map_err(|error| error.to_string())?;
+                let current = fs::read(&path).map_err(|error| error.to_string())?;
+                if current == bytes { continue; }
+                if local_changed { return Err(format!("附件 {name} 在本机和服务器都已修改，已保留两边副本")); }
+                if file_stamp(&path)? != local.get(&name).cloned() { return Err(format!("附件 {name} 在同步期间已被本机修改，请重试")); }
+                fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+                if let Some(version) = acknowledge_asset(&path, &bytes)? { acknowledgements.insert(name, version); }
+            }
+            (Some(_), None) => {
+                checked(client.put(format!("{url}/{name}")).bearer_auth(token).header("content-type", "application/octet-stream").body(fs::read(&path).map_err(|error| error.to_string())?).send())?;
+            }
+            (None, Some(_)) => {
+                let bytes = checked(client.get(format!("{url}/{name}")).bearer_auth(token).send())?.bytes().map_err(|error| error.to_string())?;
+                fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+                if path.exists() { return Err(format!("附件 {name} 在同步期间已由本机创建，请重试")); }
+                fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+                if let Some(version) = acknowledge_asset(&path, &bytes)? { acknowledgements.insert(name, version); }
+            }
+            _ => {},
+        }
     }
+    Ok((remote, acknowledgements))
+}
+
+fn acknowledge_asset(path: &Path, expected: &[u8]) -> Result<Option<String>, String> {
+    let before = file_stamp(path)?;
+    let current = fs::read(path).map_err(|error| error.to_string())?;
+    let after = file_stamp(path)?;
+    Ok(if before == after && current == expected { after } else { None })
+}
+
+fn acknowledge_file(ws: &LocalWorkspace, expected: &Value, bytes: Option<&[u8]>, acknowledged: &mut BTreeMap<String, String>) -> Result<(), String> {
+    let id = field(expected, "id");
+    let directory = ws.root().join(".tie/files").join(id);
+    let before = crate::backend_sync::incremental::folder_version(&directory)?;
+    let current = ws.files().get(id)?.map(|meta| merge_file_metadata(&Value::Null, &meta));
+    let content_matches = match bytes {
+        Some(bytes) => fs::read(copy_path(ws.root(), expected)?).map_err(|error| error.to_string())? == bytes,
+        None => true,
+    };
+    let after = crate::backend_sync::incremental::folder_version(&directory)?;
+    if before == after && content_matches && current.as_ref() == Some(expected) { acknowledged.insert(id.to_owned(), after); }
     Ok(())
 }
 
@@ -169,99 +229,76 @@ fn download_file(
     token: &str,
     ws: &LocalWorkspace,
     meta: &Value,
+    downloaded: Option<Vec<u8>>,
+    acknowledged: &mut BTreeMap<String, String>,
 ) -> Result<(), String> {
     let id = field(meta, "id");
     let mut meta = meta.clone();
+    let mut applied_bytes = None;
     if field(&meta, "mode") == "copy" {
         let path = copy_path(ws.root(), &meta)?;
-        let bytes = checked(
-            client
-                .get(format!("{base}/files/{id}/blob"))
-                .bearer_auth(token)
-                .send(),
-        )?
-        .bytes()
-        .map_err(|error| error.to_string())?;
+        let bytes = match downloaded {
+            Some(bytes) => bytes,
+            None => checked(client.get(format!("{base}/files/{id}/blob")).bearer_auth(token).send())?.bytes().map_err(|error| error.to_string())?.to_vec(),
+        };
         fs::create_dir_all(path.parent().ok_or("文件副本目录无效")?)
             .map_err(|error| error.to_string())?;
-        fs::write(&path, bytes).map_err(|error| error.to_string())?;
+        fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+        applied_bytes = Some(bytes);
         meta["storedPath"] = Value::String(format!(
             ".tie/files/{id}/{}",
             path.file_name().unwrap().to_string_lossy()
         ));
     }
-    ws.files().upsert_metadata(&meta)
+    let meta = merge_file_metadata(&Value::Null, &meta);
+    ws.files().upsert_metadata(&meta)?;
+    acknowledge_file(ws, &meta, applied_bytes.as_deref(), acknowledged)
 }
 
 fn sync_files(
-    client: &Client,
-    base: &str,
-    token: &str,
-    ws: &LocalWorkspace,
-    observe: &mut dyn FnMut(BackendSyncProgress),
+    client: &Client, base: &str, token: &str, ws: &LocalWorkspace,
+    ids: &BTreeSet<String>, local_changes: &BTreeSet<String>, remote_changes: &BTreeSet<String>,
+    acknowledged: &mut BTreeMap<String, String>, observe: &mut dyn FnMut(BackendSyncProgress),
 ) -> Result<(), String> {
-    let response: Value = checked(
-        client
-            .get(format!("{base}/files"))
-            .bearer_auth(token)
-            .send(),
-    )?
-    .json()
-    .map_err(|error| error.to_string())?;
-    let files = response
-        .get("files")
-        .and_then(Value::as_array)
-        .ok_or("后台文件列表无效")?;
-    let mut remote = HashMap::new();
-    for meta in files {
-        remote.insert(check_file(meta)?.to_owned(), meta);
-    }
-    let local_files = ws.files().all_metadata();
-    let total = local_files.iter().map(|meta| field(meta, "id"))
-        .chain(remote.keys().map(String::as_str)).collect::<HashSet<_>>().len();
-    let mut completed = HashSet::new();
-    report_progress(observe, BackendSyncStage::Files, 0, total);
-    for local in local_files {
-        let id = check_file(&local)?;
-        if let Some(other) = remote.remove(id) {
-            if field(&local, "mode") == "link" && field(other, "mode") == "link" {
-                let merged = merge_file_metadata(&local, other);
-                if merged != merge_file_metadata(&Value::Null, &local) { ws.files().upsert_metadata(&merged)?; }
-                if merged != merge_file_metadata(&Value::Null, other) || other.get("preview").is_some() {
-                    upload_file(client, base, token, ws.root(), &merged)?;
-                }
-                if completed.insert(id.to_owned()) {
-                    report_progress(observe, BackendSyncStage::Files, completed.len(), total);
-                }
-                continue;
+    report_progress(observe, BackendSyncStage::Files, 0, ids.len());
+    for (index, id) in ids.iter().enumerate() {
+        safe_component(id)?;
+        let local = ws.files().get(id)?.map(|meta| merge_file_metadata(&Value::Null, &meta));
+        let response = client.get(format!("{base}/files/{id}")).bearer_auth(token).send().map_err(|error| error.to_string())?;
+        let remote: Option<Value> = if response.status().as_u16() == 404 { None }
+            else if !response.status().is_success() { return Err(format!("读取文件资源失败：{}", response.status())); }
+            else { Some(response.json().map_err(|error| error.to_string())?) };
+        if let Some(meta) = &local { check_file(meta)?; }
+        if let Some(meta) = &remote { check_file(meta)?; }
+        match (&local, &remote) {
+            (Some(local), Some(other)) if field(local, "mode") == "link" && field(other, "mode") == "link" => {
+                let merged = merge_file_metadata(local, other);
+                if merged != *local { ws.files().upsert_metadata(&merged)?; acknowledge_file(ws, &merged, None, acknowledged)?; }
+                if merged != merge_file_metadata(&Value::Null, other) || other.get("preview").is_some() { upload_file(client, base, token, ws.root(), &merged)?; }
             }
-            let local_stamp = field(&local, "updatedAt");
-            let remote_stamp = field(other, "updatedAt");
-            if local_stamp > remote_stamp {
-                upload_file(client, base, token, ws.root(), &local)?;
-            } else if local_stamp < remote_stamp {
-                download_file(client, base, token, ws, other)?;
-            } else if field(&local, "mode") == "copy" {
-                if copy_path(ws.root(), &local)?.is_file() {
-                    if other.get("exists").and_then(Value::as_bool) == Some(false) {
-                        upload_file(client, base, token, ws.root(), &local)?;
+            (Some(local), Some(other)) => {
+                let local_stamp = field(local, "updatedAt");
+                let remote_stamp = field(other, "updatedAt");
+                if local_stamp > remote_stamp { upload_file(client, base, token, ws.root(), local)?; }
+                else if local_stamp < remote_stamp { download_file(client, base, token, ws, other, None, acknowledged)?; }
+                else if field(local, "mode") == "copy" {
+                    if !copy_path(ws.root(), local)?.is_file() { download_file(client, base, token, ws, other, None, acknowledged)?; }
+                    else if other.get("exists").and_then(Value::as_bool) == Some(false) || (local_changes.contains(id) && !remote_changes.contains(id)) { upload_file(client, base, token, ws.root(), local)?; }
+                    else if remote_changes.contains(id) {
+                        let bytes = checked(client.get(format!("{base}/files/{id}/blob")).bearer_auth(token).send())?.bytes().map_err(|error| error.to_string())?;
+                        let path = copy_path(ws.root(), local)?;
+                        if fs::read(&path).map_err(|error| error.to_string())? != bytes {
+                            if local_changes.contains(id) { return Err(format!("文件副本 {id} 在两端都已修改，已保留两边副本")); }
+                            download_file(client, base, token, ws, other, Some(bytes.to_vec()), acknowledged)?;
+                        }
                     }
-                } else {
-                    download_file(client, base, token, ws, other)?;
                 }
             }
-        } else {
-            upload_file(client, base, token, ws.root(), &local)?;
+            (Some(local), None) => upload_file(client, base, token, ws.root(), local)?,
+            (None, Some(remote)) => download_file(client, base, token, ws, remote, None, acknowledged)?,
+            _ => {},
         }
-        if completed.insert(id.to_owned()) {
-            report_progress(observe, BackendSyncStage::Files, completed.len(), total);
-        }
-    }
-    for other in remote.into_values() {
-        download_file(client, base, token, ws, other)?;
-        if completed.insert(field(other, "id").to_owned()) {
-            report_progress(observe, BackendSyncStage::Files, completed.len(), total);
-        }
+        report_progress(observe, BackendSyncStage::Files, index + 1, ids.len());
     }
     Ok(())
 }
@@ -273,9 +310,10 @@ pub(crate) mod tests {
     use tie_local::{FileRegistry, WritePageInput};
 
     pub(crate) fn respond(root: &Path, request: &str, body: &[u8]) -> (u16, Vec<u8>) {
+        if let Some(response) = crate::backend_sync::incremental::fixture_response(root, request) { return response; }
         let parts: Vec<_> = request.split_whitespace().collect();
         let method = parts[0];
-        let path: Vec<_> = parts[1].trim_start_matches('/').split('/').collect();
+        let path: Vec<_> = parts[1].split('?').next().unwrap().trim_start_matches('/').split('/').collect();
         let registry = FileRegistry::new(root, Some("src_test"));
         let value = match path.as_slice() {
             ["pages", id, "assets"] => {
@@ -286,7 +324,8 @@ pub(crate) mod tests {
                     .flatten()
                     .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
                     .collect();
-                json!({ "assets": names })
+                let versions: Vec<_> = names.iter().map(|name| json!({ "name": name, "version": file_stamp(&page_asset_dir(root,id).join(name)).unwrap().unwrap() })).collect();
+                json!({ "assets": names, "versions": versions })
             }
             ["pages", id, "assets", name] => {
                 let file = page_asset_dir(root, id).join(name);
@@ -310,6 +349,9 @@ pub(crate) mod tests {
                     })
                     .collect();
                 json!({ "files": files })
+            }
+            ["files", id] if method == "GET" => {
+                return match registry.get(id).unwrap() { Some(meta) => (200, serde_json::to_vec(&meta).unwrap()), None => (404,b"{}".to_vec()) };
             }
             ["files", _id] if method == "PUT" => {
                 let meta: Value = serde_json::from_slice(body).unwrap();

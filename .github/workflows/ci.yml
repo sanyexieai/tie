@@ -44,9 +44,6 @@ jobs:
       - name: Build frontend for E2E
         run: npm run build
 
-      - name: Run backend API tests
-        run: npm run test:backend
-
       - name: Test release metadata
         run: python3 scripts/merge-updater-manifest.py --self-test
 
@@ -83,6 +80,11 @@ jobs:
           cargo test -p tie-local -p tie-cli --manifest-path src-tauri/Cargo.toml
           npm run tie:prepare
           test -x src-tauri/target/release/tie-cli
+
+      - name: Run backend API tests
+        run: npm run test:backend
+        env:
+          TIE_TEST_CLI: ${{ github.workspace }}/src-tauri/target/release/tie-cli
 
       - name: Run E2E smoke tests
         run: npm run test:e2e

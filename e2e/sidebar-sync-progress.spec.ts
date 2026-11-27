@@ -7,6 +7,7 @@ declare global {
     __tieSyncTest: {
       calls: number
       resolveCalls: number
+      saveCalls: number
       failResolution: boolean
       listenerCount: () => number
       progress: (stage: SyncStage, completed: number, total: number, sourceId?: string) => void
@@ -46,6 +47,7 @@ async function openDesktopWorkspace(page: Page) {
     const control: Window['__tieSyncTest'] = {
       calls: 0,
       resolveCalls: 0,
+      saveCalls: 0,
       failResolution: false,
       listenerCount: () => [...listeners.values()].filter((event) => event === 'backend-sync-progress').length,
       progress(stage, completed, total, id = sourceId) {
@@ -82,7 +84,7 @@ async function openDesktopWorkspace(page: Page) {
           if (command === 'plugin:updater|check') return null
           if (command === 'load_backend_session') return { endpoint, accessToken: 'fixture-access', refreshToken: '', accessExpiresAt: '', userId: user.id, email: user.email, name: user.name }
           if (command === 'load_workspace') return snapshot
-          if (command === 'save_page') { snapshot.pages[0] = args.page as typeof snapshot.pages[number]; return args.page }
+          if (command === 'save_page') { control.saveCalls += 1; snapshot.pages[0] = args.page as typeof snapshot.pages[number]; return args.page }
           if (command === 'resolve_backend_sync_conflict') {
             control.resolveCalls += 1
             if (control.failResolution) throw new Error('503 fixture service unavailable')
@@ -139,6 +141,34 @@ test('shows real sync counts quietly in the existing settings row and restores i
   expect((await settings.boundingBox())!.height).toBe(initialHeight)
   await settings.click()
   await expect(page.getByRole('dialog', { name: '设置', exact: true })).toBeVisible()
+})
+
+test('keeps an editor draft typed during a native pull and requires explicit conflict resolution before saving it', async ({ page }) => {
+  await openDesktopWorkspace(page)
+  const editor = page.locator('main.editor-pane')
+  await editor.getByRole('button', { name: /源码/ }).click()
+  const input = editor.getByRole('textbox', { name: 'Markdown 源码', exact: true })
+  await page.clock.pauseAt(new Date())
+  const draft = 'fixture-editor-draft-kept-during-native-pull'
+  await input.fill(draft)
+  await page.evaluate(() => {
+    const store = (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace')
+    window.__tieSyncTest.finish({ pushed: 0, pulled: 1, conflicts: [], changed: true,
+      changedPages: [{ ...store.activePage, markdown: '# 测试页面\n\n远端刚刚修改的版本', updatedAt: '2026-11-27T00:00:00Z' }] })
+  })
+  await expect(input).toHaveValue(draft)
+  await expect(editor.getByRole('button', { name: '查看差异', exact: true })).toBeVisible()
+  const result = await page.evaluate(async () => {
+    const store = (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('workspace')
+    let message = ''
+    try { await store.persist({ ...store.activePage, markdown: 'attempted automatic local overwrite' }) }
+    catch (error) { message = String(error) }
+    return { message, conflict: store.syncConflicts.has('pg_progress'), writes: window.__tieSyncTest.saveCalls }
+  })
+  expect(result.message).toContain('其他设备更新')
+  expect(result.conflict).toBe(true)
+  expect(result.writes).toBe(0)
+  await expect(input).toHaveValue(draft)
 })
 
 test('clears progress on failure while keeping the login state and settings entry', async ({ page }) => {

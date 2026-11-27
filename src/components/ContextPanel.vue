@@ -14,6 +14,7 @@ import {
   probeRelativePath,
   resolveLinkForm,
   resourceAvailability,
+  resolveRegisteredFile,
   type WorkspaceFileResource,
 } from '@/services/files'
 import { buildPathUrl, classifyLocalLink, fileRootForSource, sourceById, type LinkContext } from '@/services/link-runtime'
@@ -26,6 +27,8 @@ import { CHANGE_FIELD_LABEL, CHANGE_TYPE_LABEL, resolvePageOpinion, reviewOrigin
 import { isBackendSourceId } from '@/services/backend'
 import { protectedPageAuthorization, protectedPagesRevision, protectedPageView } from '@/services/protected-pages'
 import { isEncryptedMarkdown } from '@/services/encrypted-markdown'
+import { fileIdFromFilesRelative } from '@/services/storage/blobs-path'
+import type { SyncedResources } from '@/services/backend-sync'
 
 const store = useWorkspaceStore()
 const activePageView = computed(() => store.activePage ? protectedPageView(store.activePage) : null)
@@ -327,6 +330,24 @@ function onReviewsChanged(event: Event) {
   if (detail?.sourceId === store.activePage?.storageSourceId && detail.pageId === store.activePage?.id && !reviewBusy.value) void loadAuditEvents()
 }
 
+async function onResourcesSynced(event: Event) {
+  const changes = (event as CustomEvent<SyncedResources>).detail
+  const page = activePageView.value
+  if (!changes?.fileIds.length || tab.value !== 'links' || !page) return
+  const source = sourceById(store.allSources, changes.sourceId)
+  if (!source) return
+  const ids = collectFileRefsFromMarkdown(page.markdown)
+    .filter((ref) => (ref.sourceId || page.storageSourceId) === changes.sourceId && changes.fileIds.includes(ref.fileId)).map((ref) => ref.fileId)
+  const paths = collectPathRefsFromMarkdown(page.markdown)
+    .filter((ref) => (ref.sourceId || page.storageSourceId) === changes.sourceId && changes.fileIds.includes(fileIdFromFilesRelative(ref.relativePath) ?? ''))
+  if (!ids.length && !paths.length) return
+  const request = ++fileResourcesRequest
+  const loaded = await Promise.all([...new Set(ids)].map((id) => resolveRegisteredFile(source, id).catch(() => null)))
+  await Promise.all(paths.map((ref) => probeRelativePath(source, ref.relativePath).catch(() => null)))
+  if (request !== fileResourcesRequest || activePageView.value?.id !== page.id || tab.value !== 'links') return
+  fileResources.value = [...fileResources.value.filter((item) => !ids.includes(item.id)), ...loaded.filter((item): item is WorkspaceFileResource => Boolean(item))]
+}
+
 watch(tab, (value) => {
   try { localStorage.setItem(CONTEXT_TAB_KEY, value) } catch { /* 写不进去时只保留本次 */ }
   setPheromonePanelOpen(value === 'audit')
@@ -339,12 +360,14 @@ watch(
 watch(() => pheromoneState.openRequest, () => { tab.value = 'audit' })
 onMounted(() => {
   window.addEventListener('tie:reviews-changed', onReviewsChanged)
+  window.addEventListener('tie:resources-synced', onResourcesSynced)
   if (pheromoneState.draft || pheromoneState.openRequest > 0) tab.value = 'audit'
 })
 onBeforeUnmount(() => {
   fileResourcesRequest += 1
   reviewLoad += 1
   window.removeEventListener('tie:reviews-changed', onReviewsChanged)
+  window.removeEventListener('tie:resources-synced', onResourcesSynced)
   setPheromonePanelOpen(false)
 })
 </script>

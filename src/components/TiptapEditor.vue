@@ -27,7 +27,9 @@ import { focusPheromone, pheromoneRevision, pheromoneState, pheromonesFor, start
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { canStorePageAssets, embedImageFile, inlineImageSrcToFile, isImageFile, normalizeImageFile, parseAssetUrl, resolveAssetDisplayUrl, resolvePastedImageFromEvent, shouldHandleImagePaste, uploadPastedImage } from '@/services/attachments'
 import { isProtectedImageDataUrl, protectedImageDataUrl } from '@/services/protected-images'
-import { cachedFileResource, canRebindRegisteredFile, listRegisteredFiles, probeRelativePath } from '@/services/files'
+import { cachedFileResource, canRebindRegisteredFile, listRegisteredFiles, probeRelativePath, resolveRegisteredFile } from '@/services/files'
+import { fileIdFromFilesRelative } from '@/services/storage/blobs-path'
+import type { SyncedResources } from '@/services/backend-sync'
 import { pickLinkedResource, linkableSources, rebindLinkedResource, sourceChipLabel } from '@/services/link-actions'
 import {
   applyLocalLinkClasses,
@@ -49,6 +51,7 @@ import {
 const props = defineProps<{ modelValue: string; pages: Page[]; sources: StorageSource[]; pageId: string; spellcheck: boolean; createLinkedPage?: (title: string) => Promise<Page>; expandToChild?: (title: string) => Promise<Page>; enablePheromone?: boolean; backgroundStarted?: boolean; privateDocument?: boolean; protectedPageActions?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [markdown: string]; navigate: [pageId: string]; 'create-child': [] }>()
 const lowlight = createLowlight(common)
+const assetRefreshers = new Map<HTMLImageElement, () => void>()
 const pheromoneEnabled = computed(() => Boolean(props.enablePheromone && (!props.privateDocument || props.protectedPageActions)))
 const showPagePicker = ref(false)
 const pagePickerMode = ref<'slash' | 'wiki'>('slash')
@@ -295,10 +298,10 @@ function createAssetImageExtension() {
           viewEditor.view.focus()
         }
 
-        const applySrc = (nextSrc: string) => {
+        const applySrc = (nextSrc: string, refresh = false) => {
           currentSrc = nextSrc
           // 同一 src 已显示或正在加载时不要重置成「加载中」（NodeView update 很频繁）。
-          if (nextSrc && nextSrc === appliedSrc) return
+          if (!refresh && nextSrc && nextSrc === appliedSrc) return
           appliedSrc = nextSrc
           const token = ++loadToken
           if (displayObjectUrl) {
@@ -315,7 +318,10 @@ function createAssetImageExtension() {
             wrap.classList.add('is-broken')
             void resolveAssetDisplayUrl(props.pages, nextSrc, { fallbackPage: activePage() })
               .then((url) => {
-                if (token !== loadToken || img.dataset.tieAsset !== nextSrc) return
+                if (token !== loadToken || img.dataset.tieAsset !== nextSrc) {
+                  if (url.startsWith('blob:')) URL.revokeObjectURL(url)
+                  return
+                }
                 if (!url.startsWith('blob:')) {
                   const name = parseAssetUrl(nextSrc)?.assetName ?? nextSrc
                   setBroken(nextSrc, `缺少图片 ${name}`)
@@ -362,6 +368,7 @@ function createAssetImageExtension() {
           demoteToEditableText()
         })
 
+        assetRefreshers.set(img, () => applySrc(currentSrc, true))
         applySrc(String(currentNode.attrs.src ?? ''))
         wrap.appendChild(img)
         wrap.appendChild(broken)
@@ -384,6 +391,7 @@ function createAssetImageExtension() {
               || broken.contains(mutation.target as Node)
           },
           destroy: () => {
+            assetRefreshers.delete(img)
             loadToken += 1
             if (displayObjectUrl) URL.revokeObjectURL(displayObjectUrl)
           },
@@ -1345,18 +1353,40 @@ watch(() => pheromoneRevision(props.pageId, props.pages.find((page) => page.id =
 })
 watch(() => props.sources.map((source) => `${source.id}:${source.path ?? ''}`).join('|'), () => scheduleDecorateFileLinks())
 
-function refreshAssetImages() {
+function refreshAssetImages(changes?: SyncedResources) {
   if (props.privateDocument) return
-  const root = editor.value?.view.dom
-  if (!root) return
-  root.querySelectorAll<HTMLImageElement>('img[data-tie-asset]').forEach((img) => {
-    const asset = img.dataset.tieAsset
-    if (!asset) return
-    void resolveAssetDisplayUrl(props.pages, asset).then((url) => {
-      if (img.dataset.tieAsset !== asset) return
-      if (img.src !== url) img.src = url
-    })
-  })
+  for (const [img, refresh] of assetRefreshers) {
+    const asset = parseAssetUrl(img.dataset.tieAsset ?? '')
+    if (!asset) continue
+    if (changes) {
+      const page = props.pages.find((item) => item.id === asset.pageId)
+      if (!changes.assetPageIds.includes(asset.pageId) || !page
+        || ![page.storageSourceId, ...(page.storageSourceIds ?? [])].includes(changes.sourceId)) continue
+    } else if (img.getAttribute('src')) continue
+    refresh()
+  }
+}
+
+async function onResourcesSynced(event: Event) {
+  if (props.privateDocument) return
+  const changes = (event as CustomEvent<SyncedResources>).detail
+  if (!changes) return
+  refreshAssetImages(changes)
+  const source = sourceById(props.sources, changes.sourceId)
+  const dom = editor.value?.view.dom
+  if (!source || !dom || !changes.fileIds.length) return
+  const ids = new Set<string>()
+  const relatives: string[] = []
+  for (const anchor of dom.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+    const href = anchor.getAttribute('href') ?? ''
+    const file = parseFileUrl(href)
+    if (file && (file.sourceId || pageSourceId()) === changes.sourceId && changes.fileIds.includes(file.fileId)) ids.add(file.fileId)
+    const path = parsePathUrl(href)
+    if (path && (path.sourceId || pageSourceId()) === changes.sourceId && changes.fileIds.includes(fileIdFromFilesRelative(path.relativePath) ?? '')) relatives.push(path.relativePath)
+  }
+  await Promise.all([...ids].map((id) => resolveRegisteredFile(source, id).catch(() => null)))
+  await Promise.all(relatives.map((path) => probeRelativePath(source, path).catch(() => null)))
+  if (!editor.value?.isDestroyed) decorateFileLinks()
 }
 
 function insertPageLink(page: Page) {
@@ -1672,9 +1702,13 @@ function onWindowPointerDown(event: PointerEvent) {
   contextMenu.value = null
 }
 
-onMounted(() => window.addEventListener('pointerdown', onWindowPointerDown, true))
+onMounted(() => {
+  window.addEventListener('pointerdown', onWindowPointerDown, true)
+  window.addEventListener('tie:resources-synced', onResourcesSynced)
+})
 onBeforeUnmount(() => {
   window.removeEventListener('pointerdown', onWindowPointerDown, true)
+  window.removeEventListener('tie:resources-synced', onResourcesSynced)
   if (decorateFilesTimer) clearTimeout(decorateFilesTimer)
   editor.value?.destroy()
 })

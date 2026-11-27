@@ -109,6 +109,24 @@ describe('workspace live', { concurrency: 1 }, () => {
     assert.equal(message.workspaceId, workspaceId)
     socket.close()
   })
+
+  it('ignores sync bookkeeping and history writes but still notifies discussion changes', async () => {
+    const { socket, messages, ready } = listen()
+    await ready
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    messages.length = 0
+    const root = path.join(dataDir, 'workspaces', workspaceId)
+    fs.mkdirSync(path.join(root, '.tie', 'history', 'pg_live_api'), { recursive: true })
+    fs.writeFileSync(path.join(root, '.tie', 'history', 'pg_live_api', 'old.md'), 'past content')
+    fs.writeFileSync(path.join(root, '.tie', 'sync-cursor.json'), '{}')
+    fs.writeFileSync(path.join(root, 'temporary.tie'), 'generated solution entry')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    assert.equal(messages.filter((item) => item.type === 'workspace').length, 0)
+    fs.mkdirSync(path.join(root, '.tie', 'reviews'), { recursive: true })
+    fs.writeFileSync(path.join(root, '.tie', 'reviews', 'pg_live_api.json'), '{"entries":[]}')
+    assert.equal((await waitFor(messages, (item) => item.type === 'workspace')).workspaceId, workspaceId)
+    socket.close()
+  })
 })
 
 function waitFor(messages, match) {

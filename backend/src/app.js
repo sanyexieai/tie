@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url'
 import { assertResourceId } from './resource-id.js'
 import { mountVault } from './vault-routes.js'
 import { readPageProtection, replacePageProtection } from './page-protection.js'
+import { workspaceAssetVersions, workspaceSyncManifest } from './sync-manifest.js'
 
 export function createApp(options = {}) {
   const jwtSecret = resolveJwtSecret(options)
@@ -289,6 +290,19 @@ app.post('/api/v1/providers', auth, (_req, res) => {
   res.status(410).json({ message: '对象存储已停用，工作区只保存在服务器磁盘' })
 })
 
+app.get('/api/v1/workspaces/:workspaceId/sync/manifest', auth, (req, res) => {
+  const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
+  if (!workspace) return res.status(404).json({ message: '工作区不存在' })
+  const revision = req.query.revision
+  if (revision !== undefined && (typeof revision !== 'string' || revision.length > 256)) return res.status(400).json({ message: '同步版本无效' })
+  res.set('Cache-Control', 'no-store')
+  try {
+    const manifest = workspaceSyncManifest(workspace.id)
+    if (revision === manifest.revision) return res.status(304).end()
+    res.json(manifest)
+  } catch (error) { handleError(res, error) }
+})
+
 app.get('/api/v1/workspaces/:workspaceId/pages', auth, async (req, res) => {
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
@@ -416,7 +430,8 @@ app.get('/api/v1/workspaces/:workspaceId/pages/:pageId/assets', auth, async (req
   const workspace = findWorkspace(req.params.workspaceId, req.user.sub)
   if (!workspace) return res.status(404).json({ message: '工作区不存在' })
   try {
-    res.json({ assets: await workspaceStorage.listAssets(workspace, req.params.pageId) })
+    const assets = await workspaceStorage.listAssets(workspace, req.params.pageId)
+    res.json({ assets, ...(req.query.versions === '1' ? { versions: workspaceAssetVersions(workspace.id, req.params.pageId, assets) } : {}) })
   } catch (error) { handleError(res, error) }
 })
 

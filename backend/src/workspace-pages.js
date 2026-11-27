@@ -9,6 +9,7 @@ import { deleteWorkspacePageAssets } from './workspace-assets.js'
 import { recordPageChange } from './reviews.js'
 
 const MAX_REVISIONS = 80
+const modernPageFiles = new Map()
 
 function safePageId(pageId) {
   return typeof pageId === 'string'
@@ -69,6 +70,25 @@ function readMetaByFile(workspaceId) {
     if (meta && !byFile.has(meta.file)) byFile.set(meta.file, meta)
   }
   return byFile
+}
+
+export function listWorkspacePageFiles(workspaceId) {
+  migrateWorkspacePages(workspaceId)
+  const entries = []
+  const dir = path.join(store.workspaceDir(workspaceId), '.tie', 'meta')
+  if (!fs.existsSync(dir)) return entries
+  const seenFiles = new Set()
+  const seenIds = new Set()
+  for (const name of fs.readdirSync(dir)) {
+    const meta = readMeta(workspaceId, name)
+    if (!meta || seenFiles.has(meta.file) || seenIds.has(meta.id)) continue
+    const filePath = resolveWorkspaceFile(workspaceId, meta.file)
+    if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) continue
+    seenFiles.add(meta.file)
+    seenIds.add(meta.id)
+    entries.push({ meta, filePath, metaPath: path.join(dir, name) })
+  }
+  return entries
 }
 
 function resolveWorkspaceFile(workspaceId, relative) {
@@ -136,16 +156,15 @@ function locatePageFile(workspaceId, pageId) {
   if (!fs.existsSync(dir)) return null
   const metaByFile = readMetaByFile(workspaceId)
   for (const filePath of listMarkdownFiles(dir)) {
-    const found = readFilePage(workspaceId, filePath, metaByFile)
-    if (found?.page.id === pageId) return filePath
+    const relative = relativePagePath(workspaceId, filePath)
+    if (metaByFile.get(relative)?.id === pageId) return filePath
   }
   return null
 }
 
-function allocatePageFile(workspaceId, pageId, title) {
+function allocatePageFile(workspaceId, pageId, title, current) {
   const dir = store.workspacePagesDir(workspaceId)
   fs.mkdirSync(dir, { recursive: true })
-  const current = locatePageFile(workspaceId, pageId)
   const stem = filenameStem(title, '无标题')
   for (let n = 0; n < 10_000; n += 1) {
     const name = n === 0 ? `${stem}.md` : `${stem}-${n + 1}.md`
@@ -193,19 +212,24 @@ function readAllPages(workspaceId) {
   return pages
 }
 
-function refreshTieFiles(workspaceId) {
+function refreshTieFiles(workspaceId, knownPages) {
+  const root = store.workspaceDir(workspaceId)
+  const pages = knownPages ?? [...readMetaByFile(workspaceId).values()].filter((meta) => {
+    const filePath = resolveWorkspaceFile(workspaceId, meta.file)
+    return filePath && fs.existsSync(filePath)
+  })
   syncRootTieFiles(
-    store.workspaceDir(workspaceId),
+    root,
     sourceIdFor(workspaceId),
-    readAllPages(workspaceId).map((item) => item.page),
+    pages,
     workspaceLabel(workspaceId),
   )
 }
 
-function writeStoredPage(workspaceId, page) {
+function writeStoredPage(workspaceId, page, previousPath) {
   const next = repairPage({ ...page, updatedAt: page.updatedAt || new Date().toISOString() })
-  const filePath = allocatePageFile(workspaceId, next.id, next.title)
-  const previous = locatePageFile(workspaceId, next.id)
+  const previous = previousPath ?? locatePageFile(workspaceId, next.id)
+  const filePath = allocatePageFile(workspaceId, next.id, next.title, previous)
   fs.writeFileSync(filePath, next.markdown ?? '')
   writeMeta(workspaceId, next, relativePagePath(workspaceId, filePath))
   if (previous && path.resolve(previous) !== path.resolve(filePath) && fs.existsSync(previous)) {
@@ -216,9 +240,33 @@ function writeStoredPage(workspaceId, page) {
 
 /** 把旧的 pages/<id>.md 头信息文件改成和本地一样的标题文件名加 .tie/meta。 */
 export function migrateWorkspacePages(workspaceId) {
-  const legacy = readAllPages(workspaceId).filter((item) => item.legacy)
+  const root = store.workspaceDir(workspaceId)
+  const modern = modernPageFiles.get(root) || new Map()
+  modernPageFiles.set(root, modern)
+  const files = listMarkdownFiles(store.workspacePagesDir(workspaceId))
+  const present = new Set(files)
+  for (const filePath of modern.keys()) if (!present.has(filePath)) modern.delete(filePath)
+  const legacy = []
+  for (const filePath of files) {
+    const stat = fs.statSync(filePath, { bigint: true })
+    const stamp = `${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.ino}`
+    if (modern.get(filePath) === stamp) continue
+    const descriptor = fs.openSync(filePath, 'r')
+    const prefix = Buffer.alloc(8)
+    let length
+    try { length = fs.readSync(descriptor, prefix, 0, prefix.length, 0) }
+    finally { fs.closeSync(descriptor) }
+    if (/^(?:\uFEFF)?---\r?\n/.test(prefix.subarray(0, length).toString('utf8'))) {
+      const content = fs.readFileSync(filePath, 'utf8')
+      if (isTieDocument(content)) {
+        legacy.push({ page: repairPage(parsePage(content)), filePath })
+        continue
+      }
+    }
+    modern.set(filePath, stamp)
+  }
   if (!legacy.length) return
-  for (const item of legacy) writeStoredPage(workspaceId, item.page)
+  for (const item of legacy) writeStoredPage(workspaceId, item.page, item.filePath)
   refreshTieFiles(workspaceId)
 }
 
@@ -228,25 +276,34 @@ function withSource(page, workspaceId, sourceId) {
 
 export function listWorkspacePages(workspaceId, sourceId) {
   migrateWorkspacePages(workspaceId)
-  refreshTieFiles(workspaceId)
-  return readAllPages(workspaceId).map((item) => withSource(item.page, workspaceId, sourceId))
+  const pages = readAllPages(workspaceId).map((item) => withSource(item.page, workspaceId, sourceId))
+  refreshTieFiles(workspaceId, pages)
+  return pages
 }
 
 export function getWorkspacePage(workspaceId, pageId, sourceId) {
   migrateWorkspacePages(workspaceId)
   const filePath = locatePageFile(workspaceId, pageId)
-  if (!filePath) throw new Error('页面不存在')
-  const found = readFilePage(workspaceId, filePath)
-  if (!found) throw new Error('页面不存在')
+  const found = filePath ? readFilePage(workspaceId, filePath) : null
+  if (!found) {
+    const error = new Error('页面不存在')
+    error.status = 404
+    throw error
+  }
   return withSource(found.page, workspaceId, sourceId)
 }
 
 export function saveWorkspacePage(workspaceId, page, expectedUpdatedAt, context = {}) {
   migrateWorkspacePages(workspaceId)
   const currentPath = locatePageFile(workspaceId, page.id)
+  const current = currentPath ? readFilePage(workspaceId, currentPath) : null
+  if (expectedUpdatedAt && (!current || current.page.updatedAt !== expectedUpdatedAt)) {
+    const error = new Error('页面已在其他设备更新或删除，请重新载入后再保存')
+    error.status = 409
+    throw error
+  }
   let previous = null
   if (currentPath) {
-    const current = readFilePage(workspaceId, currentPath)
     previous = current?.page ?? null
     if (previous && !isEncryptedMarkdown(previous.markdown) && isEncryptedMarkdown(page.markdown ?? '')) {
       const error = new Error('页面保护模式已改变，请通过页面保护转换同时处理历史、讨论和附件')
@@ -260,11 +317,6 @@ export function saveWorkspacePage(workspaceId, page, expectedUpdatedAt, context 
         error.status = 409
         throw error
       }
-    }
-    if (current && expectedUpdatedAt && current.page.updatedAt !== expectedUpdatedAt) {
-      const error = new Error('页面已在其他设备更新，请重新载入后再保存')
-      error.status = 409
-      throw error
     }
     if (current && pageHasChanged(current.page, page)) {
       archiveWorkspaceRevision(workspaceId, current.page)

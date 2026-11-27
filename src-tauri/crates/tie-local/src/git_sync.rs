@@ -307,7 +307,7 @@ fn ensure_sync_gitignore(tie: &Path) -> Result<(), String> {
         String::new()
     };
     let mut changed = false;
-    for line in ["sync.json", "sync-status.json", "sync-cursor.json", "sync.lock", "page-locks/"] {
+    for line in ["sync.json", "sync-status.json", "sync-cursor.json", "sync-cursor.json.tmp", "sync-index.json", "sync-index.json.tmp", "sync.lock", "backend-sync.lock", "page-locks/"] {
         if !text.lines().any(|existing| existing.trim() == line) {
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');

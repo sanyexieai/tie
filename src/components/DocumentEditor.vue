@@ -866,7 +866,7 @@ function saveWhenHidden() {
 
 let unregisterEditorSave: (() => void) | undefined
 onMounted(() => {
-  unregisterEditorSave = store.registerEditorSaveHandler(async () => !hasUnsavedChanges.value || await saveNow())
+  unregisterEditorSave = store.registerEditorSaveHandler(async () => !hasUnsavedChanges.value || await saveNow(), () => hasUnsavedChanges.value)
   window.addEventListener('keydown', onShortcut)
   document.addEventListener('visibilitychange', saveWhenHidden)
   window.addEventListener('tie:find-in-page', onWorkspaceCommand)

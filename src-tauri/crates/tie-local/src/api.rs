@@ -990,14 +990,12 @@ impl LocalWorkspace {
 
     /// Permanently remove a page file, history, and assets (must already be soft-deleted unless `force`).
     pub fn purge_page(&self, id_or_title: &str, force: bool) -> Result<PageSummary, String> {
-        let page = self
-            .load_all(true)?
-            .into_iter()
-            .find(|page| {
-                page.id == id_or_title
-                    || page.title.eq_ignore_ascii_case(id_or_title.trim())
-            })
-            .ok_or_else(|| format!("页面不存在：{id_or_title}"))?;
+        let page = match self.get_by_id(id_or_title)? {
+            Some(page) => page,
+            None => self.load_all(true)?.into_iter()
+                .find(|page| page.title.eq_ignore_ascii_case(id_or_title.trim()))
+                .ok_or_else(|| format!("页面不存在：{id_or_title}"))?,
+        };
         if page.deleted_at.is_none() && !force {
             return Err("页面未在回收站；先 `tie delete` 或使用 --force".to_owned());
         }

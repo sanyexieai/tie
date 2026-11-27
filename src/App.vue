@@ -411,7 +411,7 @@ watch(
   ([identity, token], _, onCleanup) => {
     if (!identity || !token) return
     onCleanup(startAutoSync(
-      () => store.syncBackendNow(),
+      (trigger) => store.syncBackendNow({ quiet: trigger === 'interval' }),
       (error) => { backend.error = error instanceof Error ? error.message : '自动同步失败，将自动重试' },
     ))
     onCleanup(startBackendLive({

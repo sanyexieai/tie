@@ -333,7 +333,10 @@ fn sync_after_write(ws: &LocalWorkspace) -> Value {
         return json!({ "state": "skipped", "reason": "没有绑定服务器，已保存到本地" });
     }
     match tie_cli::backend_sync::sync_workspace(ws) {
-        Ok(report) => {
+        Ok(mut report) => {
+            // GUI refresh payloads do not belong in an Agent's write receipt.
+            report.changed_pages.clear();
+            report.local_versions = None;
             json!({ "state": if report.conflicts.is_empty() { "synced" } else { "pending" }, "report": report })
         }
         Err(_) => {

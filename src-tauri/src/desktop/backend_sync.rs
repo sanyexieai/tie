@@ -1,4 +1,5 @@
 use std::time::{Duration, Instant};
+use std::collections::{BTreeMap, HashSet};
 use tauri::{AppHandle, Emitter};
 use tie_cli::backend_sync::{self, BackendSyncReport};
 
@@ -25,11 +26,12 @@ pub(crate) async fn sync_backend_workspace(
     source_id: String,
     url: String,
     workspace_id: String,
+    view_page_versions: Option<BTreeMap<String, String>>,
 ) -> Result<BackendSyncReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let ws = open_workspace(&app, &source_id)?;
         let mut last_emit = None;
-        backend_sync::align_with_progress(&ws, &url, &workspace_id, |progress| {
+        let mut report = backend_sync::align_with_progress(&ws, &url, &workspace_id, |progress| {
             let emit = progress.completed == 0 || progress.completed == progress.total
                 || last_emit.is_none_or(|(stage, time): (_, Instant)| {
                     stage != progress.stage || time.elapsed() >= Duration::from_millis(100)
@@ -43,7 +45,19 @@ pub(crate) async fn sync_backend_workspace(
                 }));
                 last_emit = Some((progress.stage, Instant::now()));
             }
-        })
+        })?;
+        if let (Some(view), Some(versions)) = (view_page_versions, report.local_versions.as_ref()) {
+            let mut included = report.changed_pages.iter().map(|page| page.id.clone()).collect::<HashSet<_>>();
+            for (id, version) in &versions.pages {
+                if view.get(id) != Some(version) && included.insert(id.clone()) {
+                    if let Some(page) = ws.get_by_id(id)? { report.changed_pages.push(page); }
+                }
+            }
+            for id in view.keys().filter(|id| !versions.pages.contains_key(*id)) {
+                if !report.removed_page_ids.contains(id) { report.removed_page_ids.push(id.clone()); }
+            }
+        }
+        Ok(report)
     })
     .await
     .map_err(|error| error.to_string())?

@@ -28,12 +28,23 @@ export function watchWorkspace(workspaceId) {
   const dir = store.workspaceDir(workspaceId)
   fs.mkdirSync(dir, { recursive: true })
   try {
-    const watcher = fs.watch(dir, { recursive: true }, () => notifyWorkspace(workspaceId))
+    const watcher = fs.watch(dir, { recursive: true }, (_event, name) => {
+      const file = String(name || '').replaceAll('\\', '/')
+      if (!file || relevantWorkspaceFile(file)) notifyWorkspace(workspaceId)
+    })
     watcher.on('error', () => {})
     watchers.set(workspaceId, watcher)
   } catch {
     // 目录暂时不可监听时，保存接口仍会通知。
   }
+}
+
+function relevantWorkspaceFile(file) {
+  return /^pages\/.+\.md$/.test(file)
+    || /^\.tie\/meta\/[A-Za-z0-9_-]+$/.test(file)
+    || /^\.tie\/reviews\/[A-Za-z0-9_-]+\.json$/.test(file)
+    || /^\.tie\/assets\/[A-Za-z0-9_-]+(?:\/[^/]+)?$/.test(file)
+    || /^\.tie\/files\/(?:index\.json|file_[A-Za-z0-9_-]+(?:\/[^/]+)?)$/.test(file)
 }
 
 function watchAllWorkspaces() {

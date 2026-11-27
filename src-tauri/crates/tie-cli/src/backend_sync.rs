@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::Write,
     path::Path,
@@ -12,6 +12,8 @@ use std::{
     time::Duration,
 };
 use tie_local::{save_page_to_root, LocalWorkspace, Page};
+
+pub(crate) mod incremental;
 
 const SYNC_FILE: &str = ".tie/sync.json";
 const STATUS_FILE: &str = ".tie/sync-status.json";
@@ -30,9 +32,26 @@ pub struct BackendSyncReport {
     pub conflicts: Vec<String>,
     pub protection_conflicts: Vec<PageProtectionConflict>,
     pub user_email: String,
+    pub changed: bool,
+    pub changed_pages: Vec<Page>,
+    pub removed_page_ids: Vec<String>,
+    pub review_page_ids: Vec<String>,
+    pub asset_page_ids: Vec<String>,
+    pub file_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_versions: Option<LocalVersions>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalVersions {
+    pub pages: BTreeMap<String, String>,
+    pub reviews: BTreeMap<String, String>,
+    pub assets: BTreeMap<String, String>,
+    pub files: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageProtectionConflict {
     pub page_id: String,
@@ -215,6 +234,13 @@ fn sync_workspace_with_progress(
                 conflicts: Vec::new(),
                 protection_conflicts: Vec::new(),
                 user_email: session.email.clone(),
+                changed: false,
+                changed_pages: Vec::new(),
+                removed_page_ids: Vec::new(),
+                review_page_ids: Vec::new(),
+                asset_page_ids: Vec::new(),
+                file_ids: Vec::new(),
+                local_versions: None,
             },
         ),
     }
@@ -263,167 +289,7 @@ fn sync_with_progress(
     actor: &str,
     observe: &mut dyn FnMut(BackendSyncProgress),
 ) -> Result<BackendSyncReport, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .no_proxy()
-        .build()
-        .map_err(|error| error.to_string())?;
-    let remote_pages = list_remote(&client, target, token)?;
-    let remote_review_ids = remote_pages.iter().map(|page| page.id.clone()).collect::<Vec<_>>();
-    let local_pages = ws.load_all(true)?;
-    let mut cursor = read_cursor(ws.root())?;
-    let mut remote_by_id: HashMap<String, Page> = remote_pages
-        .into_iter()
-        .map(|page| (page.id.clone(), page))
-        .collect();
-    let mut pushed = 0u32;
-    let mut pulled = 0u32;
-    let mut conflicts = Vec::new();
-    let mut protection_conflicts = Vec::new();
-    let mut protection_required = HashSet::new();
-    let pages_total = local_pages.iter().map(|page| page.id.as_str())
-        .chain(remote_by_id.keys().map(String::as_str)).collect::<HashSet<_>>().len();
-    let mut pages_completed = HashSet::new();
-    report_progress(observe, BackendSyncStage::Pages, 0, pages_total);
-
-    for local in &local_pages {
-        let remote = remote_by_id.remove(&local.id);
-        if let Some(remote) = remote.as_ref().filter(|remote| tie_local::is_encrypted_markdown(&remote.markdown) != tie_local::is_encrypted_markdown(&local.markdown)) {
-            protection_conflicts.push(PageProtectionConflict {
-                page_id: local.id.clone(),
-                local_encrypted: tie_local::is_encrypted_markdown(&local.markdown),
-                remote_encrypted: tie_local::is_encrypted_markdown(&remote.markdown),
-                local_updated_at: local.updated_at.clone(),
-                remote_updated_at: remote.updated_at.clone(),
-            });
-            protection_required.insert(local.id.clone());
-            conflicts.push(local.id.clone());
-            if pages_completed.insert(local.id.clone()) {
-                report_progress(observe, BackendSyncStage::Pages, pages_completed.len(), pages_total);
-            }
-            continue;
-        }
-        match plan(Some(local), remote.as_ref(), cursor.get(&local.id)) {
-            Action::Skip => {
-                if let Some(remote) = remote.as_ref() {
-                    cursor.insert(local.id.clone(), entry(local, remote));
-                }
-            }
-            Action::Push => {
-                match put_remote(&client, target, token, local, remote.as_ref()) {
-                Ok(saved) => {
-                    cursor.insert(local.id.clone(), entry(local, &saved));
-                    pushed += 1;
-                }
-                Err(error) if error == "conflict" => {
-                    let fresh = get_remote_page(&client, target, token, &local.id)?;
-                    note_divergence(ws.root(), actor, local, &fresh);
-                    conflicts.push(local.id.clone());
-                }
-                Err(error) => return Err(error),
-            }
-            }
-            Action::Pull => {
-                if let Some(remote) = remote {
-                    pull_page(ws, &remote, Some(local))?;
-                    cursor.insert(remote.id.clone(), entry(&remote, &remote));
-                    let _ = exchange_reviews(&client, target, token, ws.root(), &remote.id);
-                    pulled += 1;
-                }
-            }
-            Action::Conflict => {
-                if let Some(remote) = remote {
-                    note_divergence(ws.root(), actor, local, &remote);
-                    conflicts.push(local.id.clone());
-                }
-            }
-        }
-        if pages_completed.insert(local.id.clone()) {
-            report_progress(observe, BackendSyncStage::Pages, pages_completed.len(), pages_total);
-        }
-    }
-
-    let mut purged = Vec::new();
-    for remote in remote_by_id.into_values() {
-        if remote.deleted_at.is_some()
-            && cursor.get(&remote.id).is_some_and(|previous| previous.remote == remote.updated_at)
-        {
-            purged.push(remote.id.clone());
-            continue;
-        }
-        match plan(None, Some(&remote), cursor.get(&remote.id)) {
-            Action::Pull | Action::Skip => {
-                pull_page(ws, &remote, None)?;
-                cursor.insert(remote.id.clone(), entry(&remote, &remote));
-                let _ = exchange_reviews(&client, target, token, ws.root(), &remote.id);
-                pulled += 1;
-            }
-            Action::Push | Action::Conflict => {}
-        }
-        if pages_completed.insert(remote.id.clone()) {
-            report_progress(observe, BackendSyncStage::Pages, pages_completed.len(), pages_total);
-        }
-    }
-
-    if !purged.is_empty() {
-        let response = client.post(format!(
-            "{}/api/v1/workspaces/{}/pages", target.url.trim_end_matches('/'), target.workspace_id
-        )).bearer_auth(token).header("x-tie-replication", "1")
-            .header("x-tie-origin", tie_local::changes::origin_header(&tie_local::changes::current_origin())?).json(&json!({ "pageIds": purged })).send()
-            .map_err(|error| format!("永久删除尚未同步：{error}"))?;
-        if !response.status().is_success() {
-            return Err(format!("永久删除尚未同步：{}", response.status()));
-        }
-        for id in &purged {
-            cursor.remove(id);
-            if pages_completed.insert(id.clone()) {
-                report_progress(observe, BackendSyncStage::Pages, pages_completed.len(), pages_total);
-            }
-        }
-        pushed += purged.len() as u32;
-    }
-
-    crate::resources_sync::sync_resources(
-        &client,
-        &format!("{}/api/v1/workspaces/{}", target.url.trim_end_matches('/'), target.workspace_id),
-        token,
-        ws,
-        &protection_required,
-        observe,
-    )?;
-    write_cursor(ws.root(), &cursor)?;
-    let mut review_ids = review_page_ids(ws.root());
-    review_ids.extend(remote_review_ids);
-    review_ids.extend(local_pages.iter().map(|page| page.id.clone()));
-    review_ids.sort(); review_ids.dedup();
-    review_ids.retain(|id| !protection_required.contains(id));
-    report_progress(observe, BackendSyncStage::Reviews, 0, review_ids.len());
-    for (index, page_id) in review_ids.iter().enumerate() {
-        exchange_reviews(&client, target, token, ws.root(), &page_id)?;
-        report_progress(observe, BackendSyncStage::Reviews, index + 1, review_ids.len());
-    }
-    let mode = if conflicts.is_empty() { "synced" } else { "conflict" };
-    let message = if !protection_required.is_empty() {
-        let mut pages = protection_required.into_iter().collect::<Vec<_>>();
-        pages.sort();
-        format!("[PROTECTION_REQUIRED] 这些页面的本地与服务器保护模式不同，已保留两侧正文、历史、讨论和附件；请解锁并显式转换两侧后重试同步：{}", pages.join("、"))
-    } else if conflicts.is_empty() {
-        String::new()
-    } else {
-        format!("这些页面在本地和后台都改过，未覆盖：{}", conflicts.join("、"))
-    };
-    Ok(BackendSyncReport {
-        mode: mode.into(),
-        message,
-        peer: "backend".into(),
-        url: target.url.clone(),
-        workspace_id: target.workspace_id.clone(),
-        pushed,
-        pulled,
-        conflicts,
-        protection_conflicts,
-        user_email: String::new(),
-    })
+    incremental::sync(target, token, ws, actor, observe)
 }
 
 fn http_client() -> Result<reqwest::blocking::Client, String> {
@@ -709,27 +575,6 @@ fn pull_page(ws: &LocalWorkspace, remote: &Page, local: Option<&Page>) -> Result
     Ok(())
 }
 
-fn list_remote(client: &reqwest::blocking::Client, target: &BackendTarget, token: &str) -> Result<Vec<Page>, String> {
-    let url = format!(
-        "{}/api/v1/workspaces/{}/pages",
-        target.url.trim_end_matches('/'),
-        target.workspace_id
-    );
-    let response = client
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .map_err(|error| format!("无法连接后台：{error}"))?;
-    let status = response.status();
-    let text = response.text().map_err(|error| error.to_string())?;
-    if status.as_u16() == 401 {
-        return Err("登录已失效，请重新执行 tie sync login".to_owned());
-    }
-    if !status.is_success() {
-        return Err(format!("读取后台页面失败：{status} {text}"));
-    }
-    serde_json::from_str(&text).map_err(|error| format!("后台页面无法解析：{error}"))
-}
 
 fn get_remote_page(
     client: &reqwest::blocking::Client,
@@ -873,8 +718,9 @@ fn write_cursor(root: &Path, cursor: &HashMap<String, CursorEntry>) -> Result<()
     let tie = root.join(".tie");
     fs::create_dir_all(&tie).map_err(|error| error.to_string())?;
     let body = serde_json::to_string_pretty(cursor).map_err(|error| error.to_string())?;
-    fs::write(tie.join("sync-cursor.json"), format!("{body}\n")).map_err(|error| error.to_string())?;
-    Ok(())
+    let pending = tie.join("sync-cursor.json.tmp");
+    fs::write(&pending, format!("{body}\n")).map_err(|error| error.to_string())?;
+    fs::rename(pending, tie.join("sync-cursor.json")).map_err(|error| error.to_string())
 }
 
 /// Desktop and `tie sync` share this entry. An existing `.tie/sync.json` for the same
@@ -932,10 +778,9 @@ fn resolve_with(
     page_id: &str,
     keep_local: bool,
 ) -> Result<BackendSyncReport, String> {
-    let remote_pages = list_remote(client, target, token)?;
-    let local_pages = ws.load_all(true)?;
-    let local = local_pages.iter().find(|page| page.id == page_id).cloned();
-    let remote = remote_pages.into_iter().find(|page| page.id == page_id);
+    let _lock = incremental::lock_workspace(ws.root())?;
+    let local = ws.get_by_id(page_id)?;
+    let remote = incremental::remote_page(client, target, token, page_id)?;
     if let (Some(local_page), Some(remote_page)) = (local.as_ref(), remote.as_ref()) {
         if tie_local::is_encrypted_markdown(&local_page.markdown) != tie_local::is_encrypted_markdown(&remote_page.markdown) {
             return Err("[PROTECTION_REQUIRED] 本地与服务器的页面保护模式不同；请先解锁并显式对齐保护状态，再处理正文冲突".into());
@@ -980,6 +825,13 @@ fn resolve_with(
         conflicts: Vec::new(),
         protection_conflicts: Vec::new(),
         user_email: String::new(),
+        changed: true,
+        changed_pages: if keep_local { Vec::new() } else { ws.get_by_id(page_id)?.into_iter().collect() },
+        removed_page_ids: Vec::new(),
+        review_page_ids: vec![page_id.to_owned()],
+        asset_page_ids: Vec::new(),
+        file_ids: Vec::new(),
+        local_versions: None,
     })
 }
 
@@ -1075,18 +927,10 @@ pub fn add_opinion(root: &Path, page_id: &str, id: &str, actor: &str, opinion_ki
     tie_local::changes::add_signal(root, page_id, id, actor, opinion_kind, quote, body, "", None, None, None).map(|_| ())
 }
 
-fn review_page_ids(root: &Path) -> Vec<String> {
-    let dir = root.join(".tie").join("reviews");
-    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
-    entries.filter_map(|item| {
-        let path = item.ok()?.path();
-        let name = path.file_stem()?.to_str()?.to_owned();
-        if path.extension().is_some_and(|ext| ext == "json") { Some(name) } else { None }
-    }).collect()
-}
 
-fn exchange_reviews(client: &reqwest::blocking::Client, target: &BackendTarget, token: &str, root: &Path, page_id: &str) -> Result<(), String> {
-    let local = read_reviews(root, page_id);
+fn exchange_reviews(client: &reqwest::blocking::Client, target: &BackendTarget, token: &str, root: &Path, page_id: &str) -> Result<bool, String> {
+    let mut local = read_reviews(root, page_id);
+    local.entries.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
     let url = format!(
         "{}/api/v1/workspaces/{}/pages/{}/reviews",
         target.url.trim_end_matches('/'),
@@ -1097,8 +941,10 @@ fn exchange_reviews(client: &reqwest::blocking::Client, target: &BackendTarget, 
     if !response.status().is_success() {
         return Err(format!("读取修改记录失败：{}", response.status()));
     }
-    let remote: ReviewFile = response.json().map_err(|error| error.to_string())?;
-    let merged = merge_reviews(local.clone(), remote.clone());
+    let mut remote: ReviewFile = response.json().map_err(|error| error.to_string())?;
+    remote.entries.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+    let mut merged = merge_reviews(local.clone(), remote.clone());
+    merged.entries.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
     if merged != local {
         write_reviews(root, page_id, &merged)?;
     }
@@ -1107,10 +953,10 @@ fn exchange_reviews(client: &reqwest::blocking::Client, target: &BackendTarget, 
         if !put.status().is_success() {
             return Err(format!("写入修改记录失败：{}", put.status()));
         }
-        let saved: ReviewFile = put.json().unwrap_or(merged);
+        let saved: ReviewFile = put.json().unwrap_or_else(|_| merged.clone());
         write_reviews(root, page_id, &saved)?;
     }
-    Ok(())
+    Ok(merged != local || merged != remote)
 }
 
 fn append_audit(root: &Path, event: &Value) {
@@ -1226,6 +1072,7 @@ mod tests {
         let root = remote.root().to_owned();
         let server = crate::test_http::Server::start(move |request, body| {
             let request = request.replace("/api/v1/workspaces/ws_test", "");
+            if let Some(response) = incremental::fixture_response(&root, &request) { return response; }
             let parts: Vec<_> = request.split_whitespace().collect();
             let path: Vec<_> = parts[1].trim_start_matches('/').split('/').collect();
             let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
@@ -1279,7 +1126,8 @@ mod tests {
             let root = remote.root().to_owned();
             let server = crate::test_http::Server::start(move |request, body| {
                 let request = request.replace("/api/v1/workspaces/ws_test", "");
-                assert!(!request.contains("/pages/pg_protection"), "protected page operation must wait for explicit unlock: {request}");
+            if let Some(response) = incremental::fixture_response(&root, &request) { return response; }
+                assert!(!request.contains("/pages/pg_protection/assets") && !request.contains("/pages/pg_protection/reviews"), "protected resources must wait for explicit unlock: {request}");
                 if request.starts_with("GET /pages ") {
                     let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
                     (200, serde_json::to_vec(&ws.load_all(true).unwrap()).unwrap())
@@ -1331,6 +1179,7 @@ mod tests {
         let root = remote.root().to_owned();
         let server = crate::test_http::Server::start(move |request, body| {
             let request = request.replace("/api/v1/workspaces/ws_test", "");
+            if let Some(response) = incremental::fixture_response(&root, &request) { return response; }
             let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
             if request.starts_with("GET /pages ") {
                 return (200, serde_json::to_vec(&ws.load_all(true).unwrap()).unwrap());
@@ -1386,6 +1235,7 @@ mod tests {
         let root = remote.root().to_owned();
         let server = crate::test_http::Server::start(move |request, body| {
             let request = request.replace("/api/v1/workspaces/ws_test", "");
+            if let Some(response) = incremental::fixture_response(&root, &request) { return response; }
             let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
             if request.starts_with("GET /pages ") {
                 return (200, serde_json::to_vec(&ws.load_all(true).unwrap()).unwrap());
@@ -1475,6 +1325,7 @@ mod tests {
             let root = remote_ws.root().to_owned();
             let server = crate::test_http::Server::start(move |request, body| {
                 let request = request.replace("/api/v1/workspaces/ws_test", "");
+            if let Some(response) = incremental::fixture_response(&root, &request) { return response; }
                 if request.starts_with("GET /pages HTTP") {
                     let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
                     return (200, serde_json::to_vec(&ws.load_all(true).unwrap()).unwrap());
@@ -1539,6 +1390,7 @@ mod tests {
         let root = remote.root().to_owned();
         let server = crate::test_http::Server::start(move |request, body| {
             let request = request.replace("/api/v1/workspaces/ws_test", "");
+            if let Some(response) = incremental::fixture_response(&root, &request) { return response; }
             let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
             if request.starts_with("GET /pages HTTP") {
                 return (200, serde_json::to_vec(&ws.load_all(true).unwrap()).unwrap());
@@ -1605,6 +1457,7 @@ mod tests {
                 return (200, br#"[{"id":"ws_test"}]"#.to_vec());
             }
             let request = request.replace("/api/v1/workspaces/ws_test", "");
+            if let Some(response) = incremental::fixture_response(&root, &request) { return response; }
             let parts: Vec<_> = request.split_whitespace().collect();
             let path: Vec<_> = parts[1].trim_start_matches('/').split('/').collect();
             let ws = LocalWorkspace::open(&root, Some("src_test")).unwrap();
@@ -1642,7 +1495,7 @@ mod tests {
         assert_eq!((report.pushed, report.pulled), (1, 1));
         let expected = [
             (BackendSyncStage::Connecting, 3), (BackendSyncStage::Pages, 3),
-            (BackendSyncStage::Assets, 3), (BackendSyncStage::Files, 3),
+            (BackendSyncStage::Assets, 2), (BackendSyncStage::Files, 3),
             (BackendSyncStage::Reviews, 3),
         ];
         let mut stages: Vec<_> = progress.iter().map(|step| step.stage).collect();

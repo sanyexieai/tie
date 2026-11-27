@@ -2,6 +2,14 @@
 
 All notable changes to Tie are documented in this file.
 
+## [1.0.66] - 2026-11-27
+
+- 工作区同步改为增量传输：保存、服务器通知及恢复联网时，只同步变化的页面、讨论、附件和文件资源；30 秒定时检查只读取轻量版本清单，未变化返回 304，不再反复拉取全部正文。
+- 桌面和浏览器按页面及资源局部刷新，MCP/CLI 在后台完成同步后也能更新客户端；附件同名替换和单独的讨论变更无需重载页面正文。
+- 保留离线修改、尚未处理的保护状态冲突和同步途中未保存的草稿，服务器永久删除不会静默清空草稿或被延迟保存复活。
+- 增加工作区同步进程锁及原子版本索引；版本缓存只保存元数据，不携带正文或凭据，也不进入工作区打包与 Git 同步。
+- 需要客户端和服务器配套升级；首次连接建立一次版本基线，随后只传输变化内容。
+
 ## [1.0.65] - 2026-11-27
 
 - 本机普通页与服务器加密页的差异单独显示为「保护状态不同」，提供「解锁并加密本机」入口，使用服务器页面已有密码，保留本机正文、历史、讨论及附件。
@@ -299,7 +307,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.65...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.66...HEAD
+[1.0.66]: https://github.com/sanyexieai/tie/releases/tag/v1.0.66
 [1.0.65]: https://github.com/sanyexieai/tie/releases/tag/v1.0.65
 [1.0.64]: https://github.com/sanyexieai/tie/releases/tag/v1.0.64
 [1.0.63]: https://github.com/sanyexieai/tie/releases/tag/v1.0.63

@@ -1,6 +1,7 @@
 import type { Page } from '@/types'
 import { backendService, backendWorkspaceSource, type BackendProfile } from '@/services/backend'
 import { normalizePageSources } from '@/services/page-sources'
+import { rememberBrowserManifest } from '@/services/backend-sync'
 import type { WorkspaceSnapshot } from '@/types'
 
 const fallbackKey = 'tie-demo-workspace-v1'
@@ -48,7 +49,11 @@ export async function loadBackendDocumentSnapshot(profile: BackendProfile): Prom
     return { workspace: { id: 'backend-empty', name: '后台', sources: [] }, pages: [] }
   }
   const source = backendWorkspaceSource(target, profile.endpoint)
+  // Capture versions before the initial body load. A later edit is then still
+  // visible to the next incremental check, even when it overlaps this load.
+  const manifest = await backendService.syncManifest(profile, target.id)
   const pages = await backendService.listPages(profile, target.id)
+  if (manifest) rememberBrowserManifest(profile, target.id, manifest)
   return {
     workspace: { id: target.id, name: target.name, sources: [source] },
     pages: pages.map((page) => normalizePageSources({
