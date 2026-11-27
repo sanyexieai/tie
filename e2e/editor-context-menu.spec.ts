@@ -98,6 +98,15 @@ test('keyboard menus close correctly and stay inside the viewport', async ({ pag
   await expect(menu(page).getByRole('menuitem', { name: '插入', exact: true })).toBeFocused()
   await page.keyboard.press('ArrowRight')
   await expect(page.getByRole('menu', { name: '插入', exact: true })).toBeVisible()
+  const firstInsertAction = page.getByRole('menu', { name: '插入', exact: true }).getByRole('menuitem').first()
+  await expect(firstInsertAction).toBeFocused()
+  await page.locator('.tiptap').evaluate((element) => {
+    const editor = (element as HTMLElement & { editor: import('@tiptap/core').Editor }).editor
+    editor.view.dispatch(editor.state.tr.setMeta('menu-status-refresh', true))
+  })
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  await expect(menu(page).getByRole('menuitem', { name: '插入', exact: true })).toHaveAttribute('aria-expanded', 'true')
+  await expect(firstInsertAction).toBeFocused()
   await page.keyboard.press('ArrowLeft')
   await expect(page.getByRole('menu', { name: '插入', exact: true })).toBeHidden()
   await page.keyboard.press('Escape')
@@ -113,4 +122,18 @@ test('keyboard menus close correctly and stay inside the viewport', async ({ pag
   expect(box.y).toBeGreaterThanOrEqual(8)
   expect(box.x + box.width).toBeLessThanOrEqual(viewport.width - 7)
   expect(box.y + box.height).toBeLessThanOrEqual(viewport.height - 7)
+})
+
+test('closes a table submenu when an editor selection update removes its owning action', async ({ page }) => {
+  await setContent(page, '表格外的段落。\n\n| 名称 | 状态 |\n| --- | --- |\n| 第一行 | 正常 |')
+  await page.locator('.tiptap td').first().click({ button: 'right' })
+  await menu(page).getByRole('menuitem', { name: '表格', exact: true }).hover()
+  await expect(page.getByRole('menu', { name: '表格', exact: true })).toBeVisible()
+  await page.locator('.tiptap').evaluate((element) => {
+    const editor = (element as HTMLElement & { editor: import('@tiptap/core').Editor }).editor
+    editor.commands.setTextSelection(1)
+  })
+  await expect(menu(page)).toBeVisible()
+  await expect(menu(page).getByRole('menuitem', { name: '表格', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('menu', { name: '表格', exact: true })).toBeHidden()
 })

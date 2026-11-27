@@ -6,7 +6,8 @@ const props = defineProps<{ x: number; y: number; items: EditorMenuItem[]; forma
 const emit = defineEmits<{ action: [id: string]; close: [restoreFocus: boolean] }>()
 const root = ref<HTMLElement | null>(null)
 const submenu = ref<HTMLElement | null>(null)
-const openItem = ref<EditorMenuItem | null>(null)
+const openItemId = ref<string | null>(null)
+const openItem = computed(() => props.items.find((item) => item.id === openItemId.value && !item.disabled && item.children?.length) ?? null)
 const submenuTrigger = ref<HTMLButtonElement | null>(null)
 const position = ref({ left: props.x, top: props.y })
 const submenuPosition = ref({ left: 0, top: 0 })
@@ -25,13 +26,13 @@ function buttons(menu: HTMLElement | null) {
 }
 
 function closeSubmenu(restoreFocus = false) {
-  openItem.value = null
+  openItemId.value = null
   if (restoreFocus) submenuTrigger.value?.focus({ preventScroll: true })
 }
 
 async function openSubmenu(item: EditorMenuItem, trigger: HTMLButtonElement, focus = false) {
   if (!item.children?.length || item.disabled) return
-  openItem.value = item
+  openItemId.value = item.id
   submenuTrigger.value = trigger
   await nextTick()
   if (!submenu.value) return
@@ -115,8 +116,8 @@ onMounted(async () => {
   window.addEventListener('resize', onViewportChange)
   window.addEventListener('scroll', onViewportChange, true)
 })
-watch(() => [props.x, props.y, props.items], async () => {
-  closeSubmenu()
+watch(() => [props.x, props.y, props.items] as const, async ([x, y], [previousX, previousY]) => {
+  if (x !== previousX || y !== previousY || (openItemId.value && !openItem.value)) closeSubmenu()
   await nextTick()
   if (root.value) position.value = clampPosition(root.value, props.x, props.y)
 })

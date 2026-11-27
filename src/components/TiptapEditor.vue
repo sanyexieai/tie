@@ -1380,7 +1380,10 @@ const editor = useEditor({
   onTransaction: ({ transaction }) => {
     if (!sourceSession.value || applyingSource || !transaction.docChanged) return
     sourceSession.value = mapBlockSource(sourceSession.value, transaction)
-    if (sourceSession.value.conflicted) sourceError.value = '此块已更新，源码草稿仍保留。请复制草稿后取消并重新打开。'
+    if (sourceSession.value.conflicted) {
+      sourceInstant.value = false
+      sourceError.value = '此块已更新，源码草稿仍保留。请复制草稿后取消并重新打开。'
+    }
     queueMicrotask(refreshSourceView)
   },
 })
@@ -1396,6 +1399,7 @@ watch(() => props.modelValue, (markdown) => {
   if (sourceSession.value) {
     heldSourceValue = markdown
     sourceSession.value = { ...sourceSession.value, conflicted: true }
+    sourceInstant.value = false
     sourceError.value = '页面已收到其他修改，源码草稿仍保留。请复制草稿后取消并查看最新内容。'
     return
   }

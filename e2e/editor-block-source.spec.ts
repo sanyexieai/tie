@@ -275,6 +275,31 @@ test('uses opt-in live source only for paragraphs and headings and commits when 
   await expect(sourceRegion(page)).toBeHidden()
 })
 
+test('offers Cancel and keeps live-source text when another edit changes the same block', async ({ page }) => {
+  await setEditorMarkdown(page, '原来的段落。\n\n相邻段落。')
+  await page.getByRole('button', { name: '即时源码', exact: true }).click()
+  await focusRichText(page, '原来的段落。', 2)
+  const source = sourceInput(page)
+  await expect(source).toHaveValue('原来的段落。')
+  await source.fill('即时源码中需要保留的文本。')
+  await page.locator('.tiptap').evaluate((element) => {
+    const editor = (element as HTMLElement & { editor: import('@tiptap/core').Editor }).editor
+    const firstBlock = editor.state.doc.firstChild!
+    editor.view.dispatch(editor.state.tr.insertText('其他编辑更新了段落。', 1, firstBlock.nodeSize - 1))
+  })
+  await expect(sourceRegion(page).getByRole('alert')).toContainText('已更新')
+  await expect(source).toHaveValue('即时源码中需要保留的文本。')
+  await expect(sourceRegion(page).getByRole('button', { name: '应用', exact: true })).toBeDisabled()
+  await expect(sourceRegion(page).getByRole('button', { name: '取消', exact: true })).toBeEnabled()
+  await sourceRegion(page).getByRole('button', { name: '取消', exact: true }).click()
+  await expect(sourceRegion(page)).toBeHidden()
+  await expect(page.locator('.tiptap > p').first()).toHaveText('其他编辑更新了段落。')
+  await expect(page.locator('.tiptap > p').last()).toHaveText('相邻段落。')
+  await page.getByRole('treeitem', { name: /第二页/ }).click()
+  await expect(page.getByRole('textbox', { name: '页面标题', exact: true })).toHaveValue('第二页')
+  expect(await storedMarkdown(page)).toContain('其他编辑更新了段落。')
+})
+
 test('keeps exact caret positions inside formatted Chinese and link labels while live source is entered, typed and completed', async ({ page }) => {
   await setEditorMarkdown(page, '前 **中文粗体** 和 [链接文字](https://example.test/路径)，普通中文尾句。')
   await page.getByRole('button', { name: '即时源码', exact: true }).click()
