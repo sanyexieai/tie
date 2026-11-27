@@ -943,6 +943,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function openTieEntry() {
+    if (editorSaveHandler && !await editorSaveHandler()) return false
     const result = await workspaceService.openTieEntry()
     if (!result) return false
     applySnapshot(result.snapshot)
@@ -954,6 +955,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function importTiez() {
+    if (editorSaveHandler && !await editorSaveHandler()) return false
     const result = await workspaceService.importTiez()
     if (!result) return false
     applySnapshot(result.snapshot)
@@ -965,6 +967,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function packCurrentSourceTiez(sourceId?: string) {
+    if (editorSaveHandler && !await editorSaveHandler()) return false
     const id = sourceId
       ?? activeStorageSourceId.value
       ?? defaultStorageSourceId.value
@@ -976,6 +979,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   /** Browser demo: import `.tiez` into localStorage workspace. */
   async function importTiezBrowser() {
+    if (editorSaveHandler && !await editorSaveHandler()) return false
     const { pickTiezFile, unpackTiezFile } = await import('@/services/tiez-browser')
     const file = await pickTiezFile()
     if (!file) return false
@@ -1002,6 +1006,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function exportTiezBrowser() {
+    if (editorSaveHandler && !await editorSaveHandler()) return false
     const { packPagesToTiez, downloadBlob } = await import('@/services/tiez-browser')
     const packed = packPagesToTiez(pages.value, { name: workspace.value?.name })
     downloadBlob(packed.blob, packed.filename)
@@ -1009,7 +1014,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function removeStorageSource(sourceId: string) {
-    if (isTemporaryStorageSourceId(sourceId) && activePage.value && pageBoundToSource(activePage.value, sourceId)) {
+    if (activePage.value && pageBoundToSource(activePage.value, sourceId)) {
       if (editorSaveHandler && !await editorSaveHandler()) return false
     }
     const snapshot = await workspaceService.removeStorageSource(sourceId)
@@ -1117,6 +1122,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function createPage(parentId: PageId | null) {
+    if (editorSaveHandler && !await editorSaveHandler()) return null
     const parent = parentId ? pages.value.find((item) => item.id === parentId) : null
     if (parent && isTemporaryStorageSourceId(parent.storageSourceId)) throw new Error('临时工作区仅编辑当前文件，请在正式工作区创建页面')
     const fallbackPage = pages.value.find((item) => {
@@ -1183,6 +1189,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function createChildPage(parentId: PageId) {
+    if (editorSaveHandler && !await editorSaveHandler()) return null
     const parent = pages.value.find((page) => page.id === parentId)
     if (!parent) throw new Error('父页面不存在')
     if (isTemporaryStorageSourceId(parent.storageSourceId)) throw new Error('临时工作区仅编辑当前文件，请在正式工作区创建页面')
@@ -1229,6 +1236,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function duplicatePage(pageId: PageId) {
+    if (editorSaveHandler && !await editorSaveHandler()) return null
     const original = pages.value.find((page) => page.id === pageId && !page.deletedAt)
     if (!original) return null
     if (isTemporaryStorageSourceId(original.storageSourceId)) throw new Error('请先将文件导入正式工作区后再复制页面')
@@ -1563,6 +1571,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         })
       }
     }
+    if (pageIds.has(activePageId.value ?? '') && editorSaveHandler && !await editorSaveHandler()) return false
     const moving = pages.value.filter((candidate) => pageIds.has(candidate.id) && candidate.storageSourceId !== targetSourceId)
     if (!moving.length) return false
     const moved: Page[] = []
@@ -1590,6 +1599,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function exportPageMarkdown(pageId: PageId) {
+    if (pageId === activePageId.value && editorSaveHandler && !await editorSaveHandler()) return false
     const page = pages.value.find((item) => item.id === pageId && !item.deletedAt)
     return page ? workspaceService.exportPageMarkdown(page) : false
   }
@@ -1655,6 +1665,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       return
     }
     const removed = collectSubtree(pageId)
+    if (removed.has(activePageId.value ?? '') && editorSaveHandler && !await editorSaveHandler()) return
     const deletedAt = new Date().toISOString()
     saving.value = true
     try {
@@ -1856,8 +1867,15 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function openMobileHome() {
-    activePageId.value = null
-    clearSpecialViews()
+    return afterEditorSave(() => { activePageId.value = null; clearSpecialViews() })
+  }
+
+  function afterEditorSave(changeView: () => void) {
+    if (editorSaveHandler) {
+      return editorSaveHandler().then((saved) => { if (saved) changeView(); return saved })
+    }
+    changeView()
+    return true
   }
 
   function openPage(pageId: PageId) {
@@ -1913,12 +1931,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   function openCommandPalette() { commandQuery.value = ''; showingCommandPalette.value = true }
   function closeCommandPalette() { showingCommandPalette.value = false }
   function scrollToOutlineHeading(index: number) { outlineScrollTarget.value = index; outlineScrollRequest.value += 1 }
-  function openTrash() { clearSpecialViews(); showingTrash.value = true }
-  function openSearch() { clearSpecialViews(); showingSearch.value = true }
-  function openTags(tag: string | null = null) { selectedTag.value = tag; clearSpecialViews(); showingTags.value = true }
-  function openGraph() { clearSpecialViews(); showingGraph.value = true }
-  function openRecent() { clearSpecialViews(); showingRecent.value = true }
-  function openFavorites() { clearSpecialViews(); showingFavorites.value = true }
+  function openTrash() { return afterEditorSave(() => { clearSpecialViews(); showingTrash.value = true }) }
+  function openSearch() { return afterEditorSave(() => { clearSpecialViews(); showingSearch.value = true }) }
+  function openTags(tag: string | null = null) { return afterEditorSave(() => { selectedTag.value = tag; clearSpecialViews(); showingTags.value = true }) }
+  function openGraph() { return afterEditorSave(() => { clearSpecialViews(); showingGraph.value = true }) }
+  function openRecent() { return afterEditorSave(() => { clearSpecialViews(); showingRecent.value = true }) }
+  function openFavorites() { return afterEditorSave(() => { clearSpecialViews(); showingFavorites.value = true }) }
 
   async function refreshSkills() {
     if (!('__TAURI_INTERNALS__' in window)) {
@@ -1938,33 +1956,39 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function openSkills(skillId: string | null = null) {
-    clearSpecialViews()
-    showingSkills.value = true
-    showingSkillManager.value = false
-    activeSkillId.value = skillId
+    if (!await afterEditorSave(() => {
+      clearSpecialViews()
+      showingSkills.value = true
+      showingSkillManager.value = false
+      activeSkillId.value = skillId
+    })) return
     const connections = await refreshSkills()
     if (skillId) activeSkillId.value = skillId
     else if (!activeSkillId.value) activeSkillId.value = connections[0]?.id ?? null
   }
 
   async function openSkillManager() {
-    clearSpecialViews()
-    showingSkills.value = true
-    showingSkillManager.value = true
-    activeSkillId.value = null
+    if (!await afterEditorSave(() => {
+      clearSpecialViews()
+      showingSkills.value = true
+      showingSkillManager.value = true
+      activeSkillId.value = null
+    })) return
     await refreshSkills()
   }
 
   function selectSkill(skillId: string) {
-    activeSkillId.value = skillId
-    showingSkills.value = true
-    showingSkillManager.value = false
-    showingTrash.value = false
-    showingSearch.value = false
-    showingTags.value = false
-    showingGraph.value = false
-    showingRecent.value = false
-    showingFavorites.value = false
+    return afterEditorSave(() => {
+      activeSkillId.value = skillId
+      showingSkills.value = true
+      showingSkillManager.value = false
+      showingTrash.value = false
+      showingSearch.value = false
+      showingTags.value = false
+      showingGraph.value = false
+      showingRecent.value = false
+      showingFavorites.value = false
+    })
   }
 
   async function connectScannedSkill(skillPath: string) {

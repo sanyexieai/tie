@@ -38,6 +38,8 @@ const protectionBusy = ref(false)
 const protectionControl = ref<InstanceType<typeof PageProtectionControl> | null>(null)
 const protectionPage = computed(() => store.activePage && !rawActiveSource.value?.temporary ? store.activePage : null)
 const hasUnsavedChanges = ref(false)
+const blockSourceDirty = ref(false)
+const hasPendingChanges = computed(() => hasUnsavedChanges.value || blockSourceDirty.value)
 const saveError = ref<string | null>(null)
 const conflictRemotePage = ref<Page | null>(null)
 const showingProtectionConflict = ref(false)
@@ -58,7 +60,7 @@ const tagSuggestions = ref<TagSuggestion[]>([])
 const tagSuggestLoading = ref(false)
 const documentRoot = ref<HTMLElement | null>(null)
 const sourceEditor = ref<HTMLTextAreaElement | null>(null)
-const richEditor = ref<{ undo: () => void; redo: () => void; findText: (query: string, direction?: number) => { count: number; index: number }; focusBlank?: (event: MouseEvent) => boolean } | null>(null)
+const richEditor = ref<{ undo: () => void; redo: () => void; findText: (query: string, direction?: number) => { count: number; index: number }; focusBlank?: (event: MouseEvent) => boolean; flushSource?: (options?: { close?: boolean }) => boolean; discardSource?: () => void } | null>(null)
 let copiedLinkTimer: number | undefined
 let exportedTimer: number | undefined
 let refreshedTimer: number | undefined
@@ -81,7 +83,7 @@ const status = computed(() => {
   if (store.saving) return '保存中'
   if (refreshing.value) return '刷新中'
   if (saveError.value) return '失败'
-  if (hasUnsavedChanges.value) return '未保存'
+  if (hasPendingChanges.value) return '未保存'
   if (refreshedNotice.value) return '已刷新'
   if (exportedNotice.value) return '已导出'
   if (copiedLinkNotice.value) return '已复制'
@@ -257,11 +259,12 @@ function loadActivePage() {
   tagDraft.value = ''
   tagSuggestions.value = []
   hasUnsavedChanges.value = false
+  blockSourceDirty.value = false
   saveError.value = null
 }
 
 watch(() => activePage.value?.id, loadActivePage, { immediate: true })
-watch(hasUnsavedChanges, (dirty) => emit('dirty-change', dirty))
+watch(hasPendingChanges, (dirty) => emit('dirty-change', dirty), { flush: 'sync' })
 watch(locked, (value) => {
   if (!value) { loadActivePage(); return }
   cancelAutoSave()
@@ -289,7 +292,7 @@ watch(
       && page.tags.length === tags.value.length
       && page.tags.every((tag, index) => tag === tags.value[index])
 
-    if (!hasUnsavedChanges.value) {
+    if (!hasPendingChanges.value) {
       // 仅在外部内容真正变化时重载，避免保存后的元数据回写把光标打飞。
       if (!contentMatches) loadActivePage()
       return
@@ -323,7 +326,7 @@ watch(() => store.outlineScrollRequest, async () => {
 })
 
 function queueAutoSave() {
-  if (hasContentConflict.value) return
+  if (hasContentConflict.value || blockSourceDirty.value) return
   if (autoSaveTimer) window.clearTimeout(autoSaveTimer)
   autoSaveTimer = window.setTimeout(() => {
     void flushAutoSave()
@@ -331,6 +334,7 @@ function queueAutoSave() {
 }
 
 async function flushAutoSave() {
+  if (blockSourceDirty.value) return
   if (autoSaveFlushing) {
     autoSavePending = true
     return
@@ -342,7 +346,7 @@ async function flushAutoSave() {
   try {
     do {
       autoSavePending = false
-      if (hasContentConflict.value) break
+      if (hasContentConflict.value || blockSourceDirty.value) break
       const revision = changeRevision
       // 紧挨写入前再取草稿，避免手动保存之后仍用旧快照回写。
       const page = draft()
@@ -440,11 +444,12 @@ function onInput() {
 
 async function saveNow() {
   if (locked.value) return true
+  if (!(richEditor.value?.flushSource?.({ close: false }) ?? true)) return false
   if (autoSaveTimer) window.clearTimeout(autoSaveTimer)
   if (!hasUnsavedChanges.value) return !saveError.value && !props.session?.error
   await flushAutoSave()
   if (autoSaveFlushing) await autoSaveFlushDone
-  return !hasUnsavedChanges.value && !saveError.value && !props.session?.error
+  return !hasPendingChanges.value && !saveError.value && !props.session?.error
 }
 
 async function lockDocument() { if (props.session && await saveNow()) props.session.lock() }
@@ -453,6 +458,7 @@ async function reloadRemotePage() {
   const pageId = activePage.value?.id
   if (!pageId) return
   if (!conflictConfirm(`将重新载入${remoteConflictLabel.value}版本，当前未保存的本地修改会丢失。是否继续？`)) return
+  richEditor.value?.discardSource?.()
   cancelAutoSave()
   const revision = changeRevision
   const isCurrent = () => !disposed && loadedPage?.id === pageId && revision === changeRevision
@@ -468,6 +474,7 @@ async function reloadRemotePage() {
 }
 
 async function forceOverwriteRemote() {
+  if (!(richEditor.value?.flushSource?.({ close: false }) ?? true)) return
   const page = draft()
   if (!page) return
   if (!conflictConfirm(`将用本地草稿覆盖${remoteConflictLabel.value}版本，其他设备上的修改会丢失。是否继续？`)) return
@@ -591,6 +598,7 @@ async function exportTie() {
 }
 
 async function exportPageClosure() {
+  if (!await saveNow()) return
   const page = activePage.value
   if (!page || !isDesktop) return
   try {
@@ -618,7 +626,8 @@ async function exportPageClosure() {
 
 async function refreshCurrentPage() {
   if (locked.value || !activePage.value || refreshing.value) return
-  if (hasUnsavedChanges.value && !window.confirm('当前有未保存修改，从存储刷新将丢弃这些修改。是否继续？')) return
+  if (hasPendingChanges.value && !window.confirm('当前有未保存修改，从存储刷新将丢弃这些修改。是否继续？')) return
+  richEditor.value?.discardSource?.()
   if (autoSaveTimer) {
     window.clearTimeout(autoSaveTimer)
     autoSaveTimer = undefined
@@ -669,7 +678,7 @@ async function previewRevision(revision: PageRevision) {
 
 async function restoreRevision(revision: PageRevision) {
   if (!activePage.value || !window.confirm(`恢复“${revision.title}”的历史版本？当前内容会先自动保留为新版本。`)) return
-  if (hasUnsavedChanges.value && !await saveNow()) return
+  if (hasPendingChanges.value && !await saveNow()) return
   const restored = props.session ? (await props.session.restoreRevision(revision.id), true) : await store.restorePageRevision(activePage.value.id, revision.id)
   if (!restored) return
   loadActivePage()
@@ -680,6 +689,12 @@ async function restoreRevision(revision: PageRevision) {
 function onBodyChange(markdown: string) {
   bodyMarkdown.value = markdown
   onInput()
+}
+
+function onBlockSourceDirty(dirty: boolean) {
+  blockSourceDirty.value = dirty
+  if (dirty) cancelAutoSave()
+  else if (hasUnsavedChanges.value) queueAutoSave()
 }
 
 function onTitleChange(value: string) { title.value = value; onInput() }
@@ -731,7 +746,10 @@ function acceptTagSuggestions() {
 
 function navigateToPage(pageId: string) { store.openPage(pageId) }
 
-function toggleSourceMode() { store.toggleSourceMode() }
+function toggleSourceMode() {
+  if (!(richEditor.value?.flushSource?.({ close: true }) ?? true)) return
+  store.toggleSourceMode()
+}
 function undo() { richEditor.value?.undo() }
 function redo() { richEditor.value?.redo() }
 
@@ -747,6 +765,7 @@ function onEditorSurfaceClick(event: MouseEvent) {
 }
 
 function openFind() {
+  if (!(richEditor.value?.flushSource?.({ close: true }) ?? true)) return
   showingFind.value = true
   requestAnimationFrame(() => documentRoot.value?.querySelector<HTMLInputElement>('.document-find input')?.focus())
 }
@@ -782,6 +801,7 @@ function findNext(direction = 1) {
   findResult.value = store.sourceMode ? findInSource(direction) : richEditor.value?.findText(findQuery.value, direction) ?? { count: 0, index: 0 }
 }
 function replaceAll() {
+  if (!(richEditor.value?.flushSource?.({ close: true }) ?? true)) return
   const query = findQuery.value.trim()
   if (!query) return
   const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -861,12 +881,12 @@ function onMobileBack(event: Event) {
 }
 
 function saveWhenHidden() {
-  if (document.visibilityState === 'hidden' && hasUnsavedChanges.value) void saveNow()
+  if (document.visibilityState === 'hidden' && hasPendingChanges.value) void saveNow()
 }
 
 let unregisterEditorSave: (() => void) | undefined
 onMounted(() => {
-  unregisterEditorSave = store.registerEditorSaveHandler(async () => !hasUnsavedChanges.value || await saveNow(), () => hasUnsavedChanges.value)
+  unregisterEditorSave = store.registerEditorSaveHandler(saveNow, () => hasPendingChanges.value)
   window.addEventListener('keydown', onShortcut)
   document.addEventListener('visibilitychange', saveWhenHidden)
   window.addEventListener('tie:find-in-page', onWorkspaceCommand)
@@ -878,7 +898,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   unregisterEditorSave?.()
-  if (hasUnsavedChanges.value) void saveNow().finally(() => { bodyMarkdown.value = ''; selectedRevision.value = null; conflictRemotePage.value = null })
+  if (hasPendingChanges.value) void saveNow().finally(() => { bodyMarkdown.value = ''; selectedRevision.value = null; conflictRemotePage.value = null })
   disposed = true
   window.removeEventListener('keydown', onShortcut)
   document.removeEventListener('visibilitychange', saveWhenHidden)
@@ -979,7 +999,7 @@ defineExpose({ saveNow })
           <DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" />
           <textarea ref="sourceEditor" v-model="bodyMarkdown" class="source-editor" aria-label="Markdown 源码" :spellcheck="store.spellcheckEnabled" @input="onInput"></textarea>
         </div>
-        <TiptapEditor v-else ref="richEditor" :model-value="bodyMarkdown" :pages="store.pages" :sources="store.allSources" :page-id="activePage.id" :spellcheck="store.spellcheckEnabled" :background-started="store.backgroundStarted" :create-linked-page="createLinkedPage" :expand-to-child="expandToChild" enable-pheromone :private-document="Boolean(session)" :protected-page-actions="Boolean(session)" @update:model-value="onBodyChange" @navigate="navigateToPage" @create-child="createChild">
+        <TiptapEditor v-else ref="richEditor" :model-value="bodyMarkdown" :pages="store.pages" :sources="store.allSources" :page-id="activePage.id" :spellcheck="store.spellcheckEnabled" :background-started="store.backgroundStarted" :create-linked-page="createLinkedPage" :expand-to-child="expandToChild" enable-pheromone enable-block-source :private-document="Boolean(session)" :protected-page-actions="Boolean(session)" @update:model-value="onBodyChange" @source-dirty="onBlockSourceDirty" @navigate="navigateToPage" @create-child="createChild">
           <template #meta><DocumentMeta :title="title" :tags="tags" :tag-draft="tagDraft" :suggestions="tagSuggestions" :known-tags="store.tagIndex.map((tag) => tag.name)" @update:title="onTitleChange" @update:tag-draft="tagDraft = $event" @add-tags="addTags" @remove-tag="removeTag" @select-tag="selectTag" @suggest="generateTagSuggestions" @accept-suggestions="acceptTagSuggestions" /></template>
         </TiptapEditor>
         <section v-if="childPages.length" class="document-child-pages" aria-label="子页面">

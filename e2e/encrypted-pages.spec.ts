@@ -132,14 +132,14 @@ async function restoreFirstRevision(page: Page, editor: Locator) {
 async function sourceEditor(editor: Locator) {
   await expect(editor.getByRole('textbox', { name: '页面标题', exact: true })).toBeVisible()
   const textarea = editor.getByRole('textbox', { name: 'Markdown 源码', exact: true })
-  if (!await textarea.isVisible()) await editor.getByRole('button', { name: /源码/ }).click()
+  if (!await textarea.isVisible()) await editor.getByRole('button', { name: '</> 源码', exact: true }).click()
   await expect(textarea).toBeVisible()
   return textarea
 }
 
 async function richEditor(editor: Locator) {
   await expect(editor.getByRole('textbox', { name: '页面标题', exact: true })).toBeVisible()
-  if (await editor.getByRole('textbox', { name: 'Markdown 源码', exact: true }).isVisible()) await editor.getByRole('button', { name: /源码/ }).click()
+  if (await editor.getByRole('textbox', { name: 'Markdown 源码', exact: true }).isVisible()) await editor.getByRole('button', { name: '</> 源码', exact: true }).click()
   const rich = editor.locator('.tiptap')
   await expect(rich).toBeVisible()
   return rich
@@ -214,7 +214,7 @@ test('writes encrypted Markdown locally, restores encrypted history, and unlocks
   await expectSource(editor, firstMarkdown)
   await expectBrowserStorageEncrypted(page)
 
-  await editor.getByRole('button', { name: /源码/ }).click()
+  await editor.getByRole('button', { name: '</> 源码', exact: true }).click()
   await expect(editor.locator('.tiptap h2')).toHaveText('部署资料')
   await expect(editor.locator('.tiptap table')).toContainText('private-production-59182')
   await expect(editor.locator('.tiptap pre')).toContainText('private-token-59281')
@@ -292,6 +292,66 @@ test('syncs only ciphertext to the real backend and unlocks the same document on
   } finally { await context.close() }
 })
 
+test('edits protected block source through Apply, save and lock without persisting plaintext', async ({ page, backend }) => {
+  const applied = 'private-block-source-applied-80437'
+  const lockedDraft = 'private-block-source-lock-draft-27316'
+  const canaries = [...privateValues, applied, lockedDraft]
+  await seedBrowser(page.context(), backend.profile)
+  await page.routeWebSocket('**/*', () => {})
+  await page.goto('/')
+  await expect(page.getByRole('textbox', { name: '页面标题', exact: true })).toHaveValue('普通文档')
+  const writes: { markdown: string }[] = []
+  page.on('request', (request) => {
+    if (request.url().startsWith(backend.url) && /\/pages\/[^/?]+$/.test(new URL(request.url()).pathname) && request.method() === 'PUT') writes.push(request.postDataJSON())
+  })
+  const editor = await beginDocument(page)
+  const rich = await richEditor(editor)
+  await rich.locator('p').filter({ hasText: 'private-owner-29581' }).click({ button: 'right' })
+  await page.getByRole('menuitem', { name: '编辑此块源码', exact: true }).click()
+  const region = page.getByRole('region', { name: '当前块 Markdown 源码', exact: true })
+  const input = region.getByRole('textbox', { name: '当前块 Markdown 源码', exact: true })
+  await expect(input).toHaveValue(/private-owner-29581/)
+  await input.fill(`账号：\`${applied}\`\n\n新增 **块内容**`)
+  await region.getByRole('button', { name: '应用', exact: true }).click()
+  await expect(region).toBeHidden()
+  await expect(rich).toContainText(applied)
+  await expect(rich.locator('strong')).toHaveText('块内容')
+  await expect(rich.locator('pre')).toContainText('private-token-59281')
+  await expect(rich.locator('table')).toContainText('private-production-59182')
+  await saveDocument(page, editor)
+
+  await rich.locator('p').filter({ hasText: applied }).click({ button: 'right' })
+  await page.getByRole('menuitem', { name: '编辑此块源码', exact: true }).click()
+  await input.fill(`账号：\`${lockedDraft}\``)
+  await editor.getByRole('button', { name: '锁定页面', exact: true }).click()
+  await expect(editor.getByRole('button', { name: '解锁页面', exact: true })).toBeVisible()
+  await expect(region).toHaveCount(0)
+  await expect(editor.locator('.tiptap')).toHaveCount(0)
+
+  const encrypted = (await backendPages(backend)).find((item) => item.title === title)!
+  expect(encrypted.markdown.startsWith(marker)).toBe(true)
+  const firstProtected = writes.findIndex((item) => item.markdown.startsWith(marker))
+  expect(firstProtected).toBeGreaterThanOrEqual(0)
+  const protectedWrites = writes.slice(firstProtected)
+  expect(protectedWrites.length).toBeGreaterThan(0)
+  expect(protectedWrites.every((item) => item.markdown.startsWith(marker))).toBe(true)
+  const browserStorage = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }))
+  for (const value of canaries) {
+    expect(JSON.stringify(writes)).not.toContain(value)
+    expect(browserStorage).not.toContain(value)
+  }
+  const workspace = path.join(backend.data, 'workspaces', backend.workspaceId)
+  for (const entry of fs.readdirSync(workspace, { recursive: true, withFileTypes: true }).filter((item) => item.isFile())) {
+    const content = fs.readFileSync(path.join(entry.parentPath, entry.name), 'utf8')
+    for (const value of canaries) expect(content).not.toContain(value)
+  }
+  await editor.getByLabel('解锁密码', { exact: true }).fill(password)
+  await editor.getByRole('button', { name: '解锁页面', exact: true }).click()
+  await expect(editor.locator('.tiptap')).toContainText(lockedDraft)
+  await expect(editor.locator('.tiptap pre')).toContainText('private-token-59281')
+  await expect(editor.locator('.tiptap table')).toContainText('private-production-59182')
+})
+
 test('opens a local encrypted Markdown document on mobile without a server login', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await seedBrowser(page.context())
@@ -306,7 +366,7 @@ test('opens a local encrypted Markdown document on mobile without a server login
   if (await back.isVisible()) await back.click()
   const editor = await beginDocument(page, true)
   await expectSource(editor, firstMarkdown)
-  await editor.getByRole('button', { name: /源码/ }).click()
+  await editor.getByRole('button', { name: '</> 源码', exact: true }).click()
   await expect(editor.locator('.tiptap table')).toContainText('private-production-59182')
   await page.screenshot({ path: '/tmp/tie-normal-protected-page-mobile.png', fullPage: true })
   await expectBrowserStorageEncrypted(page)
