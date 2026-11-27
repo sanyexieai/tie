@@ -1,16 +1,20 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import type { Editor } from '@tiptap/core'
 import { Extension, mergeAttributes } from '@tiptap/core'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
-import { TextSelection } from '@tiptap/pm/state'
+import { Selection, TextSelection, type SelectionBookmark } from '@tiptap/pm/state'
+import { closeHistory } from '@tiptap/pm/history'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import StarterKit from '@tiptap/starter-kit'
 import Link from '@tiptap/extension-link'
 import { TieCodeBlock } from '@/extensions/code-block'
 import { WikiLink, wikiPageHref } from '@/extensions/wiki-link'
+import EditorContextMenu from '@/components/EditorContextMenu.vue'
+import type { EditorMenuItem } from '@/services/editor-menu'
+import { copyEditorSelection, copyEditorText, pasteEditorClipboard } from '@/services/editor-clipboard'
 import Placeholder from '@tiptap/extension-placeholder'
 import Image from '@tiptap/extension-image'
 import { TieTable } from '@/extensions/table'
@@ -23,7 +27,7 @@ import { Markdown } from '@tiptap/markdown'
 import { common, createLowlight } from 'lowlight'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import type { Page, StorageSource } from '@/types'
-import { focusPheromone, pheromoneRevision, pheromoneState, pheromonesFor, startPheromoneDraft, type PheromoneKind } from '@/services/pheromone'
+import { focusPheromone, pheromoneRevision, pheromoneState, pheromonesFor, startPheromoneDraft } from '@/services/pheromone'
 import { DEFAULT_PAGE_ICON } from '@/constants/page'
 import { canStorePageAssets, embedImageFile, inlineImageSrcToFile, isImageFile, normalizeImageFile, parseAssetUrl, resolveAssetDisplayUrl, resolvePastedImageFromEvent, shouldHandleImagePaste, uploadPastedImage } from '@/services/attachments'
 import { isProtectedImageDataUrl, protectedImageDataUrl } from '@/services/protected-images'
@@ -60,7 +64,20 @@ const wikiQuery = ref('')
 const wikiStart = ref<number | null>(null)
 const selectedPageIndex = ref(0)
 const slashQuery = ref<string | null>(null)
-const contextMenu = ref<{ x: number; y: number; from: number; to: number; text: string; canExpand: boolean } | null>(null)
+interface EditorContextSelection {
+  x: number
+  y: number
+  from: number
+  to: number
+  text: string
+  canExpand: boolean
+  canDiscuss: boolean
+  empty: boolean
+  pageId: string
+  bookmark: SelectionBookmark
+  doc: ProseMirrorNode
+}
+const contextMenu = shallowRef<EditorContextSelection | null>(null)
 const slashStart = ref<number | null>(null)
 const selectedCommandIndex = ref(0)
 const linkSourcePicker = ref<{ kind: 'file' | 'directory' | 'relative' } | null>(null)
@@ -706,9 +723,9 @@ function confirmLinkSource(editor: Editor, source: StorageSource) {
 
 const slashCommands: SlashCommand[] = [
   { id: 'text', label: '正文', hint: '普通段落', keywords: ['paragraph', '文字', '文本'], run: (editor) => editor.chain().focus().setParagraph().run() },
-  { id: 'heading-2', label: '二级标题', hint: '章节标题', keywords: ['heading', '标题', 'h2'], run: (editor) => editor.chain().focus().toggleHeading({ level: 2 }).run() },
-  { id: 'heading-3', label: '三级标题', hint: '小节标题', keywords: ['heading', '标题', 'h3'], run: (editor) => editor.chain().focus().toggleHeading({ level: 3 }).run() },
+  ...([1, 2, 3, 4, 5, 6] as const).map((level) => ({ id: `heading-${level}`, label: `${['一', '二', '三', '四', '五', '六'][level - 1]}级标题`, hint: `H${level} 标题`, keywords: ['heading', '标题', `h${level}`], run: (editor: Editor) => { editor.chain().focus().toggleHeading({ level }).run() } })),
   { id: 'bullet-list', label: '无序列表', hint: '项目符号列表', keywords: ['list', '列表', 'bullet'], run: (editor) => editor.chain().focus().toggleBulletList().run() },
+  { id: 'ordered-list', label: '有序列表', hint: '带编号的列表', keywords: ['list', '列表', 'ordered', '编号'], run: (editor) => editor.chain().focus().toggleOrderedList().run() },
   { id: 'task-list', label: '待办事项', hint: '可勾选的任务', keywords: ['task', 'todo', '待办', '任务'], run: (editor) => editor.chain().focus().toggleTaskList().run() },
   { id: 'quote', label: '引用', hint: '突出一段内容', keywords: ['quote', '引用'], run: (editor) => editor.chain().focus().toggleBlockquote().run() },
   { id: 'code', label: '代码块', hint: '带语法标记的代码', keywords: ['code', '代码'], run: (editor) => editor.chain().focus().toggleCodeBlock().run() },
@@ -731,10 +748,12 @@ const slashCommands: SlashCommand[] = [
   { id: 'expand-child', label: '展开为子页面', hint: '用当前这句话做标题，并留在父页面', keywords: ['expand', 'turn', '展开', '子页面', '句子'], run: (editor) => { void expandParagraphToChild(editor) } },
 ]
 
-const filteredCommands = computed(() => {
-  const commands = props.privateDocument
+const availableCommands = computed(() => props.privateDocument
     ? slashCommands.filter((command) => !['image', 'local-file', 'local-directory', 'relative-path', ...(!props.protectedPageActions ? ['child-page', 'expand-child'] : [])].includes(command.id))
-    : slashCommands
+    : slashCommands)
+
+const filteredCommands = computed(() => {
+  const commands = availableCommands.value
   const query = slashQuery.value?.trim().toLocaleLowerCase() ?? ''
   if (!query) return commands
   return commands.filter((command) => [command.label, command.hint, ...command.keywords].some((value) => value.toLocaleLowerCase().includes(query)))
@@ -1197,6 +1216,10 @@ const editor = useEditor({
       },
     },
     handleKeyDown: (_view, event) => {
+      if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+        onEditorContextMenu(event)
+        return true
+      }
       if (contextMenu.value && event.key === 'Escape') {
         event.preventDefault()
         closeContextMenu()
@@ -1305,6 +1328,7 @@ const editor = useEditor({
     scheduleDecorateFileLinks()
   },
   onUpdate: ({ editor: currentEditor }) => {
+    closeContextMenu()
     if (!syncingExternalValue && !rewritingInlineImages) emit('update:modelValue', currentEditor.getMarkdown())
     updateMenus(currentEditor)
     void rewriteInlineImageNodes(currentEditor)
@@ -1315,8 +1339,11 @@ const editor = useEditor({
   },
 })
 
+watch(() => props.pageId, () => closeContextMenu())
+
 watch(() => props.modelValue, (markdown) => {
   if (!editor.value || editor.value.getMarkdown() === markdown) return
+  closeContextMenu()
   const selection = editor.value.state.selection
   syncingExternalValue = true
   editor.value.commands.setContent(markdown, { contentType: 'markdown', emitUpdate: false })
@@ -1403,36 +1430,117 @@ function insertPageLink(page: Page) {
   closePagePicker()
 }
 
-function selectionForMenu(currentEditor: Editor) {
-  if (slashQuery.value !== null || showPagePicker.value) return null
-  const { from, to, empty } = currentEditor.state.selection
-  if (empty || from === to) return null
-  const text = currentEditor.state.doc.textBetween(from, to, ' ').replace(/\s+/g, ' ').trim()
-  const limit = pheromoneEnabled.value ? 280 : 120
-  if (!text || text.length > limit) return null
-  return { from, to, text, canExpand: text.length <= 120 && Boolean(props.expandToChild) }
-}
+const tableContextCommands = [
+  { id: 'row-before', label: '在上方插入行', can: (e: Editor) => e.can().addRowBefore(), run: (e: Editor) => e.chain().focus().addRowBefore().run() },
+  { id: 'row-after', label: '在下方插入行', can: (e: Editor) => e.can().addRowAfter(), run: (e: Editor) => e.chain().focus().addRowAfter().run() },
+  { id: 'column-before', label: '在左侧插入列', can: (e: Editor) => e.can().addColumnBefore(), run: (e: Editor) => e.chain().focus().addColumnBefore().run() },
+  { id: 'column-after', label: '在右侧插入列', can: (e: Editor) => e.can().addColumnAfter(), run: (e: Editor) => e.chain().focus().addColumnAfter().run() },
+  { id: 'header-row', label: '切换表头行', can: (e: Editor) => e.can().toggleHeaderRow(), run: (e: Editor) => e.chain().focus().toggleHeaderRow().run() },
+  { id: 'delete-row', label: '删除当前行', can: (e: Editor) => e.can().deleteRow(), run: (e: Editor) => e.chain().focus().deleteRow().run() },
+  { id: 'delete-column', label: '删除当前列', can: (e: Editor) => e.can().deleteColumn(), run: (e: Editor) => e.chain().focus().deleteColumn().run() },
+  { id: 'delete-table', label: '删除表格', can: (e: Editor) => e.can().deleteTable(), run: (e: Editor) => e.chain().focus().deleteTable().run() },
+]
 
-function onEditorContextMenu(event: MouseEvent) {
-  contextMenu.value = null
+const contextFormats = computed<EditorMenuItem[]>(() => {
   const current = editor.value
-  if (!current || (props.privateDocument && !props.protectedPageActions)) return
-  if (!props.expandToChild && (!pheromoneEnabled.value)) return
-  const selection = selectionForMenu(current)
-  if (!selection) return
-  if ((!pheromoneEnabled.value) && !selection.canExpand) return
-  event.preventDefault()
-  const menuWidth = 168
-  const menuHeight = pheromoneEnabled.value ? 248 : 148
-  contextMenu.value = {
-    x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-    y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
-    ...selection,
+  if (!contextMenu.value || !current) return []
+  return [
+    { id: 'bold', label: '加粗', shortcut: 'Ctrl/Cmd+B', active: current.isActive('bold'), disabled: !current.can().toggleBold() },
+    { id: 'italic', label: '斜体', shortcut: 'Ctrl/Cmd+I', active: current.isActive('italic'), disabled: !current.can().toggleItalic() },
+    { id: 'strike', label: '删除线', active: current.isActive('strike'), disabled: !current.can().toggleStrike() },
+    { id: 'inline-code', label: '行内代码', active: current.isActive('code'), disabled: !current.can().toggleCode() },
+  ]
+})
+
+const contextItems = computed<EditorMenuItem[]>(() => {
+  const current = editor.value
+  const menu = contextMenu.value
+  if (!current || !menu) return []
+  const paragraphIds = ['text', 'heading-1', 'heading-2', 'heading-3', 'heading-4', 'heading-5', 'heading-6', 'bullet-list', 'ordered-list', 'task-list', 'quote', 'code']
+  const activeCommand = (id: string) => {
+    if (id.startsWith('heading-')) return current.isActive('heading', { level: Number(id.slice(-1)) })
+    const node = { text: 'paragraph', 'bullet-list': 'bulletList', 'ordered-list': 'orderedList', 'task-list': 'taskList', quote: 'blockquote', code: 'codeBlock' }[id]
+    return node ? current.isActive(node) : false
+  }
+  const canCommand = (id: string) => {
+    if (id.startsWith('heading-')) return current.can().toggleHeading({ level: Number(id.slice(-1)) as 1 | 2 | 3 | 4 | 5 | 6 })
+    if (id === 'text') return current.can().setParagraph()
+    if (id === 'bullet-list') return current.can().toggleBulletList()
+    if (id === 'ordered-list') return current.can().toggleOrderedList()
+    if (id === 'task-list') return current.can().toggleTaskList()
+    if (id === 'quote') return current.can().toggleBlockquote()
+    return current.can().toggleCodeBlock()
+  }
+  const paragraph = slashCommands.filter((command) => paragraphIds.includes(command.id)).map((command) => ({ id: `command:${command.id}`, label: command.label, active: activeCommand(command.id), disabled: !canCommand(command.id) }))
+  const insert = availableCommands.value.filter((command) => !paragraphIds.includes(command.id) && command.id !== 'expand-child').map((command) => ({ id: `command:${command.id}`, label: command.label }))
+  const items: EditorMenuItem[] = [
+    { id: 'undo', label: '撤销', shortcut: 'Ctrl/Cmd+Z', disabled: !current.can().undo() },
+    { id: 'redo', label: '重做', shortcut: 'Ctrl/Cmd+Shift+Z', disabled: !current.can().redo() },
+    { id: 'separator-clipboard', label: '', separator: true },
+    { id: 'cut', label: '剪切', shortcut: 'Ctrl/Cmd+X', disabled: menu.empty },
+    { id: 'copy', label: '复制', shortcut: 'Ctrl/Cmd+C', disabled: menu.empty },
+    { id: 'paste', label: '粘贴', shortcut: 'Ctrl/Cmd+V' },
+    { id: 'select-all', label: '全选', shortcut: 'Ctrl/Cmd+A' },
+    { id: 'separator-block', label: '', separator: true },
+    { id: 'paragraph', label: '段落', children: paragraph },
+    { id: 'insert', label: '插入', children: insert },
+    { id: 'edit-link', label: current.isActive('link') ? '编辑链接' : '添加链接' },
+  ]
+  if (current.isActive('link')) items.push({ id: 'copy-link', label: '复制链接地址' }, { id: 'remove-link', label: '取消链接' })
+  if (current.isActive('table')) items.push({ id: 'table', label: '表格', children: tableContextCommands.map((command) => ({ id: `table:${command.id}`, label: command.label, disabled: !command.can(current) })) })
+  if (menu.canExpand || menu.canDiscuss) items.push({ id: 'separator-page', label: '', separator: true })
+  if (menu.canExpand) items.push({ id: 'expand', label: '展开为子页面' })
+  if (menu.canDiscuss) items.push({ id: 'objection', label: '提出异议' }, { id: 'correction', label: '提出修正' }, { id: 'support', label: '表示支持' })
+  return items
+})
+
+function selectionForMenu(currentEditor: Editor) {
+  const { from, to, empty } = currentEditor.state.selection
+  const text = currentEditor.state.doc.textBetween(from, to, ' ').replace(/\s+/g, ' ').trim()
+  return {
+    from, to, empty, text,
+    canExpand: Boolean(text && text.length <= 120 && props.expandToChild && (!props.privateDocument || props.protectedPageActions)),
+    canDiscuss: Boolean(text && text.length <= 280 && pheromoneEnabled.value),
+    pageId: props.pageId,
+    bookmark: currentEditor.state.selection.getBookmark(),
+    doc: currentEditor.state.doc,
   }
 }
 
-function closeContextMenu() {
+function onEditorContextMenu(event: MouseEvent | KeyboardEvent) {
   contextMenu.value = null
+  const current = editor.value
+  const target = event.target
+  if (!current?.isEditable || !(target instanceof Node) || (!current.view.dom.contains(target) && target !== event.currentTarget)) return
+  const element = target instanceof Element ? target : target.parentElement
+  if (element?.closest('input, textarea, button')) return
+  event.preventDefault()
+  const keyboard = event instanceof KeyboardEvent || (event.clientX === 0 && event.clientY === 0)
+  if (!keyboard && event instanceof MouseEvent) {
+    const hit = current.view.posAtCoords({ left: event.clientX, top: event.clientY })
+    const { from, to, empty } = current.state.selection
+    if (hit && (empty || hit.pos < from || hit.pos > to)) {
+      current.view.dispatch(current.state.tr.setSelection(Selection.near(current.state.doc.resolve(hit.pos))))
+    }
+  }
+  closeSlashMenu()
+  closePagePicker()
+  closeLinkSourcePicker()
+  const coords = event instanceof MouseEvent && !keyboard ? { left: event.clientX, bottom: event.clientY } : current.view.coordsAtPos(current.state.selection.from)
+  contextMenu.value = { x: coords.left, y: coords.bottom, ...selectionForMenu(current) }
+}
+
+function closeContextMenu(restoreFocus = false) {
+  contextMenu.value = null
+  if (restoreFocus && !editor.value?.isDestroyed) editor.value?.view.focus()
+}
+
+function restoreContextSelection(menu: EditorContextSelection) {
+  const current = editor.value
+  if (!current || current.isDestroyed || props.pageId !== menu.pageId || current.state.doc !== menu.doc) throw new Error('正文已经变化，请重新选择后操作')
+  current.view.dispatch(current.state.tr.setSelection(menu.bookmark.resolve(current.state.doc)))
+  current.view.focus()
+  return current
 }
 
 function rangeForText(current: Editor, from: number, to: number, text: string) {
@@ -1473,44 +1581,56 @@ async function replaceRangeWithChildCard(current: Editor, from: number, to: numb
 
 let contextActionRunning = false
 
-async function runContextAction(action: 'expand' | 'cut' | 'copy' | 'paste' | PheromoneKind) {
+async function runContextAction(action: string) {
   if (contextActionRunning) return
-  const current = editor.value
   const menu = contextMenu.value
-  if (!current || !menu) return
+  if (!menu) return
   contextActionRunning = true
-  const { from, to, text } = menu
+  closeContextMenu()
   try {
+    const current = restoreContextSelection(menu)
+    if (action !== 'undo' && action !== 'redo') current.view.dispatch(closeHistory(current.state.tr))
     if (action === 'objection' || action === 'correction' || action === 'support') {
-      if (!pheromoneEnabled.value) return
-      closeContextMenu()
-      startPheromoneDraft(props.pageId, text, action)
+      if (menu.canDiscuss) startPheromoneDraft(props.pageId, menu.text, action)
       return
     }
     if (action === 'expand') {
-      closeContextMenu()
-      await replaceRangeWithChildCard(current, from, to, text)
+      if (menu.canExpand) await replaceRangeWithChildCard(current, menu.from, menu.to, menu.text)
       return
     }
-    if (action === 'copy') {
-      await navigator.clipboard.writeText(text)
-      closeContextMenu()
+    if (action === 'copy' || action === 'cut') {
+      if (menu.empty) return
+      await copyEditorSelection(current)
+      if (action === 'cut') restoreContextSelection(menu).commands.deleteSelection()
       return
     }
-    if (action === 'cut') {
-      await navigator.clipboard.writeText(text)
-      closeContextMenu()
-      const range = rangeForText(current, from, to, text)
-      if (range) current.chain().focus().deleteRange(range).run()
+    if (action === 'paste') {
+      await pasteEditorClipboard(current, () => { restoreContextSelection(menu); return true })
       return
     }
-    const pasted = await navigator.clipboard.readText()
-    closeContextMenu()
-    const range = rangeForText(current, from, to, text) ?? { from, to }
-    current.chain().focus().setTextSelection(range).insertContent(pasted).run()
+    if (action === 'undo') current.commands.undo()
+    else if (action === 'redo') current.commands.redo()
+    else if (action === 'select-all') current.commands.selectAll()
+    else if (action === 'bold') current.commands.toggleBold()
+    else if (action === 'italic') current.commands.toggleItalic()
+    else if (action === 'strike') current.commands.toggleStrike()
+    else if (action === 'inline-code') current.commands.toggleCode()
+    else if (action === 'remove-link') current.chain().extendMarkRange('link').unsetLink().run()
+    else if (action === 'copy-link') await copyEditorText(String(current.getAttributes('link').href || ''))
+    else if (action === 'edit-link') {
+      const href = window.prompt('链接地址（留空取消链接）', String(current.getAttributes('link').href || ''))?.trim()
+      if (href === undefined) return
+      restoreContextSelection(menu)
+      if (!href) current.chain().extendMarkRange('link').unsetLink().run()
+      else if (!current.chain().extendMarkRange('link').setLink({ href }).run()) throw new Error('无法使用这个链接地址')
+    } else if (action.startsWith('command:')) {
+      availableCommands.value.find((command) => command.id === action.slice(8))?.run(current)
+    } else if (action.startsWith('table:')) {
+      tableContextCommands.find((command) => command.id === action.slice(6))?.run(current)
+    }
+    if (action !== 'undo' && action !== 'redo') current.view.dispatch(closeHistory(current.state.tr))
   } catch (error) {
-    closeContextMenu()
-    window.alert(error instanceof Error ? error.message : '展开为子页面失败')
+    window.alert(error instanceof Error ? error.message : '无法完成编辑操作')
   } finally {
     contextActionRunning = false
   }
@@ -1685,29 +1805,10 @@ function findText(query: string, direction = 1) {
   return { count: matches.length, index: index + 1 }
 }
 
-function onWindowPointerDown(event: PointerEvent) {
-  const target = event.target
-  const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null
-  const menu = element?.closest('.editor-context-menu')
-  if (menu) {
-    const button = element?.closest('button')
-    const action = button?.dataset.action
-    if (event.button === 0 && button && (action === 'expand' || action === 'cut' || action === 'copy' || action === 'paste' || action === 'objection' || action === 'correction' || action === 'support')) {
-      event.preventDefault()
-      event.stopPropagation()
-      void runContextAction(action)
-    }
-    return
-  }
-  contextMenu.value = null
-}
-
 onMounted(() => {
-  window.addEventListener('pointerdown', onWindowPointerDown, true)
   window.addEventListener('tie:resources-synced', onResourcesSynced)
 })
 onBeforeUnmount(() => {
-  window.removeEventListener('pointerdown', onWindowPointerDown, true)
   window.removeEventListener('tie:resources-synced', onResourcesSynced)
   if (decorateFilesTimer) clearTimeout(decorateFilesTimer)
   editor.value?.destroy()
@@ -1728,23 +1829,8 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine })
       <button v-if="(!privateDocument || protectedPageActions) && createLinkedPage && !matchingPages.length && pagePickerMode === 'wiki' && wikiQuery.trim()" class="page-picker-create" @mousedown.prevent="createWikiPage"><span>创建“{{ wikiQuery.trim() }}”</span><small>并插入页面链接</small></button>
       <p v-else-if="!matchingPages.length">没有匹配页面</p>
     </div>
-    <div
-      v-if="contextMenu"
-      class="editor-context-menu"
-      role="menu"
-      :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }"
-      @pointerdown.prevent.stop
-      @mousedown.prevent.stop
-      @contextmenu.prevent
-    >
-      <button v-if="contextMenu.canExpand" type="button" role="menuitem" data-action="expand">展开为子页面</button>
-      <button v-if="pheromoneEnabled" type="button" role="menuitem" data-action="objection">提出异议</button>
-      <button v-if="pheromoneEnabled" type="button" role="menuitem" data-action="correction">提出修正</button>
-      <button v-if="pheromoneEnabled" type="button" role="menuitem" data-action="support">表示支持</button>
-      <button type="button" role="menuitem" class="menu-split" data-action="cut">剪切</button>
-      <button type="button" role="menuitem" data-action="copy">复制</button>
-      <button type="button" role="menuitem" data-action="paste">粘贴</button>
-    </div>
+    <EditorContextMenu v-if="contextMenu" :x="contextMenu.x" :y="contextMenu.y" :items="contextItems" :formats="contextFormats"
+      @action="runContextAction" @close="closeContextMenu" />
     <div v-if="slashQuery !== null" class="slash-menu" role="listbox" aria-label="插入块" :style="floatingMenuStyle">
       <button
         v-for="(command, index) in filteredCommands"

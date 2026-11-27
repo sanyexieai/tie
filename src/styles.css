@@ -1365,6 +1365,30 @@ body.storage-source-reordering * { cursor: grabbing !important; user-select: non
   border-radius: 0 0 6px 6px;
   padding-top: 8px;
 }
+.editor-command-menu {
+  width: 238px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  z-index: 100;
+}
+.editor-command-menu > button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+}
+.editor-command-menu button small { color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+.editor-command-menu button:disabled { opacity: .4; cursor: default; }
+.editor-command-menu button:focus-visible,
+.editor-command-menu button.is-active,
+.editor-command-menu button.submenu-open { background: var(--accent-soft); outline: none; }
+.editor-menu-formats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 3px 2px 6px; }
+.editor-menu-formats button { padding: 5px; text-align: center; font-size: 14px; }
+.editor-menu-separator { height: 1px; background: var(--border); margin: 4px 3px; }
+.editor-command-submenu { z-index: 101; }
 .tiptap-content .pheromone-mark {
   border-radius: 3px;
   box-decoration-break: clone;
