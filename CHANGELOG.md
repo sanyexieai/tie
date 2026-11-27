@@ -2,6 +2,13 @@
 
 All notable changes to Tie are documented in this file.
 
+## [1.0.68] - 2026-11-27
+
+- 修复鼠标选中文字后在选区旁右键导致选区折叠、加粗等格式操作不作用于原文的问题；即时源码内的选区也可使用同一右键格式菜单。
+- 右键菜单始终显示「表格」入口，可直接插入表格；已有表格继续提供增删行列、切换表头和删除表格。
+- 即时源码去掉编辑框、背景卡片、标题栏和完成按钮，使用正文或标题原有的字体、字号、行高与间距；复杂结构的手动源码仍保留应用和取消。
+- 修复标题换段后正文继承标题字号或光标回到标题的问题，保留即时源码的跨段选区、中文输入、保存和撤销行为。
+
 ## [1.0.67] - 2026-11-27
 
 - 修复 Windows 页面树无法拖拽调整顺序和父子层级的问题，重排保存后触发服务器同步。
@@ -315,7 +322,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.67...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.68...HEAD
+[1.0.68]: https://github.com/sanyexieai/tie/releases/tag/v1.0.68
 [1.0.67]: https://github.com/sanyexieai/tie/releases/tag/v1.0.67
 [1.0.66]: https://github.com/sanyexieai/tie/releases/tag/v1.0.66
 [1.0.65]: https://github.com/sanyexieai/tie/releases/tag/v1.0.65
