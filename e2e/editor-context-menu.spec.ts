@@ -22,6 +22,65 @@ async function setContent(page: Page, markdown: string, selection?: { from: numb
 
 const menu = (page: Page) => page.getByRole('menu', { name: '正文编辑', exact: true })
 
+async function dragText(page: Page, start: number, end: number) {
+  const points = await page.locator('.tiptap > p').first().evaluate((element, range) => {
+    const text = element.firstChild!
+    const point = (offset: number) => {
+      const position = document.createRange()
+      position.setStart(text, offset)
+      position.setEnd(text, offset)
+      const rect = position.getBoundingClientRect()
+      return { x: rect.left, y: rect.top + rect.height / 2 }
+    }
+    return { from: point(range.start), to: point(range.end) }
+  }, { start, end })
+  await page.mouse.move(points.from.x, points.from.y)
+  await page.mouse.down()
+  await page.mouse.move(points.to.x, points.to.y, { steps: 8 })
+  await page.mouse.up()
+  return points
+}
+
+test('formats and unformats the real mouse selection when right click falls beside its highlight', async ({ page }) => {
+  for (const [label, tag] of [['加粗', 'strong'], ['斜体', 'em'], ['删除线', 's'], ['行内代码', 'code']]) {
+    await setContent(page, '前缀需要格式的正文尾部')
+    const points = await dragText(page, 2, 6)
+    await page.mouse.click(points.to.x + 40, points.to.y, { button: 'right' })
+    await menu(page).getByRole('menuitemcheckbox', { name: label, exact: true }).click()
+    await expect(page.locator(`.tiptap > p ${tag}`)).toHaveText('需要格式')
+    await page.locator(`.tiptap > p ${tag}`).click({ button: 'right' })
+    await menu(page).getByRole('menuitemcheckbox', { name: label, exact: true }).click()
+    await expect(page.locator(`.tiptap > p ${tag}`)).toHaveCount(0)
+    await expect(page.locator('.tiptap > p')).toHaveText('前缀需要格式的正文尾部')
+  }
+})
+
+test('formats the selected live-source text through the same menu and keeps both neighboring paragraphs', async ({ page }) => {
+  await setContent(page, '前缀需要加粗的正文尾部\n\n相邻段落。')
+  await page.getByRole('button', { name: '即时源码', exact: true }).click()
+  await page.locator('.tiptap > p').first().click()
+  const source = page.getByRole('textbox', { name: '当前块 Markdown 源码', exact: true })
+  await expect(source).toBeVisible()
+  await source.press('Home')
+  await source.press('ArrowRight')
+  await source.press('ArrowRight')
+  for (let index = 0; index < 4; index += 1) await source.press('Shift+ArrowRight')
+  await source.click({ button: 'right', position: { x: 15, y: 15 } })
+  await menu(page).getByRole('menuitemcheckbox', { name: '加粗', exact: true }).click()
+  await expect(page.locator('.tiptap > p strong')).toHaveText('需要加粗')
+  await expect(page.locator('.tiptap > p').last()).toHaveText('相邻段落。')
+})
+
+test('offers table insertion from the main menu before the document contains any table', async ({ page }) => {
+  await setContent(page, '表前段落。')
+  await page.locator('.tiptap > p').click({ button: 'right' })
+  await menu(page).getByRole('menuitem', { name: '表格', exact: true }).hover()
+  await page.getByRole('menu', { name: '表格', exact: true }).getByRole('menuitem', { name: '插入表格', exact: true }).click()
+  await expect(page.locator('.tiptap table')).toHaveCount(1)
+  await expect(page.locator('.tiptap table tr')).toHaveCount(3)
+  await expect(page.locator('.tiptap table tr').first().locator('th')).toHaveCount(3)
+})
+
 test('right click targets the clicked paragraph and reuses paragraph and insert commands', async ({ page }) => {
   await setContent(page, '第一段正文\n\n第二段正文', { from: 2 })
   await page.locator('.tiptap > p').nth(1).click({ button: 'right', position: { x: 25, y: 12 } })
@@ -124,7 +183,7 @@ test('keyboard menus close correctly and stay inside the viewport', async ({ pag
   expect(box.y + box.height).toBeLessThanOrEqual(viewport.height - 7)
 })
 
-test('closes a table submenu when an editor selection update removes its owning action', async ({ page }) => {
+test('refreshes the table submenu to insertion actions when the editor selection leaves the table', async ({ page }) => {
   await setContent(page, '表格外的段落。\n\n| 名称 | 状态 |\n| --- | --- |\n| 第一行 | 正常 |')
   await page.locator('.tiptap td').first().click({ button: 'right' })
   await menu(page).getByRole('menuitem', { name: '表格', exact: true }).hover()
@@ -134,6 +193,7 @@ test('closes a table submenu when an editor selection update removes its owning 
     editor.commands.setTextSelection(1)
   })
   await expect(menu(page)).toBeVisible()
-  await expect(menu(page).getByRole('menuitem', { name: '表格', exact: true })).toHaveCount(0)
-  await expect(page.getByRole('menu', { name: '表格', exact: true })).toBeHidden()
+  await expect(menu(page).getByRole('menuitem', { name: '表格', exact: true })).toBeVisible()
+  await expect(page.getByRole('menu', { name: '表格', exact: true }).getByRole('menuitem')).toHaveCount(1)
+  await expect(page.getByRole('menu', { name: '表格', exact: true }).getByRole('menuitem', { name: '插入表格', exact: true })).toBeVisible()
 })

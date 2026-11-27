@@ -82,6 +82,7 @@ interface EditorContextSelection {
   doc: ProseMirrorNode
 }
 const contextMenu = shallowRef<EditorContextSelection | null>(null)
+let sourceContextSelection: { from: number; to: number } | null = null
 const sourceSession = shallowRef<BlockSourceSession | null>(null)
 const sourceValue = ref('')
 const sourceError = ref('')
@@ -1485,6 +1486,7 @@ function flushSource(options: { close?: boolean; preserveSelection?: boolean; in
       throw new Error('局部源码暂不支持 HTML 或引用定义，草稿已保留。请复制草稿后取消，再使用整篇源码模式保存。')
     }
     const result = applyBlockSource(current.state, session, sourceValue.value, current.markdown, { isolateHistory: !options.instantInput })
+    let separateLiveBlock = false
     if (options.instantInput) {
       const blocks = tokens.filter((token) => token.type !== 'space')
       const nodes: ProseMirrorNode[] = []
@@ -1498,22 +1500,23 @@ function flushSource(options: { close?: boolean; preserveSelection?: boolean; in
         sourceHint.value = '此内容包含复杂结构，请先应用，再继续编辑。'
         return false
       }
+      const first = result.session.original.firstChild
+      result.session.original.forEach((node) => {
+        if (first && (node.type !== first.type || (node.type.name === 'heading' && node.attrs.level !== first.attrs.level))) separateLiveBlock = true
+      })
     }
     let normalizingImage = false
     if (!props.privateDocument) result.session.original.descendants((node) => {
       if (node.type.name === 'image' && /^(?:data:image\/|blob:)/i.test(String(node.attrs.src))) normalizingImage = true
     })
     // Asset conversion runs asynchronously after this transaction; finish its source session first.
-    const close = options.close || normalizingImage
+    const close = options.close || normalizingImage || separateLiveBlock
     const sourceFocused = Boolean(document.activeElement?.closest('[data-block-source-editor]'))
     const outside = current.state.selection.from < session.from || current.state.selection.to > session.to
-    const node = result.session.original.childCount === 1 ? result.session.original.firstChild : null
-    const map = node && buildInlineSourceMap(node, sourceValue.value, current.markdown.instance)
     const caret = blockSourceEditor.value?.getSelection()
-    if (map && caret && ((close && !options.preserveSelection) || options.instantInput)) {
-      const from = result.session.from + 1 + map.toDocument(caret.from)
-      const to = result.session.from + 1 + map.toDocument(caret.to)
-      result.transaction.setSelection(TextSelection.create(result.transaction.doc, from, to))
+    const sourceSelection = caret && documentSelectionForSource(current, result.session, sourceValue.value, caret)
+    if (sourceSelection && ((close && !options.preserveSelection) || options.instantInput)) {
+      result.transaction.setSelection(TextSelection.create(result.transaction.doc, sourceSelection.from, sourceSelection.to))
     } else if (close && !options.preserveSelection) result.transaction.setSelection(Selection.near(result.transaction.doc.resolve(Math.max(0, result.session.to - 1))))
     else if (outside) result.transaction.setSelection(current.state.selection.getBookmark().map(result.transaction.mapping).resolve(result.transaction.doc))
     applyingSource = true
@@ -1525,6 +1528,7 @@ function flushSource(options: { close?: boolean; preserveSelection?: boolean; in
     if (close) {
       closeBlockSource()
       if (sourceFocused) current.view.focus()
+      if (separateLiveBlock) requestAutoSource()
     }
     return true
   } catch (error) {
@@ -1538,6 +1542,43 @@ function hasUnsupportedSourceSyntax(value: unknown): boolean {
   const item = value as Record<string, unknown>
   if (item.type === 'html' || item.type === 'def') return true
   return Object.values(item).some(hasUnsupportedSourceSyntax)
+}
+
+function documentSelectionForSource(current: Editor, session: BlockSourceSession, markdown: string, selection: { from: number; to: number }) {
+  if (!current.markdown) return null
+  const single = session.original.childCount === 1 && session.original.firstChild
+  const singleMap = single && buildInlineSourceMap(single, markdown, current.markdown.instance)
+  if (singleMap) return {
+    from: session.from + 1 + singleMap.toDocument(selection.from),
+    to: session.from + 1 + singleMap.toDocument(selection.to),
+  }
+  const nodes: Array<{ node: ProseMirrorNode; offset: number }> = []
+  let trailingEmptyPosition: number | null = null
+  session.original.forEach((node, offset) => {
+    if (node.type.name !== 'paragraph' || node.content.size) {
+      nodes.push({ node, offset })
+      trailingEmptyPosition = null
+    } else trailingEmptyPosition = session.from + offset + 1
+  })
+  let sourceOffset = 0
+  let nodeIndex = 0
+  const ranges: Array<{ from: number; to: number; documentOffset: number; map: NonNullable<ReturnType<typeof buildInlineSourceMap>> }> = []
+  for (const token of current.markdown.instance.lexer(markdown)) {
+    const start = sourceOffset
+    sourceOffset += token.raw.length
+    if (token.type === 'space') continue
+    const item = nodes[nodeIndex++]
+    const map = item && buildInlineSourceMap(item.node, token.raw, current.markdown.instance)
+    if (!item || !map) return null
+    ranges.push({ from: start, to: sourceOffset, documentOffset: session.from + item.offset + 1, map })
+  }
+  if (!ranges.length || nodeIndex !== nodes.length) return null
+  const position = (offset: number) => {
+    if (trailingEmptyPosition !== null && offset > markdown.trimEnd().length) return trailingEmptyPosition
+    const range = ranges.find((range) => offset <= range.to) ?? ranges.at(-1)!
+    return range.documentOffset + range.map.toDocument(offset - range.from)
+  }
+  return { from: position(selection.from), to: position(selection.to) }
 }
 
 function applySourceAndClose() {
@@ -1578,19 +1619,21 @@ function onRichMouseUp(event: MouseEvent) {
   const current = editor.value
   if (event.button !== 0 || !current || !(target instanceof Node) || !current.view.dom.contains(target)) return
   if (target instanceof Element && target.closest('[data-block-source-editor]')) return
-  if (props.liveMarkdown && (current.state.selection instanceof TextSelection || current.state.selection instanceof AllSelection)) {
-    const selection = current.view.dom.ownerDocument.getSelection()
-    if (selection?.anchorNode && selection.focusNode && current.view.dom.contains(selection.anchorNode) && current.view.dom.contains(selection.focusNode)) {
-      // A first mouse click can update DOM selection before PM's selectionchange handler runs.
-      try {
-        const anchor = current.view.posAtDOM(selection.anchorNode, selection.anchorOffset)
-        const head = current.view.posAtDOM(selection.focusNode, selection.focusOffset)
-        current.view.dispatch(current.state.tr.setSelection(TextSelection.between(current.state.doc.resolve(anchor), current.state.doc.resolve(head))))
-      } catch { return }
-    }
-  }
+  if (props.liveMarkdown) syncRichDOMSelection(current)
   suppressAutoSource = false
   requestAutoSource()
+}
+
+function syncRichDOMSelection(current: Editor) {
+  if (!(current.state.selection instanceof TextSelection || current.state.selection instanceof AllSelection)) return
+  const selection = current.view.dom.ownerDocument.getSelection()
+  if (!selection?.anchorNode || !selection.focusNode || !current.view.dom.contains(selection.anchorNode) || !current.view.dom.contains(selection.focusNode)) return
+  // Native selection can change before PM's asynchronous selectionchange handler.
+  try {
+    const anchor = current.view.posAtDOM(selection.anchorNode, selection.anchorOffset)
+    const head = current.view.posAtDOM(selection.focusNode, selection.focusOffset)
+    current.view.dispatch(current.state.tr.setSelection(TextSelection.between(current.state.doc.resolve(anchor), current.state.doc.resolve(head))))
+  } catch { /* Node views can contain DOM positions with no editable text position. */ }
 }
 
 function onSourceCompositionChange(composing: boolean) {
@@ -1740,7 +1783,9 @@ const contextItems = computed<EditorMenuItem[]>(() => {
     return current.can().toggleCodeBlock()
   }
   const paragraph = slashCommands.filter((command) => paragraphIds.includes(command.id)).map((command) => ({ id: `command:${command.id}`, label: command.label, active: activeCommand(command.id), disabled: !canCommand(command.id) }))
-  const insert = availableCommands.value.filter((command) => !paragraphIds.includes(command.id) && command.id !== 'expand-child').map((command) => ({ id: `command:${command.id}`, label: command.label }))
+  const insert = availableCommands.value.filter((command) => !paragraphIds.includes(command.id) && !['expand-child', 'table'].includes(command.id)).map((command) => ({ id: `command:${command.id}`, label: command.label }))
+  const table: EditorMenuItem[] = [{ id: 'command:table', label: '插入表格', disabled: !current.can().insertTable({ rows: 3, cols: 3, withHeaderRow: true }) }]
+  if (current.isActive('table')) table.push(...tableContextCommands.map((command) => ({ id: `table:${command.id}`, label: command.label, disabled: !command.can(current) })))
   const items: EditorMenuItem[] = [
     { id: 'undo', label: '撤销', shortcut: 'Ctrl/Cmd+Z', disabled: !current.can().undo() },
     { id: 'redo', label: '重做', shortcut: 'Ctrl/Cmd+Shift+Z', disabled: !current.can().redo() },
@@ -1751,12 +1796,12 @@ const contextItems = computed<EditorMenuItem[]>(() => {
     { id: 'select-all', label: '全选', shortcut: 'Ctrl/Cmd+A' },
     { id: 'separator-block', label: '', separator: true },
     { id: 'paragraph', label: '段落', children: paragraph },
+    { id: 'table', label: '表格', children: table },
     { id: 'insert', label: '插入', children: insert },
     { id: 'edit-link', label: current.isActive('link') ? '编辑链接' : '添加链接' },
   ]
   if (props.enableBlockSource) items.push({ id: 'block-source', label: '编辑此块源码', shortcut: 'Ctrl/Cmd+Alt+M' })
   if (current.isActive('link')) items.push({ id: 'copy-link', label: '复制链接地址' }, { id: 'remove-link', label: '取消链接' })
-  if (current.isActive('table')) items.push({ id: 'table', label: '表格', children: tableContextCommands.map((command) => ({ id: `table:${command.id}`, label: command.label, disabled: !command.can(current) })) })
   if (menu.canExpand || menu.canDiscuss) items.push({ id: 'separator-page', label: '', separator: true })
   if (menu.canExpand) items.push({ id: 'expand', label: '展开为子页面' })
   if (menu.canDiscuss) items.push({ id: 'objection', label: '提出异议' }, { id: 'correction', label: '提出修正' }, { id: 'support', label: '表示支持' })
@@ -1782,14 +1827,21 @@ function onEditorContextMenu(event: MouseEvent | KeyboardEvent) {
   const target = event.target
   if (!current?.isEditable || !(target instanceof Node) || (!current.view.dom.contains(target) && target !== event.currentTarget)) return
   const element = target instanceof Element ? target : target.parentElement
-  if (element?.closest('[data-block-source-editor]')) return
-  if (element?.closest('input, textarea, button')) return
+  const inlineSource = Boolean(sourceInstant.value && element?.closest('[data-block-source-editor] textarea'))
+  if (element?.closest('[data-block-source-editor]') && !inlineSource) return
+  if (element?.closest('input, textarea, button') && !inlineSource) return
   event.preventDefault()
   const keyboard = event instanceof KeyboardEvent || (event.clientX === 0 && event.clientY === 0)
-  if (!keyboard && event instanceof MouseEvent) {
+  if (inlineSource) {
+    const selection = sourceContextSelection ?? blockSourceEditor.value?.getSelection()
+    sourceContextSelection = null
+    if (!sourceSession.value || !selection || !documentSelectionForSource(current, sourceSession.value, sourceValue.value, selection)) return
+    blockSourceEditor.value?.focusAt(selection.from, selection.to)
+    if (!flushSource({ close: true })) return
+  } else if (current.state.selection.empty || current.view.dom.ownerDocument.getSelection()?.isCollapsed === false) syncRichDOMSelection(current)
+  if (!inlineSource && !keyboard && event instanceof MouseEvent) {
     const hit = current.view.posAtCoords({ left: event.clientX, top: event.clientY })
-    const { from, to, empty } = current.state.selection
-    if (hit && (empty || hit.pos < from || hit.pos > to)) {
+    if (hit && current.state.selection.empty) {
       current.view.dispatch(current.state.tr.setSelection(Selection.near(current.state.doc.resolve(hit.pos))))
     }
   }
@@ -1797,8 +1849,20 @@ function onEditorContextMenu(event: MouseEvent | KeyboardEvent) {
   closeSlashMenu()
   closePagePicker()
   closeLinkSourcePicker()
+  current.view.focus()
   const coords = event instanceof MouseEvent && !keyboard ? { left: event.clientX, bottom: event.clientY } : current.view.coordsAtPos(current.state.selection.from)
   contextMenu.value = { x: coords.left, y: coords.bottom, ...selectionForMenu(current) }
+}
+
+function onContextPointerDown(event: PointerEvent) {
+  const current = editor.value
+  const target = event.target
+  if (event.button !== 2 || !current || !(target instanceof Element) || !current.view.dom.contains(target)) return
+  sourceContextSelection = sourceInstant.value && target.closest('[data-block-source-editor] textarea')
+    ? blockSourceEditor.value?.getSelection() ?? null : null
+  if (target.closest('[data-block-source-editor]')) return
+  // Right mousedown can collapse native selection before contextmenu is delivered.
+  syncRichDOMSelection(current)
 }
 
 function closeContextMenu(restoreFocus = false) {
@@ -2099,7 +2163,7 @@ defineExpose({ undo, redo, findText, focusBlank: focusNextWritingLine, flushSour
 </script>
 
 <template>
-  <div class="tiptap-editor" v-if="editor" @click="handleSurfaceClick" @paste.capture="onPasteCapture" @contextmenu="onEditorContextMenu">
+  <div class="tiptap-editor" v-if="editor" @click="handleSurfaceClick" @paste.capture="onPasteCapture" @pointerdown.capture="onContextPointerDown" @contextmenu="onEditorContextMenu">
     <slot name="meta"></slot>
     <div v-if="showPagePicker" class="page-picker" :style="floatingMenuStyle">
       <input v-if="pagePickerMode === 'slash'" v-model="pageQuery" autofocus placeholder="搜索并关联页面…" />

@@ -259,6 +259,7 @@ test('uses opt-in live source only for paragraphs and headings and commits when 
   await page.getByRole('button', { name: '即时源码', exact: true }).click()
   await page.locator('.tiptap > p').first().click()
   await expect(sourceInput(page)).toHaveValue('普通 **段落**。')
+  await expect(sourceRegion(page).getByRole('button')).toHaveCount(0)
   await expect(sourceRegion(page).getByRole('button', { name: '取消', exact: true })).toHaveCount(0)
   await sourceInput(page).fill('即时修改的 **段落**。')
   await page.locator('.tiptap h2').click()
@@ -322,7 +323,7 @@ test('keeps exact caret positions inside formatted Chinese and link labels while
       return { start: input.selectionStart, end: input.selectionEnd, focused: document.activeElement === input }
     })).toEqual({ start: sourcePosition + 1, end: sourcePosition + 1, focused: true })
     expect(await editorMarkdown(page)).toContain(updatedText)
-    await sourceRegion(page).getByRole('button', { name: '完成', exact: true }).click()
+    await source.press('Escape')
     await expect(sourceRegion(page)).toBeHidden()
     const selection = await page.locator('.tiptap').evaluate((element, target) => {
       const editor = (element as HTMLElement & { editor: import('@tiptap/core').Editor }).editor
@@ -363,7 +364,7 @@ test('does not publish live-source composition until the completed Chinese input
   expect(await source.evaluate((element) => document.activeElement === element)).toBe(true)
   await page.clock.runFor(1200)
   expect(await storedMarkdown(page)).toContain('完整的中文输入。')
-  await expect(sourceRegion(page).getByRole('button', { name: '完成', exact: true })).toBeVisible()
+  await expect(sourceRegion(page).getByRole('button')).toHaveCount(0)
 })
 
 test('keeps multi-paragraph live input open across Enter and falls back to explicit editing for a list', async ({ page }) => {
@@ -377,11 +378,11 @@ test('keeps multi-paragraph live input open across Enter and falls back to expli
   await source.press('Enter')
   await page.keyboard.insertText('第二段中文。')
   await expect(source).toHaveValue('第一段 **保留格式**。\n\n第二段中文。')
-  await expect(sourceRegion(page).getByRole('button', { name: '完成', exact: true })).toBeVisible()
+  await expect(sourceRegion(page).getByRole('button')).toHaveCount(0)
   await expect(sourceRegion(page).getByRole('button', { name: '取消', exact: true })).toHaveCount(0)
   expect(await source.evaluate((element) => document.activeElement === element)).toBe(true)
   expect(await editorMarkdown(page)).toContain('第一段 **保留格式**。\n\n第二段中文。\n\n原来的结尾。')
-  await sourceRegion(page).getByRole('button', { name: '完成', exact: true }).click()
+  await source.press('Escape')
   await expect(sourceRegion(page)).toBeHidden()
   await expect(page.locator('.tiptap > p')).toHaveCount(3)
   await expect.poll(() => storedMarkdown(page)).toContain('第二段中文。')
@@ -398,6 +399,33 @@ test('keeps multi-paragraph live input open across Enter and falls back to expli
   await expect(sourceRegion(page)).toBeHidden()
   await expect(page.locator('.tiptap > ul > li')).toHaveText('成为列表')
   await expect(page.locator('.tiptap > p').last()).toHaveText('原来的结尾。')
+})
+
+test('continues a heading in a new paragraph with body typography and the correct live-source caret', async ({ page }) => {
+  await setEditorMarkdown(page, '## 换段前的标题\n\n后方保留段落。')
+  const bodyStyle = await page.locator('.tiptap > p').last().evaluate((element) => {
+    const style = getComputedStyle(element)
+    return { fontSize: style.fontSize, fontWeight: style.fontWeight, lineHeight: style.lineHeight }
+  })
+  await page.getByRole('button', { name: '即时源码', exact: true }).click()
+  await focusRichText(page, '换段前的标题', '换段前的标题'.length)
+  await expect(sourceInput(page)).toHaveValue('## 换段前的标题')
+  await sourceInput(page).press('End')
+  await sourceInput(page).press('Enter')
+  await sourceInput(page).press('Enter')
+  await page.keyboard.insertText('新的正文段落。')
+  await expect(sourceInput(page)).toHaveValue('新的正文段落。')
+  expect(await sourceInput(page).evaluate((element) => {
+    const style = getComputedStyle(element)
+    return { fontSize: style.fontSize, fontWeight: style.fontWeight, lineHeight: style.lineHeight }
+  })).toEqual(bodyStyle)
+  await page.keyboard.insertText('继续输入。')
+  await expect(sourceInput(page)).toHaveValue('新的正文段落。继续输入。')
+  await sourceInput(page).press('Escape')
+  await expect(page.locator('.tiptap h2')).toHaveText('换段前的标题')
+  await expect(page.locator('.tiptap > p').first()).toHaveText('新的正文段落。继续输入。')
+  await expect(page.locator('.tiptap > p').last()).toHaveText('后方保留段落。')
+  await expect.poll(() => storedMarkdown(page)).toContain('## 换段前的标题\n\n新的正文段落。继续输入。\n\n后方保留段落。')
 })
 
 test('remembers the workspace live-source preference across reloads and leaves long selections in rich text', async ({ page }) => {
