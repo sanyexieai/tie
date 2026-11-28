@@ -2,6 +2,13 @@
 
 All notable changes to Tie are documented in this file.
 
+## [1.0.70] - 2026-11-28
+
+- 设置弹窗不再自动扫描本地 CLI 或刷新 MCP 状态，仅在展开「Agent 知识库」配置后按需检测，减少每次重开设置时的卡顿。
+- 本地 MCP 状态与 CLI 查找移到后台线程，探测子进程增加超时；取消重复扫描，并排除正在运行的 Tie 桌面程序。
+- 更新清单检查为每个更新源设置请求超时，响应正文停滞也会中止并尝试备用源，避免无限等待。
+- 关闭并重新打开设置后保留「检查中」状态，防止重复发起检查；MCP 检测等待期间显示进度提示。
+
 ## [1.0.69] - 2026-11-28
 
 - 点击富文本或 Markdown 源码正文时，左侧页面树自动展开当前页的祖先、选中并滚动定位到对应页面，保持正文编辑焦点。
@@ -329,7 +336,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.69...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.70...HEAD
+[1.0.70]: https://github.com/sanyexieai/tie/releases/tag/v1.0.70
 [1.0.69]: https://github.com/sanyexieai/tie/releases/tag/v1.0.69
 [1.0.68]: https://github.com/sanyexieai/tie/releases/tag/v1.0.68
 [1.0.67]: https://github.com/sanyexieai/tie/releases/tag/v1.0.67

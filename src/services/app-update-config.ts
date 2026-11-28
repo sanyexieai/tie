@@ -1,5 +1,7 @@
 const STORAGE_KEY = 'tie.app-update.endpoints'
 
+export const APP_UPDATE_CHECK_TIMEOUT_MS = 5_000
+
 /** PackHub 上的 Tauri latest.json（不要用 PackHub 自己的 /latest.json，格式不兼容）。 */
 export const PACKHUB_TAURI_LATEST_JSON =
   'https://3ye.co:32810/v1/tie/site/tauri-latest.json'

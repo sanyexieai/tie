@@ -1,3 +1,5 @@
+import { APP_UPDATE_CHECK_TIMEOUT_MS } from '@/services/app-update-config'
+
 export interface UpdatePlatformArtifact {
   url: string
   signature?: string
@@ -98,15 +100,18 @@ export function parseUpdateManifest(raw: unknown): UpdateManifest | null {
 
 export async function fetchUpdateManifest(
   endpoints: string[],
-  options: { platformCandidates?: readonly string[] } = {},
+  options: { platformCandidates?: readonly string[]; timeoutMs?: number } = {},
 ): Promise<UpdateManifest> {
   let lastError = '无法获取更新清单'
   const candidates = options.platformCandidates ?? []
   for (const endpoint of endpoints) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? APP_UPDATE_CHECK_TIMEOUT_MS)
     try {
       const response = await fetch(endpoint, {
         method: 'GET',
         headers: { Accept: 'application/json' },
+        signal: controller.signal,
       })
       if (!response.ok) {
         lastError = `${endpoint} 返回 HTTP ${response.status}`
@@ -123,7 +128,11 @@ export async function fetchUpdateManifest(
       }
       return manifest
     } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error)
+      lastError = controller.signal.aborted
+        ? `${endpoint} 检查更新超时，请稍后重试`
+        : error instanceof Error ? error.message : String(error)
+    } finally {
+      clearTimeout(timeout)
     }
   }
   throw new Error(lastError)

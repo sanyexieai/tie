@@ -22,7 +22,6 @@ import {
   AGENT_CLIENT_OPTIONS,
   configureAgentMcp,
   fetchAgentMcpStatus,
-  locateTieCli,
   loadCodexMcpPreference,
   saveCodexMcpPreference,
   type AgentClientId,
@@ -114,6 +113,7 @@ const aiCliScanning = ref(false)
 const aiCliClientOptions = AI_CLI_CLIENT_OPTIONS
 const codexFormOpen = ref(false)
 const agentMcpStatus = ref<AgentMcpStatus | null>(null)
+const codexScanning = ref(false)
 const initialPref = loadCodexMcpPreference()
 const codexSourceId = ref<string | null>(initialPref.sourceId)
 const selectedClients = ref<AgentClientId[]>(initialPref.clients ?? ['codex', 'cursor', 'claude'])
@@ -144,7 +144,7 @@ const mcpStatusText = computed(() => {
 })
 const agentClientOptions = AGENT_CLIENT_OPTIONS
 const appVersion = ref('—')
-const checkingAppUpdate = ref(false)
+const checkingAppUpdate = computed(() => appUpdateState.phase === 'checking')
 const updateConfigVisible = ref(false)
 const updateEndpointDraft = ref(loadUpdateEndpoints().join('\n'))
 const updateConfigNotice = ref('')
@@ -154,6 +154,7 @@ let updateTitleTapTimer: ReturnType<typeof setTimeout> | null = null
 const appUpdateSummary = computed(() => {
   const unavailableReason = appUpdaterUnavailableReason()
   if (unavailableReason) return unavailableReason
+  if (appUpdateState.phase === 'checking') return '正在检查更新…'
   if (appUpdateState.phase === 'available') {
     const mode = appUpdateState.installMode === 'auto' ? '可自动更新' : '可下载手动安装'
     return `发现新版本 ${appUpdateState.availableVersion} · ${mode}`
@@ -304,10 +305,11 @@ const codexSourceOptions = computed(() => {
 const codexStatusSummary = computed(() => {
   if (remoteMcpUrl.value) return `HTTP 直连可用 · ${remoteMcpUrl.value}`
   if (!isDesktop) return 'HTTP 直连需要后台开启 MCP'
+  if (codexScanning.value) return '正在检测本机桥接…'
   const stale = agentMcpStatus.value?.clients.find((item) => item.error)
   if (stale?.error) return stale.error
   if (tieCliPath.value) return '本地 MCP · tie mcp'
-  return '未找到 tie CLI'
+  return agentMcpStatus.value?.mcpError ?? '本机桥接 · 点击配置'
 })
 
 const anySelectedConfigured = computed(() => {
@@ -326,17 +328,17 @@ function ensureCodexSourceSelection() {
 }
 
 async function refreshCodexStatus() {
-  if (!isDesktop) return
+  if (!isDesktop || codexScanning.value) return
+  codexScanning.value = true
   try {
     agentMcpStatus.value = await fetchAgentMcpStatus()
+    tieCliPath.value = agentMcpStatus.value?.serverPath ?? null
   } catch {
     agentMcpStatus.value = null
+    tieCliPath.value = null
+  } finally {
+    codexScanning.value = false
   }
-}
-
-async function refreshLocalMcp() {
-  if (supportsAgentSkills.value) tieCliPath.value = await locateTieCli()
-  if (backend.connected) await backend.refreshMcp()
 }
 
 function toggleCodexForm() {
@@ -346,7 +348,7 @@ function toggleCodexForm() {
       ensureCodexSourceSelection()
       void refreshCodexStatus()
     }
-    void refreshLocalMcp()
+    if (backend.connected) void backend.refreshMcp()
   }
 }
 
@@ -363,6 +365,7 @@ const mcpHandoff = computed(() => {
       message: mcpStatusText.value,
     }
   }
+  if (codexScanning.value) return { prompt: '', message: '正在检测本机桥接…' }
   const source = selectedMcpSource.value
   if (!source?.path) return { prompt: '', message: '请选择一个可用的本地工作区' }
   if (!tieCliPath.value) return { prompt: '', message: '未找到 tie CLI，本机桥接暂不可用' }
@@ -709,9 +712,6 @@ function closeAiModeMenu(event: MouseEvent) {
 
 onMounted(() => {
   document.addEventListener('click', closeAiModeMenu)
-  if (supportsAgentSkills.value) ensureCodexSourceSelection()
-  void refreshCodexStatus()
-  void refreshLocalMcp()
   void refreshAppVersion()
 })
 onBeforeUnmount(() => {
@@ -961,13 +961,8 @@ async function refreshAppVersion() {
 }
 
 async function checkAppUpdate() {
-  if (!canUseAppUpdater()) return
-  checkingAppUpdate.value = true
-  try {
-    await checkForAppUpdate()
-  } finally {
-    checkingAppUpdate.value = false
-  }
+  if (!canUseAppUpdater() || checkingAppUpdate.value) return
+  await checkForAppUpdate()
 }
 
 async function installAppUpdate() {

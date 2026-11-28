@@ -28,6 +28,7 @@ vi.mock('@/services/app-update-manifest', async (original) => ({
 }))
 
 import { appUpdateState, checkForAppUpdate, downloadAndInstallAppUpdate } from './app-updater'
+import { APP_UPDATE_CHECK_TIMEOUT_MS } from './app-update-config'
 
 const platforms = {
   'linux-x86_64': { url: 'https://example.com/Tie_1.0.49_amd64.deb', signature: 'signed' },
@@ -47,6 +48,7 @@ describe('desktop update selection', () => {
   it('uses the signed updater even when PackHub has a new release, then installs and relaunches', async () => {
     await checkForAppUpdate()
     expect(mocks.check).toHaveBeenCalledOnce()
+    expect(mocks.check).toHaveBeenCalledWith({ timeout: APP_UPDATE_CHECK_TIMEOUT_MS })
     expect(mocks.manifest).not.toHaveBeenCalled()
     expect(appUpdateState.installMode).toBe('auto')
     expect(await downloadAndInstallAppUpdate()).toBe(true)

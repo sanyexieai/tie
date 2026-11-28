@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createServer, type RequestListener } from 'node:http'
+import { once } from 'node:events'
+import type { AddressInfo } from 'node:net'
 import {
   compareAppVersions,
   fetchUpdateManifest,
@@ -77,4 +80,51 @@ describe('fetchUpdateManifest', () => {
     expect(manifest.platforms['linux-x86_64']?.url).toContain('.deb')
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
+
+  it('aborts a stalled HTTP response and tries the next update source', async () => {
+    let slowResponseClosed = false
+    await withUpdateServer((request, response) => {
+      if (request.url === '/slow') {
+        response.on('close', () => { slowResponseClosed = true })
+        return
+      }
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({
+        version: '1.0.70',
+        platforms: { 'windows-x86_64': { url: 'https://example.com/tie.exe' } },
+      }))
+    }, async (baseUrl) => {
+      const manifest = await fetchUpdateManifest([`${baseUrl}/slow`, `${baseUrl}/latest.json`], {
+        platformCandidates: ['windows-x86_64'],
+        timeoutMs: 200,
+      })
+      expect(manifest.version).toBe('1.0.70')
+      expect(slowResponseClosed).toBe(true)
+    })
+  })
+
+  it('keeps the deadline active while the HTTP response body is stalled', async () => {
+    await withUpdateServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.write('{"version":')
+    }, async (baseUrl) => {
+      await expect(fetchUpdateManifest([`${baseUrl}/latest.json`], { timeoutMs: 200 }))
+        .rejects.toThrow('检查更新超时')
+    })
+  })
 })
+
+async function withUpdateServer(handler: RequestListener, run: (baseUrl: string) => Promise<void>) {
+  const server = createServer(handler)
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  try {
+    const { port } = server.address() as AddressInfo
+    await run(`http://127.0.0.1:${port}`)
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve())
+    })
+  }
+}

@@ -6,6 +6,7 @@ import { relaunch } from '@tauri-apps/plugin-process'
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener'
 import { reactive, readonly } from 'vue'
 import {
+  APP_UPDATE_CHECK_TIMEOUT_MS,
   hasCustomUpdateEndpoints,
   loadUpdateEndpoints,
 } from '@/services/app-update-config'
@@ -347,7 +348,7 @@ export async function checkForAppUpdate(options: { silent?: boolean } = {}) {
     // not short-circuit this path and silently force every update to manual.
     if (supportsAutoAppUpdate()) {
       try {
-        const update = await check()
+        const update = await check({ timeout: APP_UPDATE_CHECK_TIMEOUT_MS })
         if (update) {
           const candidates = await resolvePlatformCandidates()
           const manual = manualUpdateFromPlugin(update, candidates) ?? undefined

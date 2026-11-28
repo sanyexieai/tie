@@ -4,10 +4,12 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 use tauri::{AppHandle, Manager};
 
 const SERVER_NAME: &str = "tie";
+const MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AgentClient {
@@ -489,7 +491,9 @@ fn look_like_tie_cli_name(name: &str) -> bool {
 }
 
 fn binary_serves_mcp(path: &Path) -> bool {
-    let Ok(output) = Command::new(path).arg("--help").output() else {
+    let mut command = Command::new(path);
+    command.arg("--help");
+    let Ok(output) = crate::ai_cli::run_with_timeout(command, None, MCP_PROBE_TIMEOUT) else {
         return false;
     };
     if !output.status.success() && output.stdout.is_empty() {
@@ -562,7 +566,9 @@ fn resolve_tie_cli_binary(app: Option<&AppHandle>) -> Option<PathBuf> {
 
     // Last resort: PATH
     let which = if cfg!(windows) { "where" } else { "which" };
-    let output = Command::new(which).arg("tie").output().ok()?;
+    let mut command = Command::new(which);
+    command.arg("tie");
+    let output = crate::ai_cli::run_with_timeout(command, None, MCP_PROBE_TIMEOUT).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -572,7 +578,11 @@ fn resolve_tie_cli_binary(app: Option<&AppHandle>) -> Option<PathBuf> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(PathBuf::from)
-        .find(|path| path.is_file() && binary_serves_mcp(path))
+        .find(|path| {
+            path.is_file()
+                && running_app.as_ref().is_none_or(|exe| !same_file(path, exe))
+                && binary_serves_mcp(path)
+        })
 }
 
 fn backup_file(path: &Path) -> Result<(), String> {
@@ -1292,13 +1302,27 @@ fn configure_for_clients(
 }
 
 #[tauri::command]
-pub fn locate_tie_cli(app: AppHandle) -> Option<String> {
-    resolve_tie_cli_binary(Some(&app)).map(|path| path.to_string_lossy().into_owned())
+pub async fn locate_tie_cli(app: AppHandle) -> Option<String> {
+    run_mcp_scan(move || {
+        resolve_tie_cli_binary(Some(&app)).map(|path| path.to_string_lossy().into_owned())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[tauri::command]
-pub fn agent_mcp_status(app: AppHandle) -> Result<AgentMcpStatus, String> {
-    status_for(&app)
+pub async fn agent_mcp_status(app: AppHandle) -> Result<AgentMcpStatus, String> {
+    run_mcp_scan(move || status_for(&app)).await?
+}
+
+async fn run_mcp_scan<T: Send + 'static>(
+    scan: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    // CLI probing waits for a child process and must not run on the window thread.
+    tauri::async_runtime::spawn_blocking(scan)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1331,4 +1355,64 @@ fn chrono_like_stamp() -> String {
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     format!("{secs}")
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::{
+        os::unix::fs::PermissionsExt,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Instant,
+    };
+
+    struct CliFixture(PathBuf);
+
+    impl CliFixture {
+        fn new(script: &str) -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let directory = std::env::temp_dir().join(format!(
+                "tie-mcp-probe-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
+            ));
+            fs::create_dir_all(&directory).unwrap();
+            let executable = directory.join("tie-cli");
+            fs::write(&executable, format!("#!/bin/sh\n{script}\n")).unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            Self(directory)
+        }
+    }
+
+    impl Drop for CliFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn slow_cli_probe_keeps_the_async_executor_responsive() {
+        let fixture = CliFixture::new("sleep 0.5\nprintf '  mcp  Serve MCP\\n'");
+        let directory = fixture.0.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (responsive, result) = runtime.block_on(async {
+            let scan = tokio::spawn(run_mcp_scan(move || find_tie_cli_in_dir(&directory)));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let responsive = !scan.is_finished();
+            (responsive, scan.await.unwrap().unwrap())
+        });
+        assert!(responsive, "the CLI probe blocked the async executor");
+        assert_eq!(result, Some(fixture.0.join("tie-cli")));
+    }
+
+    #[test]
+    fn unresponsive_cli_probe_has_a_bounded_wait() {
+        let fixture = CliFixture::new("exec sleep 10");
+        let started = Instant::now();
+        assert!(!binary_serves_mcp(&fixture.0.join("tie-cli")));
+        assert!(started.elapsed() < MCP_PROBE_TIMEOUT + Duration::from_secs(3));
+    }
 }

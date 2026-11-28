@@ -596,7 +596,7 @@ fn build_prompt(input: &AiCliTagInput) -> String {
     .join("\n\n")
 }
 
-fn run_with_timeout(
+pub(crate) fn run_with_timeout(
     mut command: Command,
     stdin_data: Option<&[u8]>,
     timeout: Duration,
