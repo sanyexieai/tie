@@ -2,6 +2,13 @@
 
 All notable changes to Tie are documented in this file.
 
+## [1.0.69] - 2026-11-28
+
+- 点击富文本或 Markdown 源码正文时，左侧页面树自动展开当前页的祖先、选中并滚动定位到对应页面，保持正文编辑焦点。
+- 支持鼠标侧键后退与前进，按当前工作区和账号的页面访问记录导航；正文重复点击不增加历史，已删除或关闭的页面会跳过。
+- 返回前先保存草稿；输入法未完成或保存失败时保留当前页与历史位置，完成输入或恢复保存后可再次返回。
+- 从搜索、收藏等视图使用侧键时先返回当前原页面，再继续页面历史；在正文链接上按侧键不会误打开链接，公开阅读模式保留原有浏览器行为。
+
 ## [1.0.68] - 2026-11-27
 
 - 修复鼠标选中文字后在选区旁右键导致选区折叠、加粗等格式操作不作用于原文的问题；即时源码内的选区也可使用同一右键格式菜单。
@@ -322,7 +329,8 @@ All notable changes to Tie are documented in this file.
 - Express backend with JWT auth, workspace pages, S3 providers, and AI tag suggestions.
 - Unit tests for sync merge, attachments, transfer policy, and sync queue.
 
-[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.68...HEAD
+[Unreleased]: https://github.com/sanyexieai/tie/compare/v1.0.69...HEAD
+[1.0.69]: https://github.com/sanyexieai/tie/releases/tag/v1.0.69
 [1.0.68]: https://github.com/sanyexieai/tie/releases/tag/v1.0.68
 [1.0.67]: https://github.com/sanyexieai/tie/releases/tag/v1.0.67
 [1.0.66]: https://github.com/sanyexieai/tie/releases/tag/v1.0.66
