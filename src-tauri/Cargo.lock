@@ -5129,7 +5129,7 @@ dependencies = [
 
 [[package]]
 name = "tie"
-version = "1.0.69"
+version = "1.0.70"
 dependencies = [
  "futures-util",
  "jni 0.21.1",
