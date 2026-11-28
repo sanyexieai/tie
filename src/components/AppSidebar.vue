@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import PageTreeItem from '@/components/PageTreeItem.vue'
 import AppIcon from '@/components/AppIcon.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -8,6 +8,7 @@ import { useBackendStore } from '@/stores/backend'
 
 const store = useWorkspaceStore()
 const backend = useBackendStore()
+const sidebarRoot = ref<HTMLElement | null>(null)
 const topLevelDragOver = ref(false)
 const deleteError = ref('')
 const emit = defineEmits<{ close: []; 'open-storage-settings': [] }>()
@@ -45,6 +46,13 @@ const connectionTitle = computed(() => {
   if (store.backendSyncLastCompletedAt) details.push(`最近同步：${new Date(store.backendSyncLastCompletedAt).toLocaleString()}`)
   return details.join('\n')
 })
+
+watch(() => [store.activePageId, store.treeRevealRequest], async () => {
+  await nextTick()
+  if (!store.activePageId) return
+  sidebarRoot.value?.querySelector<HTMLElement>(`[data-page-tree-id="${CSS.escape(store.activePageId)}"]`)
+    ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+}, { flush: 'post', immediate: true })
 
 watch(() => backend.connected, (connected) => {
   if (connected) void backend.refreshWorkspaces()
@@ -99,7 +107,7 @@ async function renameWorkspace() {
 </script>
 
 <template>
-  <aside class="sidebar">
+  <aside ref="sidebarRoot" class="sidebar">
     <div class="workspace-heading">
       <AppIcon class="workspace-mark" :size="21" />
       <span>{{ store.workspace?.name ?? '加载中…' }}</span>

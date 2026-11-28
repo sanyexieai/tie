@@ -34,6 +34,7 @@ import { checkForAppUpdateOnStartup } from '@/services/app-updater'
 import { installMobileBackHandler, resetMobileBackLeaveArm, uninstallMobileBackHandler } from '@/services/mobile-back'
 import { refreshChangeOrigin } from '@/services/pheromone'
 import { initPlatform, isMobileClient, isTauriDesktop, usesMobileUi } from '@/services/platform'
+import { createPageNavigationHistory } from '@/services/navigation-history'
 
 const PANEL_WIDTHS_KEY = 'tie:panel-widths'
 const SIDEBAR_DEFAULT = 256
@@ -95,6 +96,36 @@ const mobileOnHome = computed(() => (
   && !store.showingSkillManager
   && !store.showingEncryptedDraft
 ))
+
+const visiblePageId = computed(() => {
+  if (!store.initialized || webReadMode.value || store.showingSearch || store.showingTags || store.showingGraph
+    || store.showingTrash || store.showingRecent || store.showingFavorites || store.showingSkills
+    || store.showingSkillManager || store.showingEncryptedDraft) return null
+  return store.activePage?.id ?? null
+})
+const pageNavigation = createPageNavigationHistory({
+  current: () => store.activePageId,
+  available: (id) => store.pages.some((page) => page.id === id && !page.deletedAt),
+  open: (id) => store.openPage(id),
+})
+watch([() => store.workspace?.id, encryptionAccount, visiblePageId], ([workspaceId, account, pageId], [previousWorkspace, previousAccount]) => {
+  if (workspaceId !== previousWorkspace || account !== previousAccount) pageNavigation.reset(pageId)
+  else pageNavigation.record(pageId)
+}, { immediate: true })
+
+const historyMouseEvents = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'auxclick'] as const
+function onHistoryMouseButton(event: MouseEvent) {
+  if (webReadMode.value || (event.button !== 3 && event.button !== 4)) return
+  event.preventDefault()
+  event.stopPropagation()
+  // Cancelling pointerdown suppresses compatibility mouseup; navigate once on pointerup.
+  if (event.type !== 'pointerup' || !store.initialized) return
+  if (!visiblePageId.value && store.activePageId) {
+    void store.openPage(store.activePageId)
+    return
+  }
+  void pageNavigation.move(event.button === 3 ? -1 : 1)
+}
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, Math.round(value)))
@@ -357,6 +388,7 @@ onMounted(async () => {
   window.addEventListener('keydown', onShortcut)
   window.addEventListener('tie:toggle-focus-mode', toggleFocusMode)
   window.addEventListener('tie:show-changes', showChangesPanel)
+  for (const event of historyMouseEvents) window.addEventListener(event, onHistoryMouseButton, true)
   await initPlatform()
   if (isTauriDesktop() && !isMobileClient.value) {
     unlistenOpenFiles = await listen('tie:open-files', consumeOpenFiles)
@@ -454,6 +486,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onShortcut)
   window.removeEventListener('tie:toggle-focus-mode', toggleFocusMode)
   window.removeEventListener('tie:show-changes', showChangesPanel)
+  for (const event of historyMouseEvents) window.removeEventListener(event, onHistoryMouseButton, true)
   uninstallMobileBackHandler()
   if (mobileBackHintTimer) clearTimeout(mobileBackHintTimer)
 })

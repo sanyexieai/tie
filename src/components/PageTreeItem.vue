@@ -368,6 +368,7 @@ onBeforeUnmount(() => {
         :draggable="!usesTouchReorder && !temporary"
         :data-page-tree-id="node.id"
         role="treeitem"
+        :aria-selected="node.id === activePageId"
         :aria-level="(depth ?? 0) + 1"
         :aria-expanded="hasChildren ? expanded : undefined"
         tabindex="0"

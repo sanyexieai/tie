@@ -757,6 +757,10 @@ function toggleLiveMarkdown() {
 function undo() { richEditor.value?.undo() }
 function redo() { richEditor.value?.redo() }
 
+function revealCurrentPage(event: PointerEvent) {
+  if (event.button === 0) store.revealActivePageInTree()
+}
+
 function onEditorSurfaceClick(event: MouseEvent) {
   const target = event.target
   if (!(target instanceof Element)) return
@@ -985,7 +989,7 @@ defineExpose({ saveNow })
         <footer><button @click="copyConflictDraft">复制本地草稿</button><button @click="conflictRemotePage = null">保留草稿</button><button :disabled="store.saving" @click="forceOverwriteRemote">{{ store.saving ? '覆盖中…' : `覆盖${remoteConflictLabel}版本` }}</button><button class="conflict-load-button" @click="reloadRemotePage">载入{{ remoteConflictLabel }}版本</button></footer>
       </section>
     </div>
-    <div class="editor-scroll" :inert="protectionBusy" @click="onEditorSurfaceClick">
+    <div class="editor-scroll" :inert="protectionBusy" @pointerdown.capture="revealCurrentPage" @click="onEditorSurfaceClick">
       <article ref="documentRoot" class="document" @click="onEditorSurfaceClick">
         <slot v-if="locked" name="unlock"></slot>
         <template v-else>
